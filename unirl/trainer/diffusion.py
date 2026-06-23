@@ -189,7 +189,11 @@ class DiffusionTrainer(BaseTrainer):
         # sample with the trainable weights so the first-step importance ratio is 1.
         algo_cls = get_class(str(algorithm_cfg.get("_target_", "")))
         self._uses_ema = getattr(algo_cls, "requires_ema_rollout", False)
-        algo_extra = {"backend": self.backend} if self._uses_ema else {}
+        # Inject the backend sibling for EMA algorithms (DiffusionNFT's shadow) AND for
+        # algorithms that reach the trainable model directly — FlowGRPO / FlowDPPO disable
+        # its LoRA adapter to forward the reference policy for the ``beta`` KL term.
+        needs_backend = self._uses_ema or getattr(algo_cls, "requires_backend", False)
+        algo_extra = {"backend": self.backend} if needs_backend else {}
         self.algorithm = remote_hydra(algorithm_cfg, pipeline=self.pipeline, **algo_extra)
         self.stack = remote_hydra(stack_cfg, fsdp_backend=self.backend, algorithm=self.algorithm)
 
