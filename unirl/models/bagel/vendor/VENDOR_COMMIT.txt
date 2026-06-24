@@ -22,6 +22,8 @@ Plus local compatibility edits (NOT pristine):
      modeling/qwen2/modeling_qwen2.py and modeling/bagel/qwen2_navit.py use
      getattr(config, "pad_token_id", None) to preserve transformers 4 behavior
      for BAGEL's llm_config.json, which omits pad_token_id.
+     modeling/qwen2/modeling_qwen2.py also preserves the default RoPE init path
+     because transformers 5's ROPE_INIT_FUNCTIONS no longer exposes "default".
 
 To re-vendor a newer upstream:
   1. git -C Bagel fetch && git -C Bagel checkout <new_commit>

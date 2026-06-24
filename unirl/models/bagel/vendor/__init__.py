@@ -23,7 +23,9 @@ The ONLY intended deviations from upstream are mechanical:
   ``PretrainedConfig`` no longer guarantees generation token-id attributes such as
   ``pad_token_id``. BAGEL's upstream config omitted that field and transformers 4
   exposed it as ``None``; the local edit uses ``getattr(..., None)`` to preserve
-  that behavior under transformers 5.
+  that behavior under transformers 5. Also, transformers 5's
+  ``ROPE_INIT_FUNCTIONS`` no longer exposes the ``"default"`` key, so the vendored
+  Qwen2 rotary embedding keeps a local default RoPE fallback with the same formula.
 
 Apart from those documented fixes the modeling is byte-pristine. The RL primitives
 (SDE step + log-prob, window sampler, replay) live OUTSIDE this tree in
