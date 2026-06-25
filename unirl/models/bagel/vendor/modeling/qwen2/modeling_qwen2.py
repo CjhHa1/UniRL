@@ -62,7 +62,7 @@ class Qwen2RMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
-# transformers 5 removed ROPE_INIT_FUNCTIONS["default"]; keep the 4.43.1 default formula locally:
+# transformers 5 removed ROPE_INIT_FUNCTIONS["default"]; keep default RoPE locally:
 # https://github.com/huggingface/transformers/blob/v4.43.1/src/transformers/modeling_rope_utils.py
 def _compute_default_rope_parameters(config=None, device=None, seq_len=None, **rope_kwargs):
     if config is not None:
@@ -117,7 +117,9 @@ class Qwen2RotaryEmbedding(nn.Module):
             self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS.get(self.rope_type, _compute_default_rope_parameters)
+        self.rope_init_fn = (
+            _compute_default_rope_parameters if self.rope_type == "default" else ROPE_INIT_FUNCTIONS[self.rope_type]
+        )
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
         self.register_buffer("inv_freq", inv_freq, persistent=False)

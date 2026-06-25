@@ -1,7 +1,8 @@
-"""Vendored BAGEL model code — PRISTINE official ByteDance-Seed/Bagel.
+"""Vendored BAGEL model code — official ByteDance-Seed/Bagel plus documented local fixes.
 
 Copied verbatim from ByteDance-Seed/Bagel (commit pinned in ``VENDOR_COMMIT.txt``).
-The ONLY intended deviations from upstream are mechanical:
+The intended deviations from upstream are mechanical, plus the documented
+compatibility/grad fixes below:
 
 - import roots rewritten ``modeling.`` / ``data.`` / ``inferencer`` ->
   ``unirl.models.bagel.vendor.{modeling,data,inferencer}`` (9 statements across
@@ -25,7 +26,7 @@ The ONLY intended deviations from upstream are mechanical:
   exposed it as ``None``; the local edit uses ``getattr(..., None)`` to preserve
   that behavior under transformers 5. Also, transformers 5's
   ``ROPE_INIT_FUNCTIONS`` no longer exposes the ``"default"`` key, so the vendored
-  Qwen2 rotary embedding keeps a local default RoPE fallback with the same formula.
+  Qwen2 rotary embedding keeps a local default RoPE fallback.
 - reference inferencer dtype edit in ``inferencer.py``: UniRL loads the BAGEL VAE
   in bf16 for the pipeline path, while the upstream inferencer may hand fp32
   latents directly to ``vae.decode``. The local edit mirrors
