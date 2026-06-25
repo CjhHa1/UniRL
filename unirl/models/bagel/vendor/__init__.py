@@ -26,6 +26,11 @@ The ONLY intended deviations from upstream are mechanical:
   that behavior under transformers 5. Also, transformers 5's
   ``ROPE_INIT_FUNCTIONS`` no longer exposes the ``"default"`` key, so the vendored
   Qwen2 rotary embedding keeps a local default RoPE fallback with the same formula.
+- reference inferencer dtype edit in ``inferencer.py``: UniRL loads the BAGEL VAE
+  in bf16 for the pipeline path, while the upstream inferencer may hand fp32
+  latents directly to ``vae.decode``. The local edit mirrors
+  ``BagelVAEDecodeStage`` by decoding through a temporary fp32 VAE cast, then
+  restoring the loaded dtype.
 
 Apart from those documented fixes the modeling is byte-pristine. The RL primitives
 (SDE step + log-prob, window sampler, replay) live OUTSIDE this tree in
