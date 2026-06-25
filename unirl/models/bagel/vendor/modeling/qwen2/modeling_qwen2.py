@@ -62,7 +62,8 @@ class Qwen2RMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
-# Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Qwen2
+# transformers 5 removed ROPE_INIT_FUNCTIONS["default"]; keep the 4.43.1 default formula locally:
+# https://github.com/huggingface/transformers/blob/v4.43.1/src/transformers/modeling_rope_utils.py
 def _compute_default_rope_parameters(config=None, device=None, seq_len=None, **rope_kwargs):
     if config is not None:
         base = getattr(config, "rope_theta", 10000.0)
@@ -76,6 +77,7 @@ def _compute_default_rope_parameters(config=None, device=None, seq_len=None, **r
     return inv_freq, 1.0
 
 
+# Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Qwen2
 class Qwen2RotaryEmbedding(nn.Module):
     def __init__(
         self,
