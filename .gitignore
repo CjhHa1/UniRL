@@ -67,8 +67,6 @@ logs/
 local/
 !unirl/reward/local/
 !unirl/reward/local/**
-# the force-include above re-adds bytecode caches; keep ignoring them
-unirl/reward/local/**/__pycache__/
 **/rollout_data/
 **/buffer_stats/
 *.out
@@ -104,3 +102,6 @@ settings.json
 !.cursor/rules/**
 REFACTOR_LOG.md
 uv.lock
+
+# Re-assert bytecode ignore after the force-includes above (last match wins)
+__pycache__/
