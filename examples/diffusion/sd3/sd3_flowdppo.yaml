@@ -112,11 +112,7 @@ algorithm:
   # FlowDPPO hyperparameters (v1 algorithm.algorithms.diffusion block).
   kl_mask_threshold: 1.0e-5
   add_kl_coefficient: true
-  # Reference-policy KL (Flow-DPPO eq.17): adds beta * KL(pi_theta || pi_ref), where
-  # pi_ref is the base model with the LoRA adapter disabled (an extra per-update no_grad
-  # reference replay). 0.0 disables the term entirely; try ~1e-3..4e-2 to constrain
-  # drift from the pretrained model. Requires the LoRA recipe above. This is separate
-  # from the kl_mask_threshold KL-to-old masking gate.
+  # beta: reference-policy KL coeff (Flow-DPPO eq.17), LoRA-only; 0 disables. Detail in FlowDPPO/config.yaml.
   beta: 0.0
 
 stack:
