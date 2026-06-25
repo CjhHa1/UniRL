@@ -249,15 +249,17 @@ def _reference_kl_loss(
 def _resolve_reference_model(backend: Any, *, beta: float, algo: str) -> Any:
     """Resolve the trainable model for the adapter-disabled reference replay, or None.
 
-    When ``beta > 0`` the ``beta`` KL term needs the base model to define π_ref, so a
-    ``backend`` sibling (injected by the v2 trainer when the algorithm declares
-    ``requires_backend=True``) carrying a LoRA adapter is required; this raises with an
-    actionable message otherwise. When ``beta <= 0`` the term is off and this returns
-    ``None`` (no reference replay is ever run).
+    ``beta`` must be ``>= 0`` (a negative value raises). When ``beta > 0`` the ``beta``
+    KL term needs the base model to define π_ref, so a ``backend`` sibling (injected by
+    the v2 trainer when the algorithm declares ``requires_backend=True``) carrying a
+    LoRA adapter is required; this raises with an actionable message otherwise. When
+    ``beta == 0`` the term is off and this returns ``None`` (no reference replay runs).
     """
+    if float(beta) < 0.0:
+        raise ValueError(f"{algo}: beta must be >= 0; got {beta!r}.")
+    if float(beta) == 0.0:
+        return None
     model = getattr(backend, "model", None) if backend is not None else None
-    if float(beta) <= 0.0:
-        return model
     if model is None:
         raise ValueError(
             f"{algo}: beta>0 needs the trainable model to define the reference policy, but "
