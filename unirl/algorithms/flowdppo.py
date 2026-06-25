@@ -170,15 +170,18 @@ class FlowDPPO(StageAlgorithm):
         params: Per-call params (e.g. ``SD3DiffusionParams``).
         kl_mask_threshold: KL divergence threshold for masking. Updates
             with per-sample KL below this pass without masking.
-        add_kl_coefficient: If True, normalize KL by
-            ``sigma_t = std_dev_t * sqrt(-dt)`` (flow-matching noise scale).
-            If False, use unnormalized squared error.
+        add_kl_coefficient: If True, normalize the KL-ADV **masking** score by
+            ``sigma_t = std_dev_t * sqrt(-dt)`` (flow-matching noise scale). If False,
+            use unnormalized squared error. Governs only the masking gate; the ``beta``
+            term below is always normalized.
         beta: Reference-policy KL coefficient (Flow-DPPO eq.17). ``> 0`` adds
             ``beta * KL(pi_theta || pi_ref)`` to the loss, where ``pi_ref`` is the
             base model with its LoRA adapter disabled (a per-update no_grad reference
-            replay). ``0`` (default) disables the term and skips that replay; the
-            ``beta`` penalty is separate from the ``kl_mask_threshold`` KL-to-old
-            masking gate. Requires a LoRA recipe + the injected ``backend``.
+            replay). Always the variance-normalized Gaussian KL — independent of
+            ``add_kl_coefficient``, matching FlowGRPO. ``0`` (default) disables the term
+            and skips that replay; the ``beta`` penalty is separate from the
+            ``kl_mask_threshold`` KL-to-old masking gate. Requires a LoRA recipe + the
+            injected ``backend``.
         old_logp_source: ``"rollout"`` (default) trusts the rollout engine's
             emitted ``segment.sde_logp``; ``"replay"`` uses the replayed
             log-probs. ``sde_means`` is always replayed regardless. See
@@ -356,7 +359,18 @@ class FlowDPPO(StageAlgorithm):
                 params=self.params,
                 target_steps=target_steps,
             ).to(dtype=new_means.dtype, device=new_means.device)
-            kl_ref = _reference_kl_loss(new_means, ref_means, sigma_t)
+            # The beta term is the true Gaussian KL (eq.17): always normalize by the SDE
+            # transition std, independent of add_kl_coefficient (which only governs the
+            # KL-ADV masking gate above), so it matches FlowGRPO's beta term.
+            kl_sigma_t = _transition_sigma(
+                self.stage,
+                segment=segment,
+                target_steps=target_steps,
+                eta=float(self.params.eta),
+                device=new_logp.device,
+                add_coefficient=True,
+            )
+            kl_ref = _reference_kl_loss(new_means, ref_means, kl_sigma_t)
             loss = loss + self.beta * kl_ref
             metrics["beta"] = float(self.beta)
             metrics["kl_ref_mean"] = float(kl_ref.detach().item())
