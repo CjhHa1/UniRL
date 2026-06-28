@@ -28,6 +28,8 @@ diffusion sub-request unchanged.
 from __future__ import annotations
 
 import logging
+import os
+import time
 from typing import Optional
 
 from unirl.models.types.pipeline import Pipeline
@@ -177,7 +179,11 @@ class PEPipeline(Pipeline):
         llm_req = self._build_llm_req(
             req, sample_ids=ar_shell.sample_ids, group_ids=ar_shell.parent_ids, texts=llm_texts
         )
+        profile_timing = os.environ.get("UNIRL_PROFILE_PE_TIMING", "0") == "1"
+        pe_t0 = time.perf_counter() if profile_timing else 0.0
+        llm_t0 = time.perf_counter() if profile_timing else 0.0
         llm_resp = self.llm_pipeline.generate(llm_req)
+        llm_s = time.perf_counter() - llm_t0 if profile_timing else 0.0
 
         # The rewritten prompts live on the LLM track's ``decoded`` field as a
         # single :class:`Texts`. Both Qwen3Pipeline and any future AR LLM
@@ -237,7 +243,20 @@ class PEPipeline(Pipeline):
         diff_req = self._build_diffusion_req(
             req, sample_ids=diff_shell.sample_ids, group_ids=diff_shell.parent_ids, texts=diff_texts
         )
+        diff_t0 = time.perf_counter() if profile_timing else 0.0
         diff_resp = self.diffusion_pipeline.generate(diff_req)
+        diff_s = time.perf_counter() - diff_t0 if profile_timing else 0.0
+        if profile_timing:
+            logger.info(
+                "PEPipeline timing: prompts=%d rewrites=%d images=%d llm_generate=%.3fs "
+                "diffusion_generate=%.3fs total=%.3fs",
+                len(texts.texts),
+                len(ar_shell.sample_ids),
+                len(diff_shell.sample_ids),
+                llm_s,
+                diff_s,
+                time.perf_counter() - pe_t0,
+            )
 
         diff_inner = diff_resp.tracks.get("image")
         if diff_inner is None:

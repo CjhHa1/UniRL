@@ -87,8 +87,12 @@ _STEP_PHASE_SPECS = (
     ("rollout", "generate", "generate"),
     ("rollout", "sleep", "sleep"),
     ("weight_sync", "sync", "weight_sync"),
+    ("diffusion_sync", "sync", "diffusion_weight_sync"),
+    ("ar_sync", "sync", "ar_weight_sync"),
     ("reward", "score_and_attach", "reward"),
     ("stack", "train_track", "train"),
+    ("diffusion.stack", "train_track", "diffusion_train"),
+    ("ar.stack", "train_track", "ar_train"),
 )
 
 
@@ -153,10 +157,21 @@ def _timed_call(trainer: Any, fn, phase: str):
     return _timed
 
 
+def _resolve_attr_path(obj: Any, path: str) -> Any:
+    """Resolve a dotted attribute path, returning ``None`` when any hop is absent."""
+
+    cur = obj
+    for part in path.split("."):
+        cur = getattr(cur, part, None)
+        if cur is None:
+            return None
+    return cur
+
+
 def _wrap_step_collaborators(trainer: Any) -> None:
     """Time each present collaborator method, and teach the logger to emit phases."""
     for handle_attr, method, phase in _STEP_PHASE_SPECS:
-        handle = getattr(trainer, handle_attr, None)
+        handle = _resolve_attr_path(trainer, handle_attr)
         fn = getattr(handle, method, None)
         if not callable(fn):
             continue
@@ -242,6 +257,10 @@ class UniRLWandBLogger:
         # Optimizer-step counter for the ``train/`` panel (moved here from
         # BaseTrainer so all step-axis bookkeeping lives in the logger).
         self._optimizer_step = int(optimizer_step)
+        # Last per-rollout perf payload, even when wandb is disabled. The
+        # console progress line consumes this so profiling runs can rely on
+        # run.log instead of a wandb export.
+        self._last_perf: Dict[str, float] = {}
 
         # Only enable on rank 0
         self.enabled = enabled and rank == 0
@@ -649,12 +668,19 @@ class UniRLWandBLogger:
         previews via :meth:`log_generated_media` at this same step value and
         frees them before dispatch.
         """
+        step = rollout_id + 1
+        perf: Dict[str, float] = {}
+        if step_time_s is not None:
+            perf["rollout_time_s"] = float(step_time_s)
+        if phase_times:
+            perf.update({f"{name}_time_s": float(v) for name, v in phase_times.items()})
+        self._last_perf = perf
+
         if not self.enabled or not self._initialized:
             return
         # Lazy import keeps wandb_logger importable without the training stack.
         from unirl.utils.wandb_metrics import compute_rollout_resp_metrics
 
-        step = rollout_id + 1
         rollout_metrics = compute_rollout_resp_metrics(resp=resp, trunc_len=trunc_len)
         if extra_metrics:
             rollout_metrics.update(extra_metrics)
@@ -662,11 +688,6 @@ class UniRLWandBLogger:
 
         self._log_train(results)
 
-        perf: Dict[str, float] = {}
-        if step_time_s is not None:
-            perf["rollout_time_s"] = float(step_time_s)
-        if phase_times:
-            perf.update({f"{name}_time_s": float(v) for name, v in phase_times.items()})
         if perf:
             self.log_perf(step, perf)
 
@@ -771,7 +792,9 @@ class UniRLWandBLogger:
             body = "  ".join(f"{name}[{_fmt(result)}]" for name, result in results.items())
         else:
             body = _fmt(results)
-        suffix = ("  " + " ".join(f"{k}={v}" for k, v in extra.items())) if extra else ""
+        suffix_parts = [f"{k}={v}" for k, v in extra.items()] if extra else []
+        suffix_parts.extend(self._format_perf_suffix())
+        suffix = ("  " + " ".join(suffix_parts)) if suffix_parts else ""
         log.info(
             "rollout %d/%d  reward=%.4f  %s%s",
             rollout_id + 1,
@@ -780,6 +803,32 @@ class UniRLWandBLogger:
             body,
             suffix,
         )
+
+    def _format_perf_suffix(self) -> List[str]:
+        """Compact phase timing fields for stdout logs consumed by profiling scripts."""
+
+        perf = self._last_perf
+        if not perf:
+            return []
+
+        def _fmt(name: str, label: str) -> Optional[str]:
+            value = perf.get(name)
+            if value is None:
+                return None
+            return f"{label}={float(value):.2f}s"
+
+        ordered = (
+            ("rollout_time_s", "time"),
+            ("generate_time_s", "generate"),
+            ("reward_time_s", "reward"),
+            ("train_time_s", "train"),
+            ("diffusion_train_time_s", "diff_train"),
+            ("ar_train_time_s", "ar_train"),
+            ("weight_sync_time_s", "sync"),
+            ("diffusion_weight_sync_time_s", "diff_sync"),
+            ("ar_weight_sync_time_s", "ar_sync"),
+        )
+        return [part for key, label in ordered if (part := _fmt(key, label)) is not None]
 
     def finish(self):
         """Finish wandb run."""
