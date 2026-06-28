@@ -211,6 +211,46 @@ def main() -> None:
     print(f"  Claim 1 (batched==bs1 velocity, bf16 tol): {'PASS' if ok1 else 'FAIL'}", flush=True)
     print(f"  Claim 2 (bs=1 replay deterministic ratio=1): {'PASS' if ok2 else 'FAIL'}", flush=True)
 
+    # ---- Shipped optimization: context-cache is a PURE speedup (zero behavior change) ----
+    # diffuse() is stochastic (SDE steps draw fresh noise, no generator -- by design), so
+    # comparing trajectories is meaningless. The cache's only effect is reusing the context
+    # build, so the right test is DETERMINISTIC: the cached prompt KV cache must be
+    # bit-identical to an independent fresh build, and a velocity forward (no SDE noise) on
+    # the cached vs fresh context must match exactly.
+    print("\n[cache] context-cache identity (the shipped -11% optimization):", flush=True)
+    pipe.clear_context_cache()
+    ga, ta, ia = pipe._build_contexts(PROMPT)  # cache OFF: fresh build
+    gb, tb, ib = pipe._build_contexts_cached(PROMPT)  # cache ON: build + store
+    same_obj = pipe._build_contexts_cached(PROMPT)[0] is gb  # 2nd call = cache hit (same object)
+    kv_off, kv_on = ga["past_key_values"], gb["past_key_values"]
+    kv_diff = max(
+        (kv_off.key_cache[layer].float() - kv_on.key_cache[layer].float()).abs().max().item()
+        for layer in range(kv_off.num_layers)
+        if kv_off.key_cache[layer] is not None
+    )
+    noise_c = torch.randn(seq, cdim, device=device, dtype=stage.trajectory_dtype)
+    with torch.no_grad(), stage._autocast_ctx(device):
+        gi_o, ct_o, ci_o = stage._build_generation_inputs(ga, ta, ia, image_shape, device=device)
+        v_off = stage.step.predict_velocity(
+            bagel, x_t=noise_c, t_cur=t_cur, cfg_text_scale=1.0, cfg_img_scale=1.0,
+            forward_kwargs=stage._forward_kwargs(ga, ta, ia, gi_o, ct_o, ci_o, params),
+        )
+        gi_n, ct_n, ci_n = stage._build_generation_inputs(gb, tb, ib, image_shape, device=device)
+        v_on = stage.step.predict_velocity(
+            bagel, x_t=noise_c, t_cur=t_cur, cfg_text_scale=1.0, cfg_img_scale=1.0,
+            forward_kwargs=stage._forward_kwargs(gb, tb, ib, gi_n, ct_n, ci_n, params),
+        )
+    v_diff = (v_off.float() - v_on.float()).abs().max().item()
+    ok_cache = kv_diff == 0.0 and v_diff == 0.0 and same_obj
+    print(f"  prompt-KV max|diff| (fresh vs cached) = {kv_diff:.3e}", flush=True)
+    print(f"  velocity max|diff| (same x_t, deterministic) = {v_diff:.3e}", flush=True)
+    print(f"  cache hit returns same object: {same_obj}", flush=True)
+    print(f"  -> PURE speedup, zero behavior change: {'PASS' if ok_cache else 'FAIL'}", flush=True)
+
+    if os.environ.get("FBS_BENCH", "0") != "1":
+        print("\n[bench] skipped (set FBS_BENCH=1 to time the fbs>1 speedup)", flush=True)
+        return
+
     # ---- Real measurement: rollout-generate speedup (bs=1 loop vs batched) ----
     print("\n[bench] denoise-loop wall-clock: K bs=1 forwards vs 1 batched forward "
           f"(T={params.num_inference_steps} steps)", flush=True)
