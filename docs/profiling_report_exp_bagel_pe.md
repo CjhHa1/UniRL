@@ -408,7 +408,39 @@ P=8 × N=4 × M=8 = 256 diffusion / 32 ar 样本，SD3 10 步，6 rollouts，已
 - sde1 (SDE 2→1) 预期收益可忽略（14 步去噪 forward 数不变，仅少 1 步的 logp/噪声开销；报告亦称“略微/已是最小有效配置”），本轮未单测。
 - 缓存 + 减步数可叠加：nocache/14步(182.5s) → 缓存/10步预计 ~115-120s（约 −35%），train 相位不受影响。
 
-### 10.6 阶段结论
+### 10.6 fbs>1 批处理原型与实测（ratio=1 数值校验）
+
+报告把 fbs>1 列为最大 P0（预期 rollout 2-4x）。本次做了**适配层原型**（不改 vendored 代码）+ ratio=1 数值校验 + 实测。
+脚本 `scripts/profiling/validate_fbs_batched.py`。
+
+**原型**: BAGEL navit 打包本就支持多样本（`prepare_vae_latent` 按 `image_sizes` 循环；注意力是
+`flash_attn_varlen` 按 `cu_seqlens` 分块）。原型把 K 个同 prompt 兄弟样本拼进 1 次 `_forward_flow`：沿 seq 维
+拼接 K 份 prompt KV cache + 构建 K-样本打包输入 + 按样本切分 per-sample logp。cfg=1（PickScore recipe）走
+No-CFG 路径，跳过仅支持 bs=1 的全局 norm（`bagel.py:892`），因此可安全批处理。
+
+**ratio=1 数值校验**（单卡，屏蔽占位脚本）:
+- 校验1（前向正确性）: 批处理 per-sample 速度 vs bs=1，rel_l2 ≈ 1e-4（仅 bf16 GEMM 舍入）；跨样本
+  rel_l2 ≈ 1.10 → 样本间**块对角隔离、无串扰**。✅
+- 校验2（ratio=1 保持）: bs=1 replay 确定性 `max|ratio-1|=0`，replay 与存储 rollout logp 完全一致。✅
+  注意：批处理的 bf16 ≠ bs=1 的 bf16，故批处理 rollout **必须配 `old_logp_source=replay`**（同 SD3），让
+  pi_old 锚点在 bs=1 train 几何上重算 → ratio=1 by construction。
+
+**实测**（denoise 14 步，bs=1 跑 K 次前向 vs 1 次批处理前向）:
+
+| K | bs=1 (s) | batched (s) | speedup |
+|---:|---:|---:|---:|
+| 4 | 8.20 | 7.22 | **1.14x** |
+| 8 | 16.37 | 13.88 | **1.18x** |
+| 16 | 32.62 | 27.01 | **1.21x** |
+
+- **关键结论（修正报告）**: fbs>1 实测只有 **~1.2x**（K=16），**远低于报告预期的 2-4x**。原因正是报告 EXP3
+  自己发现的——**BAGEL 是 compute-bound**：单样本 1024-token 的 7B MoT 前向已基本吃满算力，批处理只把 GEMM
+  变大，边际收益小。换算到整步约 **−12%**（generate 114→~95s），与**免费的上下文缓存(−11%)同量级**，却要多日改
+  vendored KV 拼接 + per-sample logp 切分 + 切 `old_logp_source=replay` + K× 激活显存。
+- **建议**: fbs>1 多日生产化**不划算**；优先用已落地的上下文缓存(−11%) + 减步数(−20%)，免费且可叠加(~−30%)。
+  原型与校验脚本已留存，若后续上更大分辨率 / 更长 prompt（launch 占比升高、更偏 launch-bound）可重测。
+
+### 10.7 阶段结论
 
 1. **报告中的“可立即执行(P0)”绝大多数是配置开关，非缺失功能**；forward_prefetch / torch.compile /
    trajectory bf16 / root_wrap / 减少步数 / SDE steps 全部已实现，单机 NVLink 上 prefetch≈no-op、
@@ -417,7 +449,8 @@ P=8 × N=4 × M=8 = 256 diffusion / 32 ar 样本，SD3 10 步，6 rollouts，已
    BAGEL step −11.4%（generate −9.4%）**，是本次唯一新增的代码级优化（默认开，it2i 自动关）。
 3. **减少 inference steps (14→10) 干净实测 step −19.7%**（generate −27.6%），坐实报告“~30% rollout”。
 4. **PE 实测已解锁 (P1)**：瓶颈是 SD3 训练（diff_train ~60%）而非 Qwen3 改写（ar_train ~3%），修正报告推测。
-5. **最大瓶颈 fbs>1 仍是多日架构改造**（vendored KV 拼接 + per-sample logp 切分 + ratio=1 校验），本次未动。
+5. **fbs>1 已做原型 + ratio=1 校验 + 实测：仅 ~1.2x（K=16），远低于报告预期 2-4x** —— BAGEL compute-bound，
+   批处理 GEMM 边际收益小（详见 §10.6）。多日生产化不划算，优先上下文缓存 + 减步数。
 6. ⚠️ **测量陷阱**: 之前误以为 BAGEL 慢 2× 是 flash-attn；实为本机 GPU 占位脚本 `/tmp/gpu_occupy.py`
    的间歇争抢。屏蔽后 nocache=182.5s 精确复现报告 183.1s。**今后跑 benchmark 前务必先 `kill_occupy.sh`
    或确认占位脚本已让出**，否则绝对值不可信（相对 delta 受间歇污染也会有噪声）。
