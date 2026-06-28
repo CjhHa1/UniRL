@@ -43,6 +43,7 @@ this keeps ``BagelPipeline`` importable on CPU for fake-stage tests.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -97,6 +98,8 @@ class BagelPipeline(Pipeline):
         logprob_precision: str = "fp32",
         shift: float = 3.0,
         replay_mode: str = "train",
+        cache_t2i_contexts: bool = True,
+        context_cache_size: int = 32,
     ) -> None:
         super().__init__()
         self.bundle = bundle
@@ -122,6 +125,17 @@ class BagelPipeline(Pipeline):
         # FlowMatch time-shift for the σ schedule policy (read by the hosting engine
         # via build_schedule_policy → ensure_req_sigmas). Bagel uses static shift.
         self.shift = shift
+        # T2I prompt-context cache (profiling §5.3 ViT/text-encoder caching). For
+        # pure text-to-image the (gen, cfg_text, cfg_img) KV contexts are a pure
+        # function of the prompt and route entirely through the FROZEN und experts
+        # — only the gen experts carry LoRA — so a prompt's contexts are invariant
+        # across rollouts/optimizer steps. With navit bs=1 the engine sends the N
+        # identical GRPO siblings one per generate call, so without a cache the text
+        # prefill is recomputed N times per prompt. Disabled for it2i (the input
+        # image prefills through the trained gen experts → contexts go stale).
+        self._cache_t2i_contexts = bool(cache_t2i_contexts)
+        self._context_cache_size = max(1, int(context_cache_size))
+        self._t2i_context_cache: "OrderedDict[str, Tuple[Any, Any, Any]]" = OrderedDict()
 
     @classmethod
     def latent_shape(cls, *, model_config: Any, sampling_spec: Any) -> Tuple[int, ...]:
@@ -266,6 +280,31 @@ class BagelPipeline(Pipeline):
             cfg_img = inf.update_context_text(prompt, cfg_img)
         return gen, cfg_text, cfg_img
 
+    def _build_contexts_cached(self, prompt: str) -> Tuple[Any, Any, Any]:
+        """Memoized :meth:`_build_contexts` for the T2I path (image-free).
+
+        Keyed on the prompt alone — valid because the three KV contexts route
+        through the frozen und experts and carry no gradient (already reused
+        verbatim by ``replay``), so they are bit-stable across the whole run.
+        The shared context objects are read-only downstream (the navit
+        ``_forward_flow`` never writes the prompt ``past_key_values``), so the N
+        GRPO siblings can hold the same reference safely. Bounded LRU.
+        """
+        cache = self._t2i_context_cache
+        hit = cache.get(prompt)
+        if hit is not None:
+            cache.move_to_end(prompt)
+            return hit
+        ctx = self._build_contexts(prompt, image=None)
+        cache[prompt] = ctx
+        while len(cache) > self._context_cache_size:
+            cache.popitem(last=False)
+        return ctx
+
+    def clear_context_cache(self) -> None:
+        """Drop the cached T2I prompt contexts (frees their prompt KV caches)."""
+        self._t2i_context_cache.clear()
+
     @staticmethod
     def _resolve_task(req: RolloutReq) -> str:
         """Resolve the task mode: explicit ``stage_config["task"]`` wins, else infer.
@@ -332,10 +371,15 @@ class BagelPipeline(Pipeline):
         sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
         image_shape = (int(params.height), int(params.width))
 
-        contexts = [
-            self._build_contexts(prompt, image=pil_images[i] if pil_images is not None else None)
-            for i, prompt in enumerate(prompts)
-        ]
+        if task == "t2i" and self._cache_t2i_contexts and pil_images is None:
+            # Image-free path: dedup the prompt prefill across the N identical
+            # GRPO siblings (frozen und → contexts are prompt-only + run-stable).
+            contexts = [self._build_contexts_cached(prompt) for prompt in prompts]
+        else:
+            contexts = [
+                self._build_contexts(prompt, image=pil_images[i] if pil_images is not None else None)
+                for i, prompt in enumerate(prompts)
+            ]
         segment, conditions, images = self._diffuse_and_decode(
             contexts, params=params, req=req, image_shape=image_shape
         )
