@@ -43,6 +43,7 @@ this keeps ``BagelPipeline`` importable on CPU for fake-stage tests.
 
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 from contextlib import nullcontext
 from copy import deepcopy
@@ -68,6 +69,8 @@ from .vae import BagelVAEDecodeStage, bagel_latent_shape
 
 if TYPE_CHECKING:
     from .bundle import BagelBundle
+
+logger = logging.getLogger(__name__)
 
 
 def _cfg_get(cfg: Any, key: str, default: Any) -> Any:
@@ -127,15 +130,23 @@ class BagelPipeline(Pipeline):
         self.shift = shift
         # T2I prompt-context cache (profiling §5.3 ViT/text-encoder caching). For
         # pure text-to-image the (gen, cfg_text, cfg_img) KV contexts are a pure
-        # function of the prompt and route entirely through the FROZEN und experts
-        # — only the gen experts carry LoRA — so a prompt's contexts are invariant
-        # across rollouts/optimizer steps. With navit bs=1 the engine sends the N
-        # identical GRPO siblings one per generate call, so without a cache the text
-        # prefill is recomputed N times per prompt. Disabled for it2i (the input
-        # image prefills through the trained gen experts → contexts go stale).
+        # function of the prompt and route entirely through the und/shared prefill
+        # path. With navit bs=1 the engine sends the N identical GRPO siblings one
+        # per generate call, so without a cache the text prefill is recomputed N
+        # times per prompt. Correct ONLY when that prefill path is frozen (gen-only
+        # LoRA → only the *_moe_gen experts, used in the gen/denoise forward, train).
+        # ``_t2i_cache_enabled`` enforces this lazily: it auto-disables the cache if
+        # any non-gen param is trainable (else a weight update silently staleness —
+        # ``ratio`` would NOT catch it, since rollout and replay reuse the same
+        # cached conditions). it2i is excluded at the call site (its input-image
+        # prefill rides the trained gen experts).
         self._cache_t2i_contexts = bool(cache_t2i_contexts)
         self._context_cache_size = max(1, int(context_cache_size))
         self._t2i_context_cache: "OrderedDict[str, Tuple[Any, Any, Any]]" = OrderedDict()
+        # Lazily resolved (None → not yet checked) frozen-prefill invariant; see
+        # _t2i_cache_enabled. Checked on first use, after the backend has injected
+        # LoRA / set requires_grad.
+        self._und_frozen: Optional[bool] = None
 
     @classmethod
     def latent_shape(cls, *, model_config: Any, sampling_spec: Any) -> Tuple[int, ...]:
@@ -175,6 +186,8 @@ class BagelPipeline(Pipeline):
             trajectory_precision=config.trajectory_precision,
             logprob_precision=config.logprob_precision,
             shift=float(config.shift),
+            cache_t2i_contexts=getattr(config, "cache_t2i_contexts", True),
+            context_cache_size=getattr(config, "context_cache_size", 32),
         )
 
     def _autocast_ctx(self):
@@ -280,6 +293,42 @@ class BagelPipeline(Pipeline):
             cfg_img = inf.update_context_text(prompt, cfg_img)
         return gen, cfg_text, cfg_img
 
+    def _t2i_cache_enabled(self) -> bool:
+        """Whether the T2I context cache is safe to use right now.
+
+        Sharing one prompt-prefill context across the N GRPO siblings is correct
+        only if the prefill (und/shared) path is FROZEN — otherwise a weight update
+        makes cached contexts stale, and ``ratio`` would NOT catch it (rollout and
+        replay reuse the same cached conditions, so the staleness cancels). The gen
+        experts (``*_moe_gen``, used only in the gen/denoise forward, never in the
+        prompt prefill) may train. Resolved lazily once on first use — by then the
+        backend has injected LoRA / set ``requires_grad`` (the pipeline is built
+        before the backend). Fails safe: if introspection fails or any non-gen param
+        is trainable, the cache is disabled.
+        """
+        if not self._cache_t2i_contexts:
+            return False
+        if self._und_frozen is None:
+            try:
+                und_trainable = [
+                    n for n, p in self.bundle.transformer.named_parameters() if p.requires_grad and "moe_gen" not in n
+                ]
+            except Exception:  # pragma: no cover - be conservative if not introspectable
+                und_trainable = ["<introspection-failed>"]
+            self._und_frozen = not und_trainable
+            if not self._und_frozen:
+                logger.warning(
+                    "BagelPipeline: T2I context cache DISABLED — the prompt-prefill "
+                    "(und/shared) path has %d trainable param(s) (e.g. %s), so cached "
+                    "contexts could go stale. Caching is only safe with gen-only "
+                    "(*_moe_gen) LoRA; set cache_t2i_contexts=false to silence.",
+                    len(und_trainable),
+                    und_trainable[:3],
+                )
+            else:
+                logger.info("BagelPipeline: T2I context cache enabled (prompt-prefill path is frozen).")
+        return self._und_frozen
+
     def _build_contexts_cached(self, prompt: str) -> Tuple[Any, Any, Any]:
         """Memoized :meth:`_build_contexts` for the T2I path (image-free).
 
@@ -371,7 +420,7 @@ class BagelPipeline(Pipeline):
         sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
         image_shape = (int(params.height), int(params.width))
 
-        if task == "t2i" and self._cache_t2i_contexts and pil_images is None:
+        if task == "t2i" and pil_images is None and self._t2i_cache_enabled():
             # Image-free path: dedup the prompt prefill across the N identical
             # GRPO siblings (frozen und → contexts are prompt-only + run-stable).
             contexts = [self._build_contexts_cached(prompt) for prompt in prompts]
