@@ -64,6 +64,12 @@ diffusion:
     autocast_precision: bf16
     trajectory_precision: bf16
     logprob_precision: fp32
+    # Collapse the per-SDE-step replay loop into ONE batched transformer
+    # forward (all S steps stacked on the batch dim). Cuts S model forwards +
+    # S FSDP all-gathers per replay to 1; ratio stays exactly 1 (anchor +
+    # train both replay through the same batched path). Safe for the
+    # FlowSDEStrategy below (stateless / step_index-independent).
+    batch_replay_steps: false
     strategy:
       _target_: unirl.sde.kernels.FlowSDEStrategy
   backend:
