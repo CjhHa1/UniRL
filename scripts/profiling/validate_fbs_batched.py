@@ -122,9 +122,7 @@ def main() -> None:
     device = torch.device("cuda:0")
     ckpt = os.environ["BAGEL_PATH"]
     print(f"[fbs] loading BAGEL from {ckpt} (K={K}) ...", flush=True)
-    cfg = BagelPipelineConfig(
-        pretrained_model_ckpt_path=ckpt, model_precision="bf16", shift=3.0, use_lora=False
-    )
+    cfg = BagelPipelineConfig(pretrained_model_ckpt_path=ckpt, model_precision="bf16", shift=3.0, use_lora=False)
     pipe = BagelPipeline.from_config(cfg)
     stage = pipe.diffusion
     bagel = stage.model.model
@@ -136,7 +134,7 @@ def main() -> None:
     # One shared prompt context (T2I, frozen und path).
     gen, cfg_text, cfg_img = pipe._build_contexts(PROMPT)
     seq = (params.height // (bagel.latent_downsample)) * (params.width // (bagel.latent_downsample))
-    cdim = bagel.latent_channel * (bagel.latent_patch_size ** 2)
+    cdim = bagel.latent_channel * (bagel.latent_patch_size**2)
     print(f"[fbs] per-sample packed latent: seq={seq} C={cdim}; prompt kv_len={int(gen['kv_lens'][0])}", flush=True)
 
     # K per-sample initial latents (distinct noise, same prompt).
@@ -185,7 +183,12 @@ def main() -> None:
     print("\n[Claim 2] bs=1 replay determinism (ratio=1 anchor):", flush=True)
     schedule = get_sigma_schedule(params.num_inference_steps, shift=3.0, device=device)
     params_traj = BagelDiffusionParams(
-        num_inference_steps=14, cfg_text_scale=1.0, cfg_img_scale=1.0, eta=1.0, height=512, width=512,
+        num_inference_steps=14,
+        cfg_text_scale=1.0,
+        cfg_img_scale=1.0,
+        eta=1.0,
+        height=512,
+        width=512,
         sde_indices=[0, 3],
     )
     cond = pipe._build_contexts(PROMPT)
@@ -203,8 +206,11 @@ def main() -> None:
     old = seg.sde_logp.float()
     ratio_vs_rollout = torch.exp(rep1.log_probs.float() - old)
     print(f"  replay#1 vs replay#2 log_probs: max|ratio-1| = {max_ratio_dev:.3e} (expect 0)", flush=True)
-    print(f"  replay vs stored rollout logp: ratio mean={ratio_vs_rollout.mean().item():.6f} "
-          f"max|dev|={(ratio_vs_rollout - 1).abs().max().item():.3e}", flush=True)
+    print(
+        f"  replay vs stored rollout logp: ratio mean={ratio_vs_rollout.mean().item():.6f} "
+        f"max|dev|={(ratio_vs_rollout - 1).abs().max().item():.3e}",
+        flush=True,
+    )
     ok2 = max_ratio_dev < 1e-6
 
     print("\n==== RESULT ====", flush=True)
@@ -232,12 +238,20 @@ def main() -> None:
     with torch.no_grad(), stage._autocast_ctx(device):
         gi_o, ct_o, ci_o = stage._build_generation_inputs(ga, ta, ia, image_shape, device=device)
         v_off = stage.step.predict_velocity(
-            bagel, x_t=noise_c, t_cur=t_cur, cfg_text_scale=1.0, cfg_img_scale=1.0,
+            bagel,
+            x_t=noise_c,
+            t_cur=t_cur,
+            cfg_text_scale=1.0,
+            cfg_img_scale=1.0,
             forward_kwargs=stage._forward_kwargs(ga, ta, ia, gi_o, ct_o, ci_o, params),
         )
         gi_n, ct_n, ci_n = stage._build_generation_inputs(gb, tb, ib, image_shape, device=device)
         v_on = stage.step.predict_velocity(
-            bagel, x_t=noise_c, t_cur=t_cur, cfg_text_scale=1.0, cfg_img_scale=1.0,
+            bagel,
+            x_t=noise_c,
+            t_cur=t_cur,
+            cfg_text_scale=1.0,
+            cfg_img_scale=1.0,
             forward_kwargs=stage._forward_kwargs(gb, tb, ib, gi_n, ct_n, ci_n, params),
         )
     v_diff = (v_off.float() - v_on.float()).abs().max().item()
@@ -252,8 +266,11 @@ def main() -> None:
         return
 
     # ---- Real measurement: rollout-generate speedup (bs=1 loop vs batched) ----
-    print("\n[bench] denoise-loop wall-clock: K bs=1 forwards vs 1 batched forward "
-          f"(T={params.num_inference_steps} steps)", flush=True)
+    print(
+        "\n[bench] denoise-loop wall-clock: K bs=1 forwards vs 1 batched forward "
+        f"(T={params.num_inference_steps} steps)",
+        flush=True,
+    )
     import time as _time
 
     sched = get_sigma_schedule(params.num_inference_steps, shift=3.0, device=device)
@@ -270,8 +287,12 @@ def main() -> None:
                     bagel, x_t=x, t_cur=sched[i], cfg_text_scale=1.0, cfg_img_scale=1.0, forward_kwargs=fk_
                 )
                 prev, _, _ = stage.strategy.denoise(
-                    noise_pred=v.unsqueeze(0), sample=x.unsqueeze(0), sigma=sched[i], sigma_next=sched[i + 1],
-                    eta=0.0, sigma_max=smax,
+                    noise_pred=v.unsqueeze(0),
+                    sample=x.unsqueeze(0),
+                    sigma=sched[i],
+                    sigma_next=sched[i + 1],
+                    eta=0.0,
+                    sigma_max=smax,
                 )
                 x = prev.squeeze(0).to(stage.trajectory_dtype)
 
@@ -287,7 +308,12 @@ def main() -> None:
             )
             vK, xK = v.view(nK, seq, -1), x.view(nK, seq, -1)
             prev, _, _ = stage.strategy.denoise(
-                noise_pred=vK, sample=xK, sigma=sched[i], sigma_next=sched[i + 1], eta=0.0, sigma_max=smax,
+                noise_pred=vK,
+                sample=xK,
+                sigma=sched[i],
+                sigma_next=sched[i + 1],
+                eta=0.0,
+                sigma_max=smax,
             )
             x = prev.reshape(nK * seq, -1).to(stage.trajectory_dtype)
 
