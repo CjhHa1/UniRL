@@ -184,6 +184,16 @@ class FullWeightSync(Remote):
         from unirl.utils.peft_merge import merged_state_dict, raw_state_dict
 
         remap = self._name_remap
+        # Expert-parallel models: the stacked expert DTensor is sharded across the
+        # ``ep`` group (global shape [E/ep] per rank), and the receiver (SGLang)
+        # expects HF per-expert names. The raw walk would push only [E/ep] under
+        # the fused name, so route EP experts through the EP-aware walk (all-gather
+        # over ep + stacked->per-expert). Full-finetune (raw) path only: under
+        # LoRA, experts are frozen and not re-synced. No-op when EP is disabled.
+        if not self._lora_merged and getattr(self._backend.model, "_extra_parallel_param_groups", None) is not None:
+            yield from self._iter_full_tensors_ep()
+            return
+
         if self._lora_merged:
             for name, tensor in merged_state_dict(
                 self._backend.model, adapter_name=self._adapter_name, dtype=self._wire_dtype
@@ -201,6 +211,74 @@ class FullWeightSync(Remote):
             out = _apply_name_remap(name, remap)
             if out is not None:
                 yield out, tensor
+
+    def _iter_full_tensors_ep(self) -> Iterator[Tuple[str, "object"]]:
+        """EP-aware weight walk: emit HF per-expert tensors from the EP-sharded model.
+
+        For each fused expert param (``...experts.gate_up_proj`` / ``down_proj``):
+        materialize this rank's ``[E/ep, …]`` block (``_to_full_tensor`` replicates
+        over ``ep_fsdp``), **all-gather across the ``ep`` group** to reconstruct the
+        full ``[E, …]`` stack, then split it back into HF per-expert tensors
+        (``experts.{e}.gate_proj`` = ``gate_up[e][:I]``, ``up_proj`` = ``[I:2I]``,
+        ``down_proj`` = ``down[e]``) — the reverse of the load converter, the layout
+        SGLang's Qwen3-MoE ``expert_params_mapping`` consumes. Non-expert params are
+        emitted unchanged via ``_to_full_tensor``.
+
+        Runs on every train rank in lockstep (the all-gather is collective). Each
+        rank ends up with the full per-expert set and pushes it to its co-located
+        engine, exactly like the dense BROADCAST sync.
+        """
+        import torch
+        import torch.distributed as dist
+
+        from unirl.train.backend.veomni import _compat
+        from unirl.utils.peft_merge import _to_full_tensor
+
+        _compat.ensure_installed()
+        from veomni.distributed.parallel_state import get_parallel_state
+
+        ps = get_parallel_state()
+        ep_size = int(ps.ep_size) if getattr(ps, "ep_enabled", False) else 1
+        ep_group = ps.ep_group if ep_size > 1 else None
+        remap = self._name_remap
+
+        for name, param in self._backend.model.state_dict().items():
+            full = _to_full_tensor(param, self._wire_dtype)  # [E/ep,…] for experts; full otherwise
+
+            is_gate_up = name.endswith(".experts.gate_up_proj")
+            is_down = name.endswith(".experts.down_proj")
+            if (is_gate_up or is_down) and ep_size > 1:
+                local = full.contiguous()
+                gathered = [torch.empty_like(local) for _ in range(ep_size)]
+                dist.all_gather(gathered, local, group=ep_group)
+                stacked = torch.cat(gathered, dim=0)  # [E, …]  (ep rank r -> experts r*E/ep …)
+                del gathered, full, local
+            elif is_gate_up or is_down:
+                stacked = full  # ep_size==1: already the full [E,…]
+            else:
+                out = _apply_name_remap(name, remap)
+                if out is not None:
+                    yield out, full
+                continue
+
+            prefix = name.rsplit(".experts.", 1)[0]
+            num_experts = int(stacked.shape[0])
+            if is_gate_up:
+                inter = stacked.shape[1] // 2
+                for e in range(num_experts):
+                    for nm, t in (
+                        (f"{prefix}.experts.{e}.gate_proj.weight", stacked[e, :inter, :].contiguous()),
+                        (f"{prefix}.experts.{e}.up_proj.weight", stacked[e, inter:, :].contiguous()),
+                    ):
+                        out = _apply_name_remap(nm, remap)
+                        if out is not None:
+                            yield out, t
+            else:  # down_proj
+                for e in range(num_experts):
+                    out = _apply_name_remap(f"{prefix}.experts.{e}.down_proj.weight", remap)
+                    if out is not None:
+                        yield out, stacked[e].contiguous()
+            del stacked
 
     def _iter_buckets(self) -> Iterator[Tuple[List[Tuple[str, "object"]], bool]]:
         """Yield ``(bucket, is_last)`` where ``bucket`` is a list of

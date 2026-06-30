@@ -343,7 +343,11 @@ cd UniRL-pe-perf && PYTHONPATH=../VeOmni:. /root/ep_work/epvenv/bin/python -m to
    - **HF 原版 split-format MoE checkpoint**（`experts.N.gate_proj`）：✅ **已接线**——EP 加载器
      (`_build_expert_block_from_split`) 按 VeOmni `CheckpointTensorConverter` 映射在加载时逐 rank 重建融合专家块，
      无需离线合并（bit-exact 已验证）。真实 Qwen3-30B-A3B HF checkpoint 可直接喂入（仅需本地下载，sharded_load 不拉 HF repo id）。
-   - 权重同步（`TensorWeightSync`）对 EP 分片专家需 EP-aware gather；rollout 侧 EP 与 train 侧 EP 度对齐以保 on-policy。
+   - **EP-aware 权重同步**：✅ **已实现**——`FullWeightSync._iter_full_tensors_ep` 对融合专家参数先在 `ep` 组
+     `all_gather`（`[E/ep]→[E]`）再 reverse-convert 成 HF per-expert 名（`experts.{e}.gate_proj/up_proj/down_proj`，
+     = 加载 converter 的逆映射），供 SGLang 的 `expert_params_mapping` 消费；非专家参数走原路径，EP 关闭时 no-op。
+     reverse 映射已离线验证 bit-exact（24/24）；ep `all_gather` 的端到端校验见 §七.2。rollout 侧 EP 与 train 侧 EP 度需对齐以保 on-policy。
+   - 真实长跑只剩**外部依赖**：下载 Qwen3-30B-A3B 权重 + SGLang 服务 MoE（serving + `update_weights_from_tensor` 接收 per-expert）。
 
 **未验证项（如实声明）**：在随机初始化的中等 MoE（3.3B，stacked-format 真实 safetensors）上做了 step 级
 （loss/grad/ratio/显存/吞吐/真实加载/真实 GRPO 损失反传）验证并走通了**真实 `VeOmniBackend` + 真实 GRPO 训练侧**；
@@ -402,6 +406,20 @@ EP-aware clip 与 EP 专家权重加载，并把专家权重同步列为待办�
 **仍可借鉴 PR 的一点**：root 参数（wte/ln_f/lm_head）若在 FSDP forward **之外**被调用，需补 all-gather hook
 （`register_unsharded_param_hooks`）。本实现因 `Qwen3ARStage` replay 把 lm_head 跑在 root forward 内而天然回避；
 未来若加 forward 外访问 root 参数的路径则需补。
+
+### 七.2 EP-aware 权重同步（push 到 rollout 引擎）
+
+EP 分片的融合专家 DTensor 全局形状是 `[E/ep,…]`（落在 `ep_fsdp` mesh），`full_tensor()` 只还原本 rank 的 `E/ep`；
+而 SGLang Qwen3-MoE 的 `expert_params_mapping` 吃的是 HF per-expert 名。故 `FullWeightSync._iter_full_tensors_ep`：
+对融合专家参数 (1) `_to_full_tensor`→`[E/ep]` (2) 在 `ep` 组 `all_gather`→`[E]` (3) reverse-convert 成
+`experts.{e}.{gate,up,down}_proj.weight`（`gate=gate_up[e][:I]`、`up=[I:2I]`、`down=down[e]`）。非专家参数原样 emit；
+`ep_size=1` 时整条 EP 路径不触发。
+
+- **离线验证**：reverse 映射（stacked[e]→gate/up/down）bit-exact **24/24**（与 §四.4 加载 converter 互为逆）。
+- **端到端验证**（`scripts/ep_verify/unirl_ep_sync_verify.py`，真实 backend + 真实 EP walk）：emit 的全部
+  `num_layers×E×3` 个 per-expert 张量与原 checkpoint 逐位一致（详见脚本输出）。
+- 这是 push 的 EP 专属部分；真正的传输（`update_weights_from_tensor`）与 dense 同（已在 dense recipe 验证）。
+  真实 SGLang MoE serving 的接收端校验属外部依赖（需真实权重 + SGLang）。
 
 ---
 
