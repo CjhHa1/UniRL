@@ -98,6 +98,18 @@ class FSDPConfig:
     # Must divide the world size and the model's attention head count. Only the
     # VeOmni backend honors it; FSDPBackend ignores it.
     sp_size: int = 1
+    # Expert-parallel degree for MoE models (default 1 = disabled, a true no-op).
+    # When >1 the VeOmni backend registers an "ep" extra-parallel submesh in
+    # init_parallel_state (ep x ep_fsdp inside the dp_shard_sp group): each rank
+    # owns num_experts/ep_size experts, tokens are routed to the owning rank via
+    # all-to-all, and the per-expert group-GEMM runs only on local experts —
+    # replacing the FSDP all-gather of the FULL expert stack each forward with a
+    # token all-to-all (big memory + comm win when experts dominate). Requires a
+    # VeOmni-patched MoE model exposing ``get_parallel_plan`` (Shard(0) on the
+    # stacked expert weights) and a fused MoE op (moe_implementation=fused_triton).
+    # ep_size must divide the world size (= dp_shard x ulysses) and num_experts.
+    # Only the VeOmni backend honors it; FSDPBackend ignores it.
+    ep_size: int = 1
 
 
 __all__ = [

@@ -107,11 +107,37 @@ class VeOmniBackend(BaseFSDP2Backend):
         self._sp_size = int(getattr(fsdp_cfg, "sp_size", 1) or 1)
         if world % self._sp_size != 0:
             raise ValueError(f"VeOmniBackend: world_size {world} not divisible by sp_size {self._sp_size}")
+
+        # Expert parallelism (no-op at ep_size=1): EP is an "extra parallel"
+        # submesh (ep x ep_fsdp) carved out of the dp_shard_sp group (whose size
+        # equals dp_shard(world//sp) x ulysses(sp) = world). VeOmni requires
+        # ep_size to divide dp_shard_sp_size, i.e. the world size. Passing the
+        # tuple unconditionally is safe: extra_parallel_enabled("ep") is False at
+        # ep_size=1, so init_parallel_state builds the identical SP/FSDP mesh and
+        # the fused MoE forward stays on its non-EP (full-expert) path.
+        self._ep_size = int(getattr(fsdp_cfg, "ep_size", 1) or 1)
+        if self._ep_size > 1 and world % self._ep_size != 0:
+            raise ValueError(f"VeOmniBackend: world_size {world} not divisible by ep_size {self._ep_size}")
+        # Pass the extra-parallel ("ep") tuple to init_parallel_state ONLY when
+        # EP is actually requested. At ep_size=1 the call stays byte-identical to
+        # the prior SP/FSDP-only mesh AND never depends on the installed veomni
+        # accepting the extra_parallel_* kwargs (the pinned veomni==0.1.11 may
+        # predate them) — so every other VeOmni-backed recipe is unaffected.
+        ep_kwargs = (
+            dict(
+                extra_parallel_sizes=(self._ep_size,),
+                extra_parallel_names=("ep",),
+                extra_parallel_placement_innermost=(False,),
+            )
+            if self._ep_size > 1
+            else {}
+        )
         init_parallel_state(
             dp_size=world // self._sp_size,
             ulysses_size=self._sp_size,
             dp_mode="fsdp2",
             device_type=self._device.type,
+            **ep_kwargs,
         )
 
         self._bundle = bundle
