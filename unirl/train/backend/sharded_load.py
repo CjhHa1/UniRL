@@ -128,8 +128,132 @@ def load_sharded(
     common path for single-module trainables whose weights live in a dedicated
     directory (diffusion ``<ckpt>/transformer``, AR ``<ckpt>`` root).
     """
+    # Expert-parallel models shard stacked expert weights on a 2D composed mesh
+    # (``ep_fsdp x ep``); torch's rank-0-broadcast loader mis-slices that layout.
+    # Each rank reads ONLY its own expert block from the (local) safetensors via
+    # mmap'd ``get_slice`` and uses DTensor-native ``distribute_tensor`` to fill
+    # its exact local shard. Non-EP models keep the rank-0-broadcast path verbatim.
+    if hasattr(module, "_extra_parallel_param_groups"):
+        if _module_has_meta_param(module):
+            module.to_empty(device=device)
+        _load_state_dict_ep_sliced(module, weights_dir, device=device, strict=strict)
+        return
+
     state_dict = _read_safetensors_dir(weights_dir) if _current_rank() == 0 else {}
     _load_state_dict_sharded(module, state_dict, device=device, strict=strict)
+
+
+def _load_state_dict_ep_sliced(
+    module: nn.Module,
+    weights_dir: str,
+    *,
+    device: torch.device,
+    strict: bool = False,
+) -> None:
+    """Memory-optimal EP weight load: each rank reads ONLY its expert block.
+
+    The EP plan pre-slices each expert param along the expert dim, so the
+    DTensor's GLOBAL shape is already ``[E/ep, …]`` (the ``ep`` split is baked in
+    per rank, NOT a DTensor placement). The checkpoint stores the full
+    ``[E, …]``. Instead of materializing the full tensor on every rank (8x host
+    RAM) or broadcasting it from rank 0 (rank-0 full-RAM bottleneck), we
+    ``safetensors.get_slice`` the file (mmap, lazy) and index **only this ep
+    rank's contiguous ``[E/ep, …]`` byte range** — no rank ever holds the full
+    ``[E, …]`` and there is no cross-rank broadcast. ``distribute_tensor`` then
+    shards that block across the remaining ``ep_fsdp`` FSDP dim. Non-expert params
+    (global == checkpoint shape) are read whole (they are small: embed / norm /
+    lm_head) and distributed over their own mesh.
+
+    Strictly dominates the full-read and rank-0-broadcast variants on peak host
+    RAM (``E/ep`` vs full) and avoids broadcast traffic; the per-rank reads run in
+    parallel off the shared file (shared mmap page cache on one node).
+    """
+    import glob
+
+    from safetensors import safe_open
+    from torch.distributed.tensor import DTensor, distribute_tensor
+
+    from unirl.train.backend.veomni import _compat
+
+    _compat.ensure_installed()
+    from veomni.distributed.parallel_state import get_parallel_state
+
+    ps = get_parallel_state()
+    ep_size = int(ps.ep_size) if getattr(ps, "ep_enabled", False) else 1
+    ep_rank = int(ps.ep_rank) if ep_size > 1 else 0
+
+    shards = sorted(glob.glob(os.path.join(weights_dir, "*.safetensors")))
+    if not shards:
+        raise FileNotFoundError(f"EP load: no *.safetensors under {weights_dir!r}")
+    # Open each shard once (mmap; header read only) and map key -> handle.
+    handles = {s: safe_open(s, framework="pt", device="cpu") for s in shards}
+    key_to_handle = {}
+    for s, h in handles.items():
+        for k in h.keys():
+            key_to_handle[k] = h
+    ckpt_keys = set(key_to_handle)
+
+    named = dict(module.named_parameters())
+    named.update(dict(module.named_buffers()))
+
+    missing, loaded, local_elems = [], 0, 0
+    for name, dst in named.items():
+        # LoRA inserts a ``base_layer`` hop; the base checkpoint omits it.
+        ckpt_key = name
+        if ckpt_key not in ckpt_keys:
+            stem, _, leaf = name.rpartition(".")
+            cand = f"{stem.removesuffix('.base_layer')}.{leaf}" if stem.endswith(".base_layer") else name
+            ckpt_key = cand if cand in ckpt_keys else name
+        if ckpt_key not in ckpt_keys:
+            missing.append(name)
+            continue
+
+        sl = key_to_handle[ckpt_key].get_slice(ckpt_key)
+        ckpt_shape = tuple(sl.get_shape())
+        global_shape = tuple(dst.shape)
+
+        # EP-presliced dim: checkpoint is ep_size x larger on exactly one dim.
+        if ckpt_shape != global_shape and ep_size > 1:
+            idx, found = [slice(None)] * len(ckpt_shape), False
+            for d in range(len(ckpt_shape)):
+                if d < len(global_shape) and ckpt_shape[d] == global_shape[d] * ep_size:
+                    n = global_shape[d]
+                    idx[d] = slice(ep_rank * n, (ep_rank + 1) * n)  # only this rank's bytes
+                    found = True
+                    break
+            block = sl[tuple(idx)] if found else sl[:]
+        else:
+            block = sl[:]  # whole (small) tensor; global == checkpoint shape
+
+        block = block.to(device=device, dtype=dst.dtype)
+        local_elems += block.numel()
+        if isinstance(dst, DTensor):
+            sharded = distribute_tensor(block, dst.device_mesh, dst.placements)
+            with torch.no_grad():
+                dst.to_local().copy_(sharded.to_local())
+        else:
+            with torch.no_grad():
+                dst.copy_(block)
+        loaded += 1
+        del block
+
+    del handles, key_to_handle  # close mmaps
+
+    if strict and missing:
+        raise RuntimeError(f"EP load: missing {len(missing)} tensor(s) in checkpoint: {missing[:8]}")
+    if missing and _current_rank() == 0:
+        logger.info(
+            "EP load: %d tensor(s) absent from checkpoint (e.g. non-persistent buffers): %s%s",
+            len(missing),
+            missing[:6],
+            " ..." if len(missing) > 6 else "",
+        )
+    if _current_rank() == 0:
+        logger.info(
+            "EP load: loaded %d tensor(s) via get_slice+distribute_tensor (rank0 read %.0fM elems)",
+            loaded,
+            local_elems / 1e6,
+        )
 
 
 def _load_state_dict_sharded(
