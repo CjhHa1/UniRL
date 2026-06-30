@@ -191,6 +191,12 @@ else:
    只读自己那块 `[16,…]` 的字节** → `distribute_tensor(本块, 本 param 的 mesh/placements)` 按 `ep_fsdp` 再切填本地分片。
    仅当 `_extra_parallel_param_groups` 存在（EP 开启）时启用，非 EP 路径**逐字不变**。
 
+   **两种 checkpoint 格式均可直接加载（无需离线合并）**：VeOmni **stacked**（`experts.gate_up_proj`/`down_proj`）与
+   HF **原版 per-expert**（`experts.{e}.gate_proj`/`up_proj`/`down_proj`）。后者由 `_build_expert_block_from_split`
+   按 VeOmni `CheckpointTensorConverter` 的映射（`cat([gate,up],dim=0)` 后按专家堆叠，gate 在上）**只重建本 rank 的
+   `E/ep` 个专家块**（内存仍最优）。已验证 bit-exact：split 的 `experts.5.{gate,up,down}` 与 stacked 切片逐位相等；
+   真实 backend + GRPO ep4 加载 split 格式得 loss `-0.51628`，与 stacked 加载**完全一致**。
+
    **加载方案选型（已查证 + 实测，见 §七）**：相比"每 rank 读全量 + narrow"或 PR #140 的"rank0 读全量 + per-EP-group
    广播"，`get_slice` 每 rank 只读 `E/ep` 字节、**无任何 rank materialize 全量、无 broadcast**，是三者中最省内存/最快的。
    实测 3.3B 模型每 rank 读取量：full **3315M elems** → sliced **ep4 899M（−73%）/ ep8 496M（−85%）**；correctness
@@ -334,8 +340,9 @@ cd UniRL-pe-perf && PYTHONPATH=../VeOmni:. /root/ep_work/epvenv/bin/python -m to
 3. **落地到生产 RL recipe 仍需（未在本次实现，明确声明）**：
    - 把 `Qwen3MoeBundle` 接入 UniRL 的 pipeline 注册 + recipe YAML（`backend.fsdp_cfg.ep_size`、
      `block_class_names=["Qwen3MoeDecoderLayer"]`、`moe_implementation=fused_triton`），并配真实 rollout（SGLang 服务 MoE）+ reward。
-   - **HF 原版 split-format MoE checkpoint**（`experts.N.gate_proj`）需 VeOmni 的 `CheckpointTensorConverter` 合并成
-     stacked 再喂给 EP 加载器（本次用 stacked-format 权重绕过；接真实 Qwen3-30B-A3B/35B-A3B 时要补这一步）。
+   - **HF 原版 split-format MoE checkpoint**（`experts.N.gate_proj`）：✅ **已接线**——EP 加载器
+     (`_build_expert_block_from_split`) 按 VeOmni `CheckpointTensorConverter` 映射在加载时逐 rank 重建融合专家块，
+     无需离线合并（bit-exact 已验证）。真实 Qwen3-30B-A3B HF checkpoint 可直接喂入（仅需本地下载，sharded_load 不拉 HF repo id）。
    - 权重同步（`TensorWeightSync`）对 EP 分片专家需 EP-aware gather；rollout 侧 EP 与 train 侧 EP 度对齐以保 on-policy。
 
 **未验证项（如实声明）**：在随机初始化的中等 MoE（3.3B，stacked-format 真实 safetensors）上做了 step 级
