@@ -416,8 +416,9 @@ EP 分片的融合专家 DTensor 全局形状是 `[E/ep,…]`（落在 `ep_fsdp`
 `ep_size=1` 时整条 EP 路径不触发。
 
 - **离线验证**：reverse 映射（stacked[e]→gate/up/down）bit-exact **24/24**（与 §四.4 加载 converter 互为逆）。
-- **端到端验证**（`scripts/ep_verify/unirl_ep_sync_verify.py`，真实 backend + 真实 EP walk）：emit 的全部
-  `num_layers×E×3` 个 per-expert 张量与原 checkpoint 逐位一致（详见脚本输出）。
+- **端到端验证 ✅ PASS**（`scripts/ep_verify/unirl_ep_sync_verify.py`，真实 backend + 真实 EP walk，ep=4/world=4）：
+  emit `emitted_expert_keys=1536/1536`（= 8 层 × 64 专家 × 3 proj，证明 ep `all_gather` 还原了**全部**专家而非本 rank 的 `E/ep`），
+  抽样 24/24 与原 checkpoint **逐位一致**，`RESULT: PASS`。
 - 这是 push 的 EP 专属部分；真正的传输（`update_weights_from_tensor`）与 dense 同（已在 dense recipe 验证）。
   真实 SGLang MoE serving 的接收端校验属外部依赖（需真实权重 + SGLang）。
 
