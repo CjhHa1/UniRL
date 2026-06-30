@@ -8,14 +8,13 @@
 # no-op (== the SP/FSDP-only path).
 #
 # PREREQUISITES (see docs/veomni_ep_analysis_report.md §6):
-#   1. STACKED-format weights. The VeOmni Qwen3-MoE model uses stacked expert tensors
-#      (model.layers.*.mlp.experts.gate_up_proj [E,2I,H] / down_proj [E,H,I]). HF's
-#      original Qwen3-30B-A3B checkpoint stores per-expert keys (experts.N.gate_proj),
-#      so convert once with VeOmni's CheckpointTensorConverter (or save_pretrained on
-#      the VeOmni-built model with save_original_format=False) and point
-#      QWEN3_MOE_PATH at the stacked dir. The EP-aware loader
-#      (unirl.train.backend.sharded_load._load_state_dict_ep_local) then slices each
-#      rank's expert block and distribute_tensor-s it.
+#   1. A LOCAL checkpoint dir. Both layouts load directly (no offline merge): HF
+#      original per-expert (experts.N.gate_proj/up_proj/down_proj) AND VeOmni stacked
+#      (experts.gate_up_proj/down_proj). The EP-aware loader
+#      (unirl.train.backend.sharded_load._load_state_dict_ep_sliced) reconstructs each
+#      rank's fused expert block from the per-expert keys on the fly. Point
+#      QWEN3_MOE_PATH at a local download of Qwen/Qwen3-30B-A3B (HF repo IDs are not
+#      fetched here — sharded_load reads *.safetensors from a local dir).
 #   2. EP-aware weight sync. The full-weight TensorWeightSync below pushes stacked,
 #      EP-sharded experts into SGLang, which expects HF per-expert names → it needs an
 #      EP-aware gather + stacked->per-expert remap before this recipe is on-policy.

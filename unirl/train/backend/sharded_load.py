@@ -143,6 +143,56 @@ def load_sharded(
     _load_state_dict_sharded(module, state_dict, device=device, strict=strict)
 
 
+def _build_expert_block_from_split(name, dst, key_to_handle, ckpt_keys, ep_size, ep_rank, device):
+    """Reconstruct THIS ep rank's fused expert block from HF per-expert keys.
+
+    Mirrors VeOmni's ``Qwen3MoeCheckpointTensorConverter`` (per-expert HF ->
+    fused v5), but applied **only to the experts this rank owns** so memory stays
+    at ``E/ep``:
+
+        ``{prefix}.experts.{e}.gate_proj.weight`` [I,H] + ``up_proj.weight`` [I,H]
+            -> per expert ``cat([gate, up], dim=0)`` [2I,H], stacked  -> [E/ep, 2I, H]
+        ``{prefix}.experts.{e}.down_proj.weight`` [H,I]  stacked        -> [E/ep, H, I]
+
+    Returns the block tensor on ``device`` (dtype ``dst.dtype``), or ``None`` when
+    ``name`` is not a fused expert param or the per-expert keys are absent (so the
+    caller falls through to the normal missing-key handling).
+    """
+    if name.endswith(".experts.gate_up_proj"):
+        proj = "gate_up_proj"
+    elif name.endswith(".experts.down_proj"):
+        proj = "down_proj"
+    else:
+        return None
+
+    prefix = name.rsplit(".experts.", 1)[0]  # "...mlp"
+    num_local = int(tuple(dst.shape)[0])  # E/ep (the param's global dim-0)
+    start = ep_rank * num_local
+    experts = range(start, start + num_local)
+
+    def _has(e: str) -> bool:
+        return e in ckpt_keys
+
+    if proj == "down_proj":
+        keys = [f"{prefix}.experts.{e}.down_proj.weight" for e in experts]
+        if not all(_has(k) for k in keys):
+            return None
+        mats = [key_to_handle[k].get_tensor(k) for k in keys]  # each [H, I]
+        block = torch.stack(mats)  # [E/ep, H, I]
+    else:
+        gkeys = [f"{prefix}.experts.{e}.gate_proj.weight" for e in experts]
+        ukeys = [f"{prefix}.experts.{e}.up_proj.weight" for e in experts]
+        if not (all(_has(k) for k in gkeys) and all(_has(k) for k in ukeys)):
+            return None
+        per_expert = [
+            torch.cat([key_to_handle[g].get_tensor(g), key_to_handle[u].get_tensor(u)], dim=0)  # [2I, H]
+            for g, u in zip(gkeys, ukeys)
+        ]
+        block = torch.stack(per_expert)  # [E/ep, 2I, H]
+
+    return block.to(device=device, dtype=dst.dtype)
+
+
 def _load_state_dict_ep_sliced(
     module: nn.Module,
     weights_dir: str,
@@ -167,6 +217,12 @@ def _load_state_dict_ep_sliced(
     Strictly dominates the full-read and rank-0-broadcast variants on peak host
     RAM (``E/ep`` vs full) and avoids broadcast traffic; the per-rank reads run in
     parallel off the shared file (shared mmap page cache on one node).
+
+    Checkpoint formats: both VeOmni **stacked** (``experts.gate_up_proj`` /
+    ``down_proj``) and HF **original per-expert** (``experts.{e}.gate_proj`` /
+    ``up_proj`` / ``down_proj``) are accepted — the latter is reconstructed per
+    rank via :func:`_build_expert_block_from_split` (VeOmni's converter mapping),
+    so real Qwen3-MoE HF checkpoints load directly with no offline merge.
     """
     import glob
 
@@ -205,6 +261,23 @@ def _load_state_dict_ep_sliced(
             cand = f"{stem.removesuffix('.base_layer')}.{leaf}" if stem.endswith(".base_layer") else name
             ckpt_key = cand if cand in ckpt_keys else name
         if ckpt_key not in ckpt_keys:
+            # HF original (per-expert split) checkpoint: the fused expert param
+            # (``...experts.gate_up_proj`` / ``...experts.down_proj``) is absent;
+            # rebuild THIS ep rank's block from the per-expert ``experts.{e}.*``
+            # keys (VeOmni's CheckpointTensorConverter mapping, applied per rank).
+            block = _build_expert_block_from_split(name, dst, key_to_handle, ckpt_keys, ep_size, ep_rank, device)
+            if block is not None:
+                local_elems += block.numel()
+                if isinstance(dst, DTensor):
+                    sharded = distribute_tensor(block, dst.device_mesh, dst.placements)
+                    with torch.no_grad():
+                        dst.to_local().copy_(sharded.to_local())
+                else:
+                    with torch.no_grad():
+                        dst.copy_(block)
+                loaded += 1
+                del block
+                continue
             missing.append(name)
             continue
 

@@ -109,12 +109,12 @@ class Qwen3MoeBundle(Bundle):
           to ``"fused_triton"`` when the config does not carry it;
         * direct: ``from_config(pretrained_model_ckpt_path=..., tokenizer=...)``.
 
-        ``pretrained_model_ckpt_path`` must be a local dir with ``config.json``
-        and **stacked-format** ``*.safetensors`` (``experts.gate_up_proj`` /
-        ``down_proj``); the VeOmniBackend loads them after EP sharding via the
-        EP-aware loader in ``unirl.train.backend.sharded_load``. HF original
-        per-expert (``experts.N.gate_proj``) checkpoints need VeOmni's
-        ``CheckpointTensorConverter`` to be merged to stacked first.
+        ``pretrained_model_ckpt_path`` is a local dir with ``config.json`` and
+        ``*.safetensors``. Both layouts load directly (no offline merge): VeOmni
+        **stacked** (``experts.gate_up_proj`` / ``down_proj``) and HF **original
+        per-expert** (``experts.N.gate_proj`` / ``up_proj`` / ``down_proj``) — the
+        EP-aware loader (``unirl.train.backend.sharded_load``) reconstructs each
+        rank's fused expert block from the per-expert keys when needed.
         """
         if config is not None:
             pretrained_model_ckpt_path = config.pretrained_model_ckpt_path
