@@ -1,5 +1,8 @@
 """Export a UniRL training checkpoint to a Hugging Face ``save_pretrained`` folder.
 
+Accepts either flavor ``FSDPBackend.save`` writes: the legacy single-file
+``checkpoint.pt`` or a sharded ``dcp`` directory (reassembled offline on load).
+
 ``checkpoint.pt`` (see ``FSDPBackend.save``) is a raw trainer pickle: the
 trainable module's state dict with PEFT-injected names
 (``*.base_layer.weight`` / ``*.lora_A.<adapter>.weight``) plus optimizer and
@@ -36,10 +39,11 @@ Loading the SD3 result back into a pipeline:
 from __future__ import annotations
 
 import argparse
-import os
 from typing import Dict, Optional
 
 import torch
+
+from unirl.tools._checkpoint import load_training_checkpoint
 
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
@@ -142,14 +146,11 @@ def main() -> None:
     parser.add_argument("--dtype", choices=tuple(DTYPES), default="bf16")
     args = parser.parse_args()
 
-    path = args.checkpoint
-    if os.path.isdir(path):
-        path = os.path.join(path, "checkpoint.pt")
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    checkpoint = load_training_checkpoint(args.checkpoint)
     state_dict = checkpoint["policy_state_dict"]
     recorded = checkpoint.get("lora_config") or {}
     alpha = args.lora_alpha if args.lora_alpha is not None else recorded.get("alpha")
-    print(f"loaded {path}: {len(state_dict)} tensors, step={checkpoint.get('step')}, lora_alpha={alpha}")
+    print(f"loaded {args.checkpoint}: {len(state_dict)} tensors, step={checkpoint.get('step')}, lora_alpha={alpha}")
 
     dtype = DTYPES[args.dtype]
     from_pretrained_kwargs = {"torch_dtype": dtype}

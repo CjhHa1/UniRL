@@ -185,6 +185,9 @@ class BaseFSDP2Backend(Remote):
             )
         self._checkpoint_format: str = checkpoint_format
         self._checkpoint_async: bool = bool(getattr(fsdp_cfg, "checkpoint_async", False))
+        # Future from the most recent ``dcp.async_save`` (None when sync or idle).
+        # Drained before the next save and by ``wait_for_checkpoint``.
+        self._pending_save_future: Optional[object] = None
         # Checkpointed for export tooling: the LoRA fold needs scaling =
         # alpha / rank, and alpha is not derivable from the weights.
         active_lora = lora_cfg or ema_lora_cfg
@@ -403,9 +406,19 @@ class BaseFSDP2Backend(Remote):
         data and are dropped here. Non-tensor metadata (step / save_mode /
         lora_config / scheduler / optimizer_step_count) is light and rides in a
         rank-0 ``metadata.pt`` beside DCP's own ``.metadata``.
+
+        With ``checkpoint_async`` the shard write runs off the train loop's
+        critical path: ``dcp.async_save`` stages (copies) the shards in-process
+        first — so the model is safe to keep training the moment it returns —
+        then flushes to storage on a background thread. The returned future is
+        drained before the next save (below) and by :meth:`wait_for_checkpoint`
+        (the trainer calls it after the final rollout, which has no next save).
         """
         import torch.distributed.checkpoint as dcp
 
+        # Finish any in-flight async save before snapshotting fresh state: two
+        # concurrent writes would race the staging buffers and the shard files.
+        self._drain_checkpoint()
         self._reject_meta(operation="save", checkpoint_format="dcp", mode=mode)
         os.makedirs(path, exist_ok=True)
         model_sd = drop_meta_entries(sharded_model_state_dict(self.model))
@@ -415,7 +428,21 @@ class BaseFSDP2Backend(Remote):
             "model": model_sd,
             "optim": sharded_optimizer_state_dict(self.model, self.optimizer),
         }
-        dcp.save(sharded_state, checkpoint_id=path)
+        if self._checkpoint_async:
+            # async_save stages to CPU and coordinates on a CPU collective, so it
+            # needs a process group with a CPU (gloo) backend. The train PG is
+            # NCCL-only (fully_shard auto-init / backend="nccl"), which makes
+            # async_save assert "A CPU backend must be enabled for async save", so
+            # hand it a lazily-created, memoized gloo group. None when not
+            # distributed (single process) — async_save then runs no_dist.
+            pg = None
+            if dist.is_available() and dist.is_initialized():
+                from unirl.utils.distributed_utils import init_gloo_group
+
+                pg = init_gloo_group()
+            self._pending_save_future = dcp.async_save(sharded_state, checkpoint_id=path, process_group=pg)
+        else:
+            dcp.save(sharded_state, checkpoint_id=path)
 
         if _current_rank() != 0:
             return
@@ -427,7 +454,34 @@ class BaseFSDP2Backend(Remote):
         }
         if self.scheduler is not None:
             meta["scheduler_state_dict"] = self.scheduler.state_dict()
+        # metadata.pt may land before the async shards, but load() gates the DCP
+        # branch on DCP's own ``.metadata`` — which the background writer emits
+        # last — so a half-written async checkpoint is never read as complete.
         torch.save(meta, os.path.join(path, "metadata.pt"))
+
+    def _drain_checkpoint(self) -> None:
+        """Block until a pending async DCP save finishes (no-op if none).
+
+        ``dcp.async_save`` returns a future that completes when the background
+        shard write lands; resolving it re-raises any write error on the rank
+        that hit it.
+        """
+        future = self._pending_save_future
+        if future is None:
+            return
+        self._pending_save_future = None
+        future.result()
+
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def wait_for_checkpoint(self) -> None:
+        """Flush the last async DCP save (driver-callable across all workers).
+
+        With ``checkpoint_async`` the shard write runs in the background and is
+        normally drained by the next save; the trainer calls this after the
+        final rollout so the last checkpoint is durable before the workers tear
+        down. A no-op under sync save or when nothing is pending.
+        """
+        self._drain_checkpoint()
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def load(self, path: str) -> int:
@@ -442,6 +496,9 @@ class BaseFSDP2Backend(Remote):
         Adapter-mode checkpoints load non-strict — only the LoRA keys are
         present; the frozen base keeps the weights the bundle loaded.
         """
+        # Defensive: flush an in-flight async save before reading from disk
+        # (a save-then-load of the same dir in one process must see the shards).
+        self._drain_checkpoint()
         dcp_metadata_path = os.path.join(path, ".metadata")
         metadata_path = os.path.join(path, "metadata.pt")
         checkpoint_path = os.path.join(path, "checkpoint.pt")

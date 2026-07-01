@@ -323,6 +323,12 @@ class BaseTrainer:
         # wandb run instead of starting a fresh, misaligned one.
         with open(os.path.join(path, "trainer_state.json"), "w") as f:
             json.dump({"wandb_run_id": self.wandb_logger.run_id, "optimizer_step": self.wandb_logger.optimizer_step}, f)
+        # An async DCP save (checkpoint_format="dcp" + checkpoint_async) writes
+        # its shards on a background thread, normally drained by the next save.
+        # The final checkpoint has no next save, so block until it is on disk
+        # before train() returns and the workers are torn down.
+        if step >= num_rollouts:
+            self.backend.wait_for_checkpoint()
 
     def maybe_load_checkpoint(self, load_dir: Optional[str], *, num_rollouts: Optional[int] = None) -> int:
         """Restore training state from ``load_dir``; return the rollout step to resume from.
