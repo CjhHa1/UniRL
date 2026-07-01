@@ -424,4 +424,24 @@ EP 分片的融合专家 DTensor 全局形状是 `[E/ep,…]`（落在 `ep_fsdp`
 
 ---
 
-*报告生成: 2026-06-29（§七 PR#140 对比 + §4.5/4.6 GRPO/recipe 于 2026-06-30 追加）｜ UniRL `perf/pe-sd3-train-batching` ｜ VeOmni dev checkout*
+## 八、代码评审（GPT-5.5）与修复
+
+GPT-5.5 对 EP 分支做了 review，5 条发现全部认可并已修复（均在 `feat/veomni-backend-ep`）：
+
+1. **[High] RoPE 恢复用了会丢的 model-bound 闭包** → `Qwen3MoeBundle` 改为携带 picklable 的 `_meta_init_state`
+   （`_capture_rope_init_state` 从 config 算出 `inv_freq` 存为 CPU 张量，load 路径 `restore_init_state` 恢复），
+   跨 Ray actor 安全；`_stamp` 闭包保留为进程内 belt。verify：GRPO ep4 仍 `-0.51628`。
+2. **[High] recipe `tp_size:8` 与 TP=1 的 `TensorWeightSync` 冲突** → recipe 改 `tp_size:1` + 明确注释
+   （真 30B 需 TP>1 → 需 TP-aware sync / NCCLWeightSync，属外部/基建工作）。
+3. **[Med] EP sync walk 绕过 PEFT 规范化** → `_iter_full_tensors_ep` 检出 `peft_config` 时 fail-closed
+   （EP 下专家冻结无需重同步；避免把 `base_layer`/`lora_*` 键推给 SGLang）。
+4. **[Med] ep 预切维度启发式可能切错 + strict=False 静默** → 加载器改为**按名判定专家参数**再切 dim0 +
+   切后 shape 断言；非专家 shape 不符直接报错；split builder 对**部分** per-expert 键缺失 raise（全缺才回退 missing）。
+   verify：sync PASS 1536/1536、24/24 bit-exact。
+5. **[Low] `ep_size=0/负` 被吞** → backend 加 `ep_size>=1` fail-fast。
+
+修复后回归：GRPO ep4 `loss=-0.51628`/`ratio=1.0`，sync e2e PASS，lint 干净。
+
+---
+
+*报告生成: 2026-06-29（§七 PR#140 对比 + §4.5/4.6 GRPO/recipe 于 2026-06-30；§八 评审修复于 2026-07-01 追加）｜ UniRL EP 分支 `feat/veomni-backend-ep` ｜ VeOmni dev checkout*

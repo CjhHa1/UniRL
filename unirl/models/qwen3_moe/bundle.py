@@ -69,6 +69,42 @@ def _recompute_rope_buffers(model: nn.Module) -> int:
     return n
 
 
+def _capture_rope_init_state(model: nn.Module) -> dict:
+    """Compute the non-persistent RoPE ``inv_freq`` from config as a picklable
+    ``_meta_init_state`` (``{"buffers": {fqn: cpu_tensor}, "attrs": {}}``), the
+    robust bundle-carried recovery path ``load_trainable_weights`` ->
+    ``restore_init_state`` drains after the post-shard weight load.
+
+    Unlike a model-bound deferred closure (which the meta-init code documents can
+    be dropped when the bundle crosses Ray actors), these are plain CPU tensors on
+    the bundle, so the recovery survives transport. ``inv_freq`` depends only on
+    config, so it is recomputable here on the meta model (``m.config`` /
+    ``m.rope_type`` are real Python attrs; only the buffer storage is on meta).
+    ``attention_scaling`` is a plain float attribute untouched by ``to_empty``, so
+    it needs no restore.
+    """
+    try:
+        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+    except Exception:
+        return {"buffers": {}, "attrs": {}}
+    buffers: dict = {}
+    for name, m in model.named_modules():
+        if getattr(m, "inv_freq", None) is None or getattr(m, "config", None) is None:
+            continue
+        fn = ROPE_INIT_FUNCTIONS.get(getattr(m, "rope_type", "default")) or ROPE_INIT_FUNCTIONS.get("default")
+        if fn is None:
+            continue
+        try:
+            inv_freq, _scaling = fn(m.config, torch.device("cpu"))
+        except Exception:
+            continue
+        inv_freq = inv_freq.detach().cpu()
+        buffers[f"{name}.inv_freq"] = inv_freq
+        if getattr(m, "original_inv_freq", None) is not None:
+            buffers[f"{name}.original_inv_freq"] = inv_freq.clone()
+    return {"buffers": buffers, "attrs": {}}
+
+
 class Qwen3MoeBundle(Bundle):
     """VeOmni Qwen3-MoE transformer + tokenizer (meta-init, EP-capable)."""
 
@@ -150,8 +186,14 @@ class Qwen3MoeBundle(Bundle):
         # VeOmni's parallelize calls init_weights() after to_empty; no-op it (real
         # weights load right after, via the backend's EP-aware sharded load).
         transformer.init_weights = lambda: None
-        # Recompute RoPE inv_freq after materialize+load (non-persistent, absent
-        # from the checkpoint). Drained by apply_deferred_ops in VeOmniBackend.
+        # RoPE inv_freq is non-persistent (absent from the checkpoint, clobbered by
+        # to_empty). Recover it via BOTH:
+        #  * the bundle-carried _meta_init_state (ROBUST): plain CPU tensors that
+        #    survive Ray-actor transport; load_trainable_weights -> restore_init_state
+        #    copies them into the materialized buffers after the weight load.
+        #  * a stamped in-process closure (belt): drained by apply_deferred_ops for
+        #    any path that skips the bundle-carried restore. Both are idempotent.
+        rope_state = _capture_rope_init_state(transformer)
         _stamp(transformer, lambda materialized: _recompute_rope_buffers(materialized))
 
         if tokenizer is None:
@@ -172,6 +214,9 @@ class Qwen3MoeBundle(Bundle):
         # Meta-init Pattern B: backend loads stacked safetensors from this dir
         # after EP sharding.
         bundle._transformer_weights_path = pretrained_model_ckpt_path
+        # Ray-safe RoPE recovery (see _capture_rope_init_state): restored by
+        # load_trainable_weights after the weight load.
+        bundle._meta_init_state = rope_state
         return bundle
 
 

@@ -242,6 +242,21 @@ class FullWeightSync(Remote):
         ep_group = ps.ep_group if ep_size > 1 else None
         remap = self._name_remap
 
+        # This walk reads raw ``state_dict()`` keys directly (needed to reach the
+        # fused expert params for the ep all-gather); it does NOT apply the PEFT
+        # normalization that ``raw_state_dict`` does (strip ``base_model.model.`` /
+        # ``.base_layer.``, skip ``.lora_A``/``.lora_B``). So it would leak PEFT
+        # keys to the receiver. Under LoRA the experts are frozen and not re-synced
+        # anyway, so fail closed rather than emit malformed keys — EP + LoRA
+        # base-weight sync is unsupported until the walk grows PEFT normalization.
+        if hasattr(self._backend.model, "peft_config"):
+            raise NotImplementedError(
+                "EP-aware full-weight sync does not support PEFT/LoRA models "
+                "(_iter_full_tensors_ep reads raw state_dict keys). Under LoRA the "
+                "EP-sharded experts are frozen and need no re-sync; sync only the "
+                "LoRA delta, or add PEFT key normalization to the EP walk."
+            )
+
         for name, param in self._backend.model.state_dict().items():
             full = _to_full_tensor(param, self._wire_dtype)  # [E/ep,…] for experts; full otherwise
 

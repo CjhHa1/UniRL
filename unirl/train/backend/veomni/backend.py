@@ -116,6 +116,10 @@ class VeOmniBackend(BaseFSDP2Backend):
         # ep_size=1, so init_parallel_state builds the identical SP/FSDP mesh and
         # the fused MoE forward stays on its non-EP (full-expert) path.
         self._ep_size = int(getattr(fsdp_cfg, "ep_size", 1) or 1)
+        # Fail fast on a bad config value rather than silently coercing (0 -> 1,
+        # negative -> "disabled"): ep_size is a positive degree.
+        if self._ep_size < 1:
+            raise ValueError(f"VeOmniBackend: fsdp_cfg.ep_size must be >= 1, got {self._ep_size}")
         if self._ep_size > 1 and world % self._ep_size != 0:
             raise ValueError(f"VeOmniBackend: world_size {world} not divisible by ep_size {self._ep_size}")
         # Pass the extra-parallel ("ep") tuple to init_parallel_state ONLY when
