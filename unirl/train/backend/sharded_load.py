@@ -169,19 +169,29 @@ def _build_expert_block_from_split(name, dst, key_to_handle, ckpt_keys, ep_size,
     start = ep_rank * num_local
     experts = range(start, start + num_local)
 
-    def _has(e: str) -> bool:
-        return e in ckpt_keys
+    def _resolve(keys: list) -> "list | None":
+        """None if NO key present (not split format -> caller handles missing);
+        raise if SOME but not all present (corrupt/incomplete checkpoint)."""
+        present = [k for k in keys if k in ckpt_keys]
+        if not present:
+            return None
+        if len(present) != len(keys):
+            raise RuntimeError(
+                f"EP load: incomplete per-expert checkpoint for {name!r}: "
+                f"{len(present)}/{len(keys)} keys present (e.g. missing "
+                f"{next(k for k in keys if k not in ckpt_keys)!r})."
+            )
+        return keys
 
     if proj == "down_proj":
-        keys = [f"{prefix}.experts.{e}.down_proj.weight" for e in experts]
-        if not all(_has(k) for k in keys):
+        keys = _resolve([f"{prefix}.experts.{e}.down_proj.weight" for e in experts])
+        if keys is None:
             return None
-        mats = [key_to_handle[k].get_tensor(k) for k in keys]  # each [H, I]
-        block = torch.stack(mats)  # [E/ep, H, I]
+        block = torch.stack([key_to_handle[k].get_tensor(k) for k in keys])  # [E/ep, H, I]
     else:
-        gkeys = [f"{prefix}.experts.{e}.gate_proj.weight" for e in experts]
-        ukeys = [f"{prefix}.experts.{e}.up_proj.weight" for e in experts]
-        if not (all(_has(k) for k in gkeys) and all(_has(k) for k in ukeys)):
+        gkeys = _resolve([f"{prefix}.experts.{e}.gate_proj.weight" for e in experts])
+        ukeys = _resolve([f"{prefix}.experts.{e}.up_proj.weight" for e in experts])
+        if gkeys is None or ukeys is None:
             return None
         per_expert = [
             torch.cat([key_to_handle[g].get_tensor(g), key_to_handle[u].get_tensor(u)], dim=0)  # [2I, H]
@@ -189,6 +199,11 @@ def _build_expert_block_from_split(name, dst, key_to_handle, ckpt_keys, ep_size,
         ]
         block = torch.stack(per_expert)  # [E/ep, 2I, H]
 
+    if tuple(block.shape) != tuple(dst.shape):
+        raise RuntimeError(
+            f"EP load: rebuilt expert block for {name!r} has shape {tuple(block.shape)} "
+            f"!= param global shape {tuple(dst.shape)} (ep_rank={ep_rank}, num_local={num_local})."
+        )
     return block.to(device=device, dtype=dst.dtype)
 
 
@@ -284,16 +299,28 @@ def _load_state_dict_ep_sliced(
         ckpt_shape = tuple(sl.get_shape())
         global_shape = tuple(dst.shape)
 
-        # EP-presliced dim: checkpoint is ep_size x larger on exactly one dim.
-        if ckpt_shape != global_shape and ep_size > 1:
-            idx, found = [slice(None)] * len(ckpt_shape), False
-            for d in range(len(ckpt_shape)):
-                if d < len(global_shape) and ckpt_shape[d] == global_shape[d] * ep_size:
-                    n = global_shape[d]
-                    idx[d] = slice(ep_rank * n, (ep_rank + 1) * n)  # only this rank's bytes
-                    found = True
-                    break
-            block = sl[tuple(idx)] if found else sl[:]
+        # EP-presliced experts: the fused expert param's global shape is [E/ep,…]
+        # while the (stacked) checkpoint holds [E,…]. Only these params are
+        # ep-presliced, so gate the dim-0 slice on the expert-param name — never
+        # infer it from a coincidental ``ckpt==global*ep_size`` shape match on some
+        # other tensor. Slice this rank's contiguous expert block on dim 0.
+        is_expert = name.endswith(".experts.gate_up_proj") or name.endswith(".experts.down_proj")
+        if is_expert and ckpt_shape != global_shape and ep_size > 1:
+            if ckpt_shape[0] != global_shape[0] * ep_size or ckpt_shape[1:] != global_shape[1:]:
+                raise RuntimeError(
+                    f"EP load: expert param {name!r} shape mismatch: checkpoint {ckpt_shape} "
+                    f"vs expected [E={global_shape[0] * ep_size} on dim0, {global_shape[1:]}]."
+                )
+            n = global_shape[0]
+            block = sl[ep_rank * n : (ep_rank + 1) * n]  # only this rank's E/ep experts
+            if tuple(block.shape) != global_shape:
+                raise RuntimeError(f"EP load: sliced {name!r} to {tuple(block.shape)} != {global_shape}.")
+        elif ckpt_shape != global_shape:
+            # Non-expert param whose checkpoint shape disagrees with the sharded
+            # param global shape — a real mismatch, not an ep preslice.
+            raise RuntimeError(
+                f"EP load: shape mismatch for non-expert param {name!r}: checkpoint {ckpt_shape} vs global {global_shape}."
+            )
         else:
             block = sl[:]  # whole (small) tensor; global == checkpoint shape
 

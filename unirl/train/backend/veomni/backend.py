@@ -119,7 +119,11 @@ class VeOmniBackend(BaseFSDP2Backend):
         # extra_parallel_* kwargs entirely, so the call is byte-identical to the
         # pre-EP path and never depends on the installed veomni accepting them.
         self._ep_size = int(getattr(fsdp_cfg, "ep_size", 1) or 1)
-        if world % self._ep_size != 0:
+        # Fail fast on a bad config value rather than silently coercing (0 -> 1,
+        # negative -> "disabled"): ep_size is a positive degree.
+        if self._ep_size < 1:
+            raise ValueError(f"VeOmniBackend: fsdp_cfg.ep_size must be >= 1, got {self._ep_size}")
+        if self._ep_size > 1 and world % self._ep_size != 0:
             raise ValueError(f"VeOmniBackend: world_size {world} not divisible by ep_size {self._ep_size}")
         extra_parallel_kwargs = (
             {"extra_parallel_sizes": (self._ep_size,), "extra_parallel_names": ("ep",)} if self._ep_size > 1 else {}
