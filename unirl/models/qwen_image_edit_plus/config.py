@@ -8,10 +8,10 @@ vs ``16`` for the wider input projection that absorbs the source-image
 latent concat). The bundle reads ``in_channels`` automatically, so no new
 field is needed here.
 
-V1 scope: the low-resolution 384² condition-image path into the Qwen2.5-VL
-text encoder (``encode_prompt(image=...)``) is deferred — V1 does standard
-text encoding + VAE latent concat only. When V2 adds that path, a
-``condition_image_size`` field will land here.
+Condition-image conditioning: ``use_condition_image_prompt`` (default True)
+feeds the source image into the Qwen2.5-VL text encoder — the correct
+Edit-Plus behavior (mirrors upstream ``encode_prompt(image=...)`` and the
+SGLang rollout path). Set it False to reproduce the earlier text-only run.
 """
 
 from __future__ import annotations
@@ -57,6 +57,15 @@ class QwenImageEditPlusPipelineConfig:
     weight_sync_param_name_prefix: str = "transformer."
 
     max_sequence_length: int = 512
+
+    # Feed the source image into the Qwen2.5-VL text encoder (Edit-Plus
+    # multimodal prompt conditioning). Default True = correct Edit-Plus
+    # behavior; False falls back to the base text-only text-embed stage.
+    use_condition_image_prompt: bool = True
+    # Subfolder holding the Qwen2.5-VL processor in the checkpoint (diffusers
+    # ``register_modules(processor=...)`` layout). Only read when
+    # ``use_condition_image_prompt`` is True.
+    processor_subfolder: str = "processor"
 
     use_lora: bool = False
     lora_target_modules: Optional[List[str]] = None
