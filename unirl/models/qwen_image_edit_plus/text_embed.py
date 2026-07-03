@@ -30,7 +30,7 @@ the pre-image-conditioning behavior).
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -87,6 +87,7 @@ class QwenImageEditPlusTextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
         bundle: QwenImageEditPlusBundle,
         *,
         max_sequence_length: int = 512,
+        processor_path: Optional[str] = None,
         processor_subfolder: str = "processor",
     ) -> None:
         if max_sequence_length > TOKENIZER_MAX_LENGTH:
@@ -96,10 +97,14 @@ class QwenImageEditPlusTextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
             )
         self.bundle = bundle
         self.max_sequence_length = int(max_sequence_length)
-        self.processor = self._load_processor(bundle, processor_subfolder)
+        # The processor (tokenizer merges + image processor) must come from the
+        # same place as the text encoder / tokenizer: honor a text-encoder
+        # override (``config.text_encoder_ckpt_path``) threaded in as
+        # ``processor_path``, else fall back to the main checkpoint.
+        self.processor = self._load_processor(processor_path or bundle.pretrained_path, processor_subfolder)
 
     @staticmethod
-    def _load_processor(bundle: QwenImageEditPlusBundle, subfolder: str):
+    def _load_processor(path: str, subfolder: str):
         """Load the Qwen2.5-VL processor (image processor + tokenizer merges).
 
         The Edit-Plus checkpoint ships the processor under a ``processor/``
@@ -110,9 +115,9 @@ class QwenImageEditPlusTextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
         """
         from transformers import AutoProcessor
 
-        return AutoProcessor.from_pretrained(bundle.pretrained_path, subfolder=subfolder)
+        return AutoProcessor.from_pretrained(path, subfolder=subfolder)
 
-    def embed(self, p: Texts, images: Images) -> TextEmbedCondition:
+    def embed(self, p: Texts, images: Images) -> TextEmbedCondition:  # type: ignore[override]
         """Encode prompts conditioned on the source images."""
         prompt_embeds, prompt_embeds_mask = self._encode(list(p.texts), images)
         return TextEmbedCondition(

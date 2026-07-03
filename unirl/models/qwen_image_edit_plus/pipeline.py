@@ -89,6 +89,7 @@ class QwenImageEditPlusPipeline(Pipeline):
         logprob_precision: str = "fp32",
         max_sequence_length: int = 512,
         use_condition_image_prompt: bool = True,
+        processor_path: Optional[str] = None,
         processor_subfolder: str = "processor",
     ) -> None:
         super().__init__()
@@ -98,6 +99,7 @@ class QwenImageEditPlusPipeline(Pipeline):
                 text_embed = QwenImageEditPlusTextEmbedStage(
                     bundle,
                     max_sequence_length=max_sequence_length,
+                    processor_path=processor_path,
                     processor_subfolder=processor_subfolder,
                 )
             else:
@@ -166,6 +168,9 @@ class QwenImageEditPlusPipeline(Pipeline):
                 text_embed = QwenImageEditPlusTextEmbedStage(
                     bundle,
                     max_sequence_length=config.max_sequence_length,
+                    # Honor a text-encoder override so the processor tracks the
+                    # tokenizer/text encoder, not just the main checkpoint.
+                    processor_path=config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path,
                     processor_subfolder=config.processor_subfolder,
                 )
             else:
