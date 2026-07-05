@@ -620,6 +620,20 @@ class BaseFSDP2Backend(Remote):
         move_optimizer_state(self.optimizer, "cpu")
         torch.cuda.empty_cache()
 
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def onload_optimizer(self) -> None:
+        """Move ONLY the optimizer state back to GPU (params/grads stay put)."""
+        move_optimizer_state(self.optimizer, self._device)
+
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def offload_optimizer(self) -> None:
+        """Move ONLY the optimizer state (Adam m/v) to CPU, leaving params+grads
+        on GPU so the EP-aware weight sync's NCCL all-gather still works. Frees the
+        largest train-state chunk during rollout so the colocate SGLang engine's
+        wake_up (memory-saver cu_mem_create) has room."""
+        move_optimizer_state(self.optimizer, "cpu")
+        torch.cuda.empty_cache()
+
     # ------------------------------------------------------------------
     # Accessors
     # ------------------------------------------------------------------

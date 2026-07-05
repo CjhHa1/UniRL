@@ -1,5 +1,6 @@
 import inspect
 import logging
+import os
 import time
 from typing import Dict, Optional, Tuple
 
@@ -139,11 +140,19 @@ class ARTrainer(BaseTrainer):
         ``rollout_id`` only keys the wandb panels (see :meth:`UniRLWandBLogger.log_rollout_step`).
         """
         t0 = time.perf_counter()
+        # Colocate memory squeeze (env-gated): park the optimizer (Adam m/v) on CPU
+        # during rollout so the SGLang engine's wake_up (memory-saver cu_mem_create)
+        # has room. Params stay on GPU so the EP-aware weight sync all-gather works.
+        _offload_opt = os.environ.get("UNIRL_OFFLOAD_OPT_DURING_ROLLOUT", "0") == "1"
+        if _offload_opt:
+            self.backend.offload_optimizer()
         self.rollout.wake_up()
         if sync_weights and self.weight_sync is not None:
             self.weight_sync.sync()
         resp = self.rollout.generate(req)
         self.rollout.sleep()
+        if _offload_opt:
+            self.backend.onload_optimizer()
 
         for name, track in list(resp.tracks.items()):
             if track.segment is not None:
