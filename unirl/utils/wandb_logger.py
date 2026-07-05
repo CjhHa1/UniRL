@@ -821,6 +821,7 @@ class UniRLWandBLogger:
             ("rollout_time_s", "time"),
             ("generate_time_s", "generate"),
             ("reward_time_s", "reward"),
+            ("adv_time_s", "adv"),
             ("train_time_s", "train"),
             ("diffusion_train_time_s", "diff_train"),
             ("ar_train_time_s", "ar_train"),

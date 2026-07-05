@@ -3,6 +3,7 @@ import inspect
 import logging
 import os
 import time
+from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -410,9 +411,18 @@ class DiffusionTrainer(BaseTrainer):
             mean_reward = float(track.rewards.to(torch.float32).mean().item())
             break  # single-track for now; revisit if multi-track lands
 
-        for name, track in list(resp.tracks.items()):
-            if track.rewards is not None:
-                resp.tracks[name] = track.compute_advantages(normalize=True, use_global_std=self._adv_use_global_std)
+        # Advantage computation is a driver-side track method (not a Remote
+        # handle), so install_phase_timing's collaborator-wrapping cannot reach
+        # it — attribute it to a ``perf/adv_time_s`` phase explicitly against the
+        # per-step timer install_phase_timing arms on the trainer. Guarded so the
+        # trainer still runs if phase timing was never installed.
+        _adv_timer = getattr(self, "_step_timer", None)
+        with _adv_timer.phase("adv") if _adv_timer is not None else nullcontext():
+            for name, track in list(resp.tracks.items()):
+                if track.rewards is not None:
+                    resp.tracks[name] = track.compute_advantages(
+                        normalize=True, use_global_std=self._adv_use_global_std
+                    )
 
         self._drop_decoded(req, resp, rollout_id=rollout_id)
         (track,) = resp.tracks.values()
