@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import torch
@@ -46,7 +47,13 @@ class QwenVLBundle(Bundle):
 
         dtype = parse_torch_dtype(config.model_precision, field_name="model_precision")
 
-        load_kwargs = {}
+        # Local checkpoint dir: force offline so transformers' PEFT adapter
+        # auto-detect (maybe_load_adapters) doesn't hand the absolute path to
+        # huggingface_hub, which rejects it as a repo id (HFValidationError:
+        # "Repo id must be in the form ..." on '/data/models/...'). Robust across
+        # multi-node ray workers where HF_HUB_OFFLINE may not propagate.
+        local_only = os.path.isdir(path)
+        load_kwargs = {"local_files_only": True} if local_only else {}
         if getattr(config, "attn_implementation", None):
             load_kwargs["attn_implementation"] = str(config.attn_implementation)
 
@@ -63,7 +70,9 @@ class QwenVLBundle(Bundle):
             from accelerate import init_empty_weights
             from transformers import AutoConfig
 
-            hf_config = AutoConfig.from_pretrained(path, trust_remote_code=bool(config.trust_remote_code))
+            hf_config = AutoConfig.from_pretrained(
+                path, trust_remote_code=bool(config.trust_remote_code), local_files_only=local_only
+            )
             with init_empty_weights(include_buffers=False):
                 transformer = Qwen2_5_VLForConditionalGeneration(hf_config)
             stamp_init_state_restore(transformer)
@@ -96,6 +105,7 @@ class QwenVLBundle(Bundle):
             trust_remote_code=bool(config.trust_remote_code),
             min_pixels=config.min_pixels,
             max_pixels=config.max_pixels,
+            local_files_only=local_only,
         )
 
         tokenizer = processor.tokenizer
