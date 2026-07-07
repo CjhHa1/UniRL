@@ -85,7 +85,14 @@ def restore_init_state(model: nn.Module, captured: Optional[dict]) -> int:
         if owner is None or not hasattr(owner, buf_name):
             continue
         live = getattr(owner, buf_name)
-        live.copy_(value.to(device=live.device, dtype=live.dtype))
+        # After FSDP2 (fully_shard), non-persistent buffers can be DTensors; a plain
+        # ``live.copy_(cpu_tensor)`` onto a DTensor silently fails to write, leaving
+        # the ``to_empty`` garbage (e.g. RoPE ``inv_freq==0`` -> position-blind model
+        # -> rollout/replay logprob mismatch). Copy into the LOCAL shard.
+        tgt = live.to_local() if hasattr(live, "to_local") else live
+        src = value.to(device=tgt.device, dtype=tgt.dtype)
+        if tuple(tgt.shape) == tuple(src.shape):
+            tgt.copy_(src)
     for (mod_name, attr), value in attrs.items():
         owner = modules.get(mod_name)
         if owner is not None:
@@ -93,6 +100,63 @@ def restore_init_state(model: nn.Module, captured: Optional[dict]) -> int:
     n = len(buffers) + len(attrs)
     if n:
         logger.info("restore_init_state: recovered %d non-persistent buffer(s) + plain attr(s)", n)
+    return n
+
+
+def recover_rope_inv_freq(model: nn.Module) -> int:
+    """Guaranteed post-materialize RoPE ``inv_freq`` recovery (idempotent).
+
+    ``meta`` init + ``to_empty()`` zero the non-persistent RoPE ``inv_freq`` (not in
+    the checkpoint). The capture/stamp/restore recovery is unreliable under FSDP2
+    (empty capture, module renaming, or DTensor buffers), leaving ``inv_freq == 0``
+    -> RoPE becomes the identity (cos=1, sin=0 at every position) -> a position-blind
+    model -> teacher-forced (replay) logprobs are systematically wrong -> the
+    rollout/replay ratio collapses (~0.11) -> a PPO/GRPO trainer clips ~every token
+    and reward cannot move.
+
+    Robust to module renaming (found by ``inv_freq`` presence, not FQN); recomputes
+    from each rotary module's ``config`` (or the model ``config``), preferring
+    transformers' ``ROPE_INIT_FUNCTIONS`` (handles scaled rope) with a plain
+    default-theta fallback; writes into the LOCAL shard. No-op if already correct.
+    """
+    device = None
+    for p in model.parameters():
+        loc = p.to_local() if hasattr(p, "to_local") else p
+        device = loc.device
+        break
+    n = 0
+    for m in model.modules():
+        if getattr(m, "inv_freq", None) is None:
+            continue
+        cfg = getattr(m, "config", None) or getattr(model, "config", None)
+        if cfg is None:
+            continue
+        # Default (NTK-base) rope inv_freq: 1/theta^(2i/d). This matches the rollout
+        # engine (SGLang/HF) for Qwen3. We deliberately do NOT reroute through
+        # ROPE_INIT_FUNCTIONS[rope_type] or overwrite ``attention_scaling`` here:
+        # ``attention_scaling`` is a plain float attr (survives ``to_empty``, already
+        # correct), and empirically the plain formula tracks the rollout engine best
+        # (ratio ~1.0 vs ~0.94 when a scaled variant is force-applied).
+        theta = getattr(cfg, "rope_theta", None)
+        if theta is None:
+            rp = getattr(cfg, "rope_parameters", None) or getattr(cfg, "rope_scaling", None)
+            if isinstance(rp, dict):
+                theta = rp.get("rope_theta")
+        theta = theta or 10000.0
+        hd = getattr(cfg, "head_dim", None) or (cfg.hidden_size // cfg.num_attention_heads)
+        inv_freq = 1.0 / (theta ** (torch.arange(0, hd, 2, dtype=torch.float32, device=device) / hd))
+        with torch.no_grad():
+            for bn in ("inv_freq", "original_inv_freq"):
+                b = getattr(m, bn, None)
+                if b is None:
+                    continue
+                tgt = b.to_local() if hasattr(b, "to_local") else b
+                src = inv_freq.to(device=tgt.device, dtype=tgt.dtype)
+                if tuple(tgt.shape) == tuple(src.shape):
+                    tgt.copy_(src)
+        n += 1
+    if n:
+        logger.info("recover_rope_inv_freq: recomputed inv_freq on %d rotary module(s)", n)
     return n
 
 
