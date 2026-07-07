@@ -58,10 +58,19 @@ def _recompute_rope_buffers(model: nn.Module) -> int:
         except Exception:
             continue
         with torch.no_grad():
-            m.inv_freq.copy_(inv_freq.to(device=m.inv_freq.device, dtype=m.inv_freq.dtype))
-            orig = getattr(m, "original_inv_freq", None)
-            if orig is not None:
-                m.original_inv_freq.copy_(inv_freq.to(device=orig.device, dtype=orig.dtype))
+            # After veomni_parallelize (FSDP2 fully_shard), these non-persistent
+            # buffers can be DTensors. A plain ``buf.copy_(plain_tensor)`` onto a
+            # DTensor raises (mixed DTensor/plain) and was swallowed by the caller's
+            # try/except — leaving the ``to_empty`` ZEROS. inv_freq==0 makes RoPE the
+            # identity (cos=1,sin=0 at every position) => a position-blind model =>
+            # replay logprobs systematically wrong => rollout/replay ratio ~0.11 =>
+            # GRPO fully clipped => reward can't move. Copy into the LOCAL shard.
+            for _bn in ("inv_freq", "original_inv_freq"):
+                _b = getattr(m, _bn, None)
+                if _b is None:
+                    continue
+                _t = _b.to_local() if hasattr(_b, "to_local") else _b
+                _t.copy_(inv_freq.to(device=_t.device, dtype=_t.dtype))
         m.attention_scaling = scaling
         n += 1
     if n:

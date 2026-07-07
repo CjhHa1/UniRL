@@ -195,6 +195,15 @@ class VeOmniBackend(BaseFSDP2Backend):
         # Post-materialize resets (LoRA adapter init, mirror copies).
         apply_deferred_ops(model)
 
+        # Guaranteed RoPE inv_freq recovery: meta-init + to_empty zero the
+        # non-persistent inv_freq, and the capture/stamp/restore path is unreliable
+        # under FSDP2 (DTensor buffers / module renaming) — leaving inv_freq==0 ->
+        # RoPE identity -> position-blind model -> rollout/replay logprob mismatch
+        # (ratio ~0.11) -> GRPO fully clipped -> reward can't move. Idempotent.
+        from unirl.models.types.meta_init import recover_rope_inv_freq
+
+        recover_rope_inv_freq(model)
+
         self._finalize_construction(
             model,
             shadow,
