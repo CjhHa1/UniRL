@@ -1,10 +1,8 @@
 # @package _global_
 # AR DPPO Qwen3-4B-Base on DAPO-Math — v2 trainer (ARTrainer), SGLang rollout, 32 GPU.
 #
-# Built from the official DPPO sources — paper repo sail-sg/Stable-RL (Qi et al.); the
-# only official runnable recipe verl examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
-# (30B MoE / Megatron) + verl core_algos.py — adapted to Qwen3-4B-Base / SGLang to
-# reproduce the DPPO AIME curve:
+# Faithful port of the reference recipe (MaxwellJryao/SPO-DPPO run_qwen3_4b.sh +
+# verl core_algos.py) to reproduce the DPPO AIME curve:
 #   - DPPO (paper §3, Qi et al. arXiv:2602.04879): the UNIFORM Binary-TV trust
 #     region. Keep token t iff A_t*(r_t-1) <= 0 OR |pi - mu| <= dppo_delta;
 #     loss L = E[sum_t keep_t * (-A_t*r_t)] — a hard 0/1 mask with the SAME
@@ -101,9 +99,8 @@ backend:
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
-    # 0.01 = verl's OptimizerConfig.weight_decay default. The official DPPO recipe
-    # (run_qwen3_30b_a3b_megatron.sh) overrides only optim.lr and leaves wd at this
-    # default — confirmed against sail-sg/Stable-RL's verl fork.
+    # 0.01 = the released verl run's AdamW default (verl OptimizerConfig.weight_decay,
+    # constant-wd schedule on its Megatron path; the script overrides only lr).
     weight_decay: 0.01
   scheduler_cfg:
     _target_: unirl.train.backend.base.LrSchedulerConfig
