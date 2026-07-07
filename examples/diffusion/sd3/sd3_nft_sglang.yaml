@@ -103,10 +103,15 @@ rollout:
     tp_size: 1
     populate_conditions: true
     init_same_noise: ${sampling.init_same_noise}
-    # Chunk generate into 32-sample sub-batches so sglang bounds its DiT-forward
-    # / VAE-decode peak memory (it runs the whole batch in one forward otherwise),
-    # without shrinking the logical batch. Mirrors sd3_nft.
-    forward_batch_size: 32
+    # MUST be <= sampling.samples_per_prompt (16): the driver ships a per-sample
+    # x_T ``initial_noise`` and SGLang's grouped forward slices it per output only
+    # within ONE prompt-group (patch_latent_prep._execute_forward_batch keys the
+    # slice on noise.shape[0] == the group's output count). A chunk that spans >1
+    # group (e.g. 32 = 2x spp) de-expands to multiple prompts, so each per-group
+    # forward sees noise[32] vs batch=16 and _expand_initial_noise raises
+    # "initial_noise batch dim 32 does not match ...". Was 32 (bug); every working
+    # sglang recipe uses fbs<=spp (1 group per chunk). 16 also bounds memory tighter.
+    forward_batch_size: 16
     engine_kwargs:
       model_type: sd3
 
