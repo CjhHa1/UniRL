@@ -181,7 +181,9 @@ class FlowDPPO(StageAlgorithm):
             ``add_kl_coefficient``, matching FlowGRPO. ``0`` (default) disables the term
             and skips that replay; the ``beta`` penalty is separate from the
             ``kl_mask_threshold`` KL-to-old masking gate. Requires a LoRA recipe + the
-            injected ``backend``.
+            injected ``backend``. See ``FlowGRPO``'s ``beta`` note on the
+            normalization-scale difference vs the reference flow_grpo code
+            (don't port ``beta`` values 1:1).
         old_logp_source: ``"rollout"`` (default) trusts the rollout engine's
             emitted ``segment.sde_logp``; ``"replay"`` uses the replayed
             log-probs. ``sde_means`` is always replayed regardless. See

@@ -70,6 +70,11 @@ class FlowGRPO(StageAlgorithm):
             is the base model with its LoRA adapter disabled (a per-update no_grad
             reference replay). ``0`` (default) disables the term and skips that
             replay. Requires a LoRA recipe + the injected ``backend``.
+            The KL is normalized by the full per-step transition std
+            (``std_dev_t*sqrt(-dt)`` for Flow/Dance) — the exact Gaussian KL.
+            The reference flow_grpo code divides by ``std_dev_t**2`` only, so at
+            equal ``beta`` this term is ~``1/|dt|`` stronger (≈10x at 10 sampling
+            steps): don't port ``beta`` values 1:1 from flow_grpo configs.
         backend: FSDP backend sibling (injected by the v2 trainer). Only used when
             ``beta > 0`` to reach the trainable model for the adapter-disabled
             reference replay.
