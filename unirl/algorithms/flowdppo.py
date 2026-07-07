@@ -232,8 +232,6 @@ class FlowDPPO(StageAlgorithm):
         self.kl_mask_threshold = float(kl_mask_threshold)
         self.add_kl_coefficient = bool(add_kl_coefficient)
         self.beta = float(beta)
-        # Reference policy = base model (LoRA disabled); resolved off the backend only
-        # when beta>0, with a fail-fast check for the adapter. None when the term is off.
         self._ref_model = _resolve_reference_model(backend, beta=self.beta, algo="FlowDPPO")
         self.old_logp_source = str(old_logp_source).strip().lower()
         require(

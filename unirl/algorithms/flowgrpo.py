@@ -119,8 +119,6 @@ class FlowGRPO(StageAlgorithm):
         self.clip_range = float(clip_range)
         self.clip_schedule = str(clip_schedule)
         self.beta = float(beta)
-        # Reference policy = base model (LoRA disabled); resolved off the backend only
-        # when beta>0, with a fail-fast adapter check. None when the term is off.
         self._ref_model = _resolve_reference_model(backend, beta=self.beta, algo="FlowGRPO")
         self.old_logp_source = str(old_logp_source).strip().lower()
         require(
