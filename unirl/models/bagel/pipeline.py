@@ -311,9 +311,7 @@ class BagelPipeline(Pipeline):
         if self._und_frozen is None:
             try:
                 und_trainable = [
-                    n
-                    for n, p in self.bundle.transformer.named_parameters()
-                    if p.requires_grad and "moe_gen" not in n
+                    n for n, p in self.bundle.transformer.named_parameters() if p.requires_grad and "moe_gen" not in n
                 ]
             except Exception:  # pragma: no cover - be conservative if not introspectable
                 und_trainable = ["<introspection-failed>"]

@@ -137,8 +137,7 @@ def parse_log_markers(log_paths: Iterable[Path]) -> dict[str, bool]:
         "saw_rollout_progress": bool(re.search(r"\brollout\s+\d+/\d+\b", text)),
         "saw_sd3_bundle": "role=SD3Bundle" in text,
         "saw_reward_service": "role=RewardService" in text,
-        "saw_hf_network_error": "HTTPSConnectionPool(host='huggingface.co'" in text
-        or "Network is unreachable" in text,
+        "saw_hf_network_error": "HTTPSConnectionPool(host='huggingface.co'" in text or "Network is unreachable" in text,
         "saw_pickscore_processor_error": "Can't load image processor" in text
         and ("CLIP-ViT-H" in text or "laion/" in text),
         "saw_traceback": "Traceback (most recent call last)" in text or "Error executing job" in text,
@@ -478,8 +477,7 @@ def write_markdown(path: Path, bottlenecks: list[Bottleneck], summary: dict[str,
     for item in bottlenecks:
         impact = "" if item.impact_pct is None else f"{item.impact_pct:.1f}%"
         lines.append(
-            f"| {item.rank} | {item.priority} | {item.name} | {impact} | "
-            f"{item.evidence} | {item.recommendation} |"
+            f"| {item.rank} | {item.priority} | {item.name} | {impact} | {item.evidence} | {item.recommendation} |"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
