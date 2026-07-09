@@ -221,13 +221,21 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         into a future sync-window ⇒ no generation crosses a sync ⇒ ``ratio≈1``.
         """
         while True:
+            # Reap (and cross-slab-transfer the completed generation's segment)
+            # BEFORE launching the next one. The transfer runs on the rollout
+            # worker as an NCCL send; if a fresh generation were already queued on
+            # that worker (launch-first), the send would block behind it (~150s).
+            # Reaping first gives the transfer an idle-worker window; the launch
+            # below then starts the NEXT generation, which overlaps the caller's
+            # train step. Contention-free as long as at most one generation is in
+            # flight at the transfer instant (max_inflight=1).
+            self._reap_ready()
             staleness_window = ((rollout_id // interval) + 1 + stale) * interval
             ceiling = min(num_rollouts, staleness_window)
             while self._launch_id < ceiling and len(self._inflight) < M:
                 self._launch(self._launch_id)
                 self._launch_id += 1
 
-            self._reap_ready()
             picked = self._buffer.drain_freshest(
                 self.batch_size, current_version=self._weight_version, max_staleness=stale
             )
