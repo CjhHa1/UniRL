@@ -128,30 +128,18 @@ class BagelPipeline(Pipeline):
         # FlowMatch time-shift for the σ schedule policy (read by the hosting engine
         # via build_schedule_policy → ensure_req_sigmas). Bagel uses static shift.
         self.shift = shift
-        # T2I prompt-context cache (profiling §5.3 ViT/text-encoder caching). For
-        # pure text-to-image the (gen, cfg_text, cfg_img) KV contexts are a pure
-        # function of the prompt and route entirely through the und/shared prefill
-        # path. With navit bs=1 the engine sends the N identical GRPO siblings one
-        # per generate call, so without a cache the text prefill is recomputed N
-        # times per prompt. Correct ONLY when that prefill path is frozen (gen-only
-        # LoRA → only the *_moe_gen experts, used in the gen/denoise forward, train).
-        # ``_t2i_cache_enabled`` enforces this lazily: it auto-disables the cache if
-        # any non-gen param is trainable (else a weight update silently staleness —
-        # ``ratio`` would NOT catch it, since rollout and replay reuse the same
-        # cached conditions). it2i is excluded at the call site (its input-image
-        # prefill rides the trained gen experts).
-        bundle_config = getattr(bundle, "config", None)
-        if cache_t2i_contexts is None:
-            cache_t2i_contexts = getattr(bundle_config, "cache_t2i_contexts", True)
-        if context_cache_size is None:
-            context_cache_size = getattr(bundle_config, "context_cache_size", 32)
+        # Reuse prompt KV across T2I siblings only while the und/text prefill is frozen.
+        cache_config = getattr(bundle, "config", None)
+        cache_t2i_contexts = (
+            _cfg_get(cache_config, "cache_t2i_contexts", True) if cache_t2i_contexts is None else cache_t2i_contexts
+        )
+        context_cache_size = (
+            _cfg_get(cache_config, "context_cache_size", 32) if context_cache_size is None else context_cache_size
+        )
         self._cache_t2i_contexts = bool(cache_t2i_contexts)
         self._context_cache_size = max(1, int(context_cache_size))
         self._t2i_context_cache: "OrderedDict[str, Tuple[Any, Any, Any]]" = OrderedDict()
-        # Lazily resolved (None → not yet checked) frozen-prefill invariant; see
-        # _t2i_cache_enabled. Checked on first use, after the backend has injected
-        # LoRA / set requires_grad.
-        self._und_frozen: Optional[bool] = None
+        self._und_frozen: Optional[bool] = None  # Checked lazily after LoRA injection.
 
     @classmethod
     def latent_shape(cls, *, model_config: Any, sampling_spec: Any) -> Tuple[int, ...]:
@@ -191,8 +179,6 @@ class BagelPipeline(Pipeline):
             trajectory_precision=config.trajectory_precision,
             logprob_precision=config.logprob_precision,
             shift=float(config.shift),
-            cache_t2i_contexts=getattr(config, "cache_t2i_contexts", True),
-            context_cache_size=getattr(config, "context_cache_size", 32),
         )
 
     def _autocast_ctx(self):

@@ -71,10 +71,7 @@ class BagelBundle(Bundle):
         config: Optional[BagelPipelineConfig] = None,
     ) -> None:
         super().__init__()
-        # Retain the construction config so separately-instantiated pipeline
-        # objects (the standard Hydra recipe path) can inherit runtime knobs
-        # without duplicating them under both ``bundle.config`` and ``pipeline``.
-        self.config = config
+        self.config = config  # Defaults for the separately constructed pipeline.
         self.model = model
         # The trainable MoT (where the *_moe_gen experts live). Same object the
         # vendored generate_image / _forward_flow run on, so FSDP2 fully_shard
