@@ -101,8 +101,8 @@ class BagelPipeline(Pipeline):
         logprob_precision: str = "fp32",
         shift: float = 3.0,
         replay_mode: str = "train",
-        cache_t2i_contexts: bool = True,
-        context_cache_size: int = 32,
+        cache_t2i_contexts: Optional[bool] = None,
+        context_cache_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.bundle = bundle
@@ -140,6 +140,11 @@ class BagelPipeline(Pipeline):
         # ``ratio`` would NOT catch it, since rollout and replay reuse the same
         # cached conditions). it2i is excluded at the call site (its input-image
         # prefill rides the trained gen experts).
+        bundle_config = getattr(bundle, "config", None)
+        if cache_t2i_contexts is None:
+            cache_t2i_contexts = getattr(bundle_config, "cache_t2i_contexts", True)
+        if context_cache_size is None:
+            context_cache_size = getattr(bundle_config, "context_cache_size", 32)
         self._cache_t2i_contexts = bool(cache_t2i_contexts)
         self._context_cache_size = max(1, int(context_cache_size))
         self._t2i_context_cache: "OrderedDict[str, Tuple[Any, Any, Any]]" = OrderedDict()

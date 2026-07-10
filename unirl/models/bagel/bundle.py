@@ -21,7 +21,7 @@ to behaves identically.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
@@ -68,8 +68,13 @@ class BagelBundle(Bundle):
         latent_patch_size: int,
         latent_channels: int,
         latent_downsample: int,
+        config: Optional[BagelPipelineConfig] = None,
     ) -> None:
         super().__init__()
+        # Retain the construction config so separately-instantiated pipeline
+        # objects (the standard Hydra recipe path) can inherit runtime knobs
+        # without duplicating them under both ``bundle.config`` and ``pipeline``.
+        self.config = config
         self.model = model
         # The trainable MoT (where the *_moe_gen experts live). Same object the
         # vendored generate_image / _forward_flow run on, so FSDP2 fully_shard
@@ -225,6 +230,7 @@ class BagelBundle(Bundle):
             latent_patch_size=int(model.latent_patch_size),
             latent_channels=int(model.latent_channel),
             latent_downsample=int(model.latent_downsample),
+            config=config,
         )
 
     def trainable_module(self) -> "torch.nn.Module":
