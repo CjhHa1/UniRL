@@ -372,3 +372,34 @@ class BaseTrainer:
                 num_rollouts,
             )
         return start
+
+    # ---- standalone evaluation (shared by single-backend trainers) ---------
+
+    def run_eval(self, *, load_dir: Optional[str] = None, step: int = 0) -> float:
+        """One-shot evaluation of the current (or restored) checkpoint — no training.
+
+        The standalone counterpart to the in-loop periodic eval (``eval_interval``
+        in :meth:`train`): restore an optional trained checkpoint, open the wandb
+        run, invoke the subclass :meth:`evaluate` once, and close the run. Returns
+        the mean eval score (diffusion: reward; AR: ``avg@k`` accuracy).
+
+        ``load_dir``: a trained checkpoint directory (LoRA adapter or full
+        weights) restored via :meth:`maybe_load_checkpoint`; ``None`` (default)
+        evaluates whatever the bundle config already loaded (e.g. a full-weight
+        ``PRETRAINED_MODEL``). For a separate rollout engine (vllm/sglang) the
+        restored weights reach the engine through the same ``weight_sync.sync()``
+        the baseline eval uses; the trainside engine shares the model directly.
+
+        The eval geometry (prompt count, samples/prompt, deterministic sampling)
+        comes from the trainer's ``eval_*`` fields; the prompt source is
+        ``run.eval_data_path``. Reporting follows the ``logging`` block — when
+        wandb is off the logger is a null-object and the score still prints via
+        the ``EVAL ...`` log line. Subclasses must implement ``evaluate(step)``
+        (AR trainers name the arg ``rollout_id``; both accept a positional int).
+        """
+        self.maybe_load_checkpoint(load_dir)
+        self._init_wandb(num_rollouts=0)
+        try:
+            return self.evaluate(step)
+        finally:
+            self._finish_wandb()

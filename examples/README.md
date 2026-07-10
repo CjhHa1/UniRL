@@ -15,10 +15,15 @@ built-in `config_name` — a safe place to start.
 
 | Domain | Entrypoint | Default recipe (start here) | Models |
 |---|---|---|---|
-| [`diffusion/`](diffusion/) | `python -m unirl.train_diffusion` | `diffusion/sd3/sd3_trainside` | `sd3`, `qwen_image`, `flux2_klein`, `wan21`, `wan22`, `hunyuan_video`, `hunyuan_video15` |
-| [`ar/`](ar/) | `python -m unirl.train_ar` | `ar/qwen_vl_grpo_geo3k_mc_4x8`, `ar/qwen3_drpo_4b_base_dapo_sglang` | `qwen_vl` (vision-language), `qwen3` (text-only) |
+| [`diffusion/`](diffusion/) | `python -m unirl.train_diffusion` / `python -m unirl.eval_diffusion` | `diffusion/sd3/sd3_trainside` | `sd3`, `qwen_image`, `flux2_klein`, `wan21`, `wan22`, `hunyuan_video`, `hunyuan_video15` |
+| [`ar/`](ar/) | `python -m unirl.train_ar` / `python -m unirl.eval_ar` | `ar/qwen_vl_grpo_geo3k_mc_4x8`, `ar/qwen3_drpo_4b_base_dapo_sglang` | `qwen_vl` (vision-language), `qwen3` (text-only) |
 | [`pe/`](pe/) | `python -m unirl.train_pe` | `pe/pe_trainside_pickscore` | `pe` (Qwen3 rewriter + SD3, PickScore/WISE reward) |
 | [`unified_model/`](unified_model/) | `python -m unirl.train_unified_model` | `unified_model/hi3_vllmomni` | `hi3` (HunyuanImage3, unified AR + diffusion) |
+
+Eval entrypoints mirror the train ones but call `trainer.run_eval()` once (no
+train loop). Pass `+load_dir=<checkpoint_dir>` for a trained adapter, or set the
+recipe's base-model env (`PRETRAINED_MODEL` / `QWEN_VL_PATH`) to evaluate a
+full-weight ckpt. See [FlowDPPO/README.md](../FlowDPPO/README.md#evaluate-a-checkpoint).
 
 ## Running a recipe
 

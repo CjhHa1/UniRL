@@ -16,7 +16,8 @@ which places a Worker pool and wires each stage as a `Remote` from the recipe's
 `_target_` — not by import. As source, the package falls into four groups:
 
 - **Entrypoints** (`train_diffusion.py`, `train_ar.py`, `train_pe.py`,
-  `train_unified_model.py`) — one per domain. Each composes and validates the Hydra
+  `train_unified_model.py`, plus `eval_diffusion.py` / `eval_ar.py` for one-shot
+  ckpt scoring) — one per domain. Each composes and validates the Hydra
   recipe, then hands off to its trainer.
 - **Orchestration** (`trainer/`) — the per-domain `<Domain>Trainer` owns GPU
   placement, builds the rollout and train workers, and runs the
@@ -33,7 +34,8 @@ which places a Worker pool and wires each stage as a `Remote` from the recipe's
 
 | Path | Responsibility |
 |---|---|
-| `train_diffusion.py`, `train_ar.py`, `train_pe.py`, `train_unified_model.py` | Per-domain Hydra entrypoints |
+| `train_diffusion.py`, `train_ar.py`, `train_pe.py`, `train_unified_model.py` | Per-domain Hydra train entrypoints |
+| `eval_diffusion.py`, `eval_ar.py` | One-shot eval entrypoints (`run_eval`, no train loop) |
 | `trainer/` | Per-domain training lifecycle (`base.py` + `diffusion`/`ar`/`pe`/`unified_model`): owns placement, builds workers, and runs the rollout→reward→advantage→train loop |
 | `config/` | `require` + `validate_*` cross-component validators over the flat Hydra recipe (instantiation itself is `_target_`-driven, not in this module) |
 | `distributed/` | Ray worker base (`Remote`) + placement/dispatch (`group/`), tensor transport (`tensor/`), and weight sync (`weight_sync/`) |
