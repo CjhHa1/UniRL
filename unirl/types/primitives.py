@@ -47,6 +47,7 @@ framework's default machinery already handles.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -54,6 +55,8 @@ import PIL.Image
 import torch
 
 from unirl.distributed.tensor.batch import Batch, FieldKind, concat_field, field
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Per-sample primitives
@@ -148,7 +151,11 @@ class Texts(Batch):
 class Images(Batch):
     """Batch images packed as a single ``[B, C, H, W]`` tensor.
 
-    Assumes uniform shape within the batch.
+    Uniform H/W stacks as-is. Mixed resolutions are **resized** (bilinear) to
+    the batch-max ``(H, W)`` — same contract as :meth:`Videos.from_list` —
+    rather than zero-padded (which baked black borders and wrong aspect ratios
+    into condition images; see issue #169). Aspect may still warp to the
+    batch-max ratio; the long-term fix is ragged per-sample storage.
     """
 
     pixels: torch.Tensor = field(kind=FieldKind.CONCAT, default=None)
@@ -158,21 +165,36 @@ class Images(Batch):
         if not items:
             raise ValueError("Cannot build Images from an empty list")
         pixels_list = [img.pixels for img in items]
-        # Handle variable-size images (e.g. VLM training) by padding to max size
-        if len(set(p.shape for p in pixels_list)) != 1:
-            max_h = max(p.shape[-2] for p in pixels_list)
-            max_w = max(p.shape[-1] for p in pixels_list)
-            padded = []
+        shapes = [tuple(p.shape) for p in pixels_list]
+        if len(set(shapes)) != 1:
+            channels = {int(p.shape[0]) for p in pixels_list}
+            if len(channels) != 1:
+                raise ValueError(f"Images.from_list requires a consistent channel count, got {sorted(channels)}")
+            max_h = max(int(p.shape[-2]) for p in pixels_list)
+            max_w = max(int(p.shape[-1]) for p in pixels_list)
+            logger.warning(
+                "Images.from_list: mixed H/W %s → resizing to (%d, %d) "
+                "(zero-pad removed; aspect may change — see issue #169)",
+                sorted(set(shapes)),
+                max_h,
+                max_w,
+            )
+            # Resize (not zero-pad) ragged images to the batch-max H/W so
+            # mixed-resolution inputs don't get black borders; model-specific
+            # encoders still resize to their requested resolution later.
+            resized = []
             for p in pixels_list:
-                if p.shape[-2] == max_h and p.shape[-1] == max_w:
-                    padded.append(p)
+                if int(p.shape[-2]) == max_h and int(p.shape[-1]) == max_w:
+                    resized.append(p)
                 else:
-                    c, h, w = p.shape
-                    pad_h = max_h - h
-                    pad_w = max_w - w
-                    padded_p = torch.nn.functional.pad(p, (0, pad_w, 0, pad_h), mode="constant", value=0)
-                    padded.append(padded_p)
-            pixels_list = padded
+                    p4 = torch.nn.functional.interpolate(
+                        p.unsqueeze(0).float(),
+                        size=(max_h, max_w),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    resized.append(p4.squeeze(0).to(p.dtype))
+            pixels_list = resized
         stacked = torch.stack(pixels_list, dim=0)
         return cls(pixels=stacked)
 
