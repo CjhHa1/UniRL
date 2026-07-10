@@ -359,10 +359,14 @@ class RemoteRewardBackend(RewardBackend):
         prim_image = request.primitives.get("image")
         if prim_image is None:
             return None
-        # Images batch has .pixels [B, C, H, W]
+        from unirl.types.primitives import Images, NativeImages
         from unirl.utils.media import tensor_frame_to_pil
 
-        return [tensor_frame_to_pil(img) for img in prim_image.pixels.unbind(0)]
+        if isinstance(prim_image, NativeImages):
+            return [tensor_frame_to_pil(img) for img in prim_image.pixels]
+        if isinstance(prim_image, Images):
+            return [tensor_frame_to_pil(img) for img in prim_image.pixels.unbind(0)]
+        raise TypeError(f"request.primitives['image'] must be NativeImages, got {type(prim_image).__name__}")
 
     # ------------------------------------------------------------------
     # Video reward support

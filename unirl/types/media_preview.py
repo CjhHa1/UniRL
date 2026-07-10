@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, List, Optional
 import torch
 
 from unirl.distributed.tensor.batch import Batch, concat_field
-from unirl.types.primitives import Images, Videos
+from unirl.types.primitives import Images, NativeImages, Videos
 
 if TYPE_CHECKING:
     from unirl.types.rollout_req import RolloutReq
@@ -206,17 +206,20 @@ def build_media_preview_for_track(
             return None
         # it2i carries the per-sample input image in req.primitives["image"]; pair
         # it beside the output when it covers the (possibly shard-prefixed) batch.
-        input_pixels = None
+        input_pixels: Optional[List[Any]] = None
         image_prim = req.primitives.get("image")
-        if isinstance(image_prim, Images) and image_prim.pixels is not None:
-            input_pixels = image_prim.pixels
-        show_edit_pairs = input_pixels is not None and int(input_pixels.shape[0]) >= int(pixels.shape[0])
+        if isinstance(image_prim, NativeImages):
+            input_pixels = list(image_prim.pixels)
+        elif isinstance(image_prim, Images) and image_prim.pixels is not None:
+            input_pixels = [image_prim.pixels[i] for i in range(int(image_prim.pixels.shape[0]))]
+        show_edit_pairs = input_pixels is not None and len(input_pixels) >= int(pixels.shape[0])
         for idx in range(int(pixels.shape[0])):
             if len(selected_indices) >= limit:
                 break
             out_pil = tensor_frame_to_pil(pixels[idx][:3])
             if show_edit_pairs:
-                in_pil = tensor_frame_to_pil(input_pixels[idx][:3])
+                input_tensor = hydrate(input_pixels[idx])
+                in_pil = tensor_frame_to_pil(input_tensor[:3])
                 images.append(hstack_pils(in_pil, out_pil))
             else:
                 images.append(out_pil)

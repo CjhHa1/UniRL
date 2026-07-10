@@ -33,7 +33,7 @@ from unirl.models.qwen_image.vae import QwenImageVAEDecodeStage
 from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 from unirl.types.sampling import DiffusionSamplingParams
@@ -54,8 +54,9 @@ class QwenImageEditPlusPipeline(Pipeline):
     Reads from ``RolloutReq``:
 
     - ``primitives["text"]: Texts`` — required edit instructions.
-    - ``primitives["image"]: Images`` — **required** source images (Edit-Plus
-      is edit-only; raises ``TypeError`` if absent — fail-fast, constraint #27).
+    - ``primitives["image"]: NativeImages`` — **required** native-resolution
+      source images (Edit-Plus is edit-only; legacy uniform ``Images`` remains
+      accepted for compatibility).
     - ``primitives["negative_text"]: Texts`` — optional CFG negatives.
     - ``sigmas: Tensor[T+1]`` — pinned by the engine adapter (required).
 
@@ -184,17 +185,16 @@ class QwenImageEditPlusPipeline(Pipeline):
                 f"got {type(texts).__name__ if texts is not None else 'None'}"
             )
         images = req.primitives.get("image")
-        if not isinstance(images, Images):
+        if not isinstance(images, (NativeImages, Images)):
             raise TypeError(
-                f"QwenImageEditPlusPipeline.generate: req.primitives['image'] must be Images "
+                f"QwenImageEditPlusPipeline.generate: req.primitives['image'] must be NativeImages "
                 f"(Edit-Plus is edit-only), got "
                 f"{type(images).__name__ if images is not None else 'None'}"
             )
-        if images.pixels is None or int(images.pixels.shape[0]) != len(texts.texts):
+        if len(images) != len(texts.texts):
             raise ValueError(
                 f"QwenImageEditPlusPipeline.generate: req.primitives['image'] batch "
-                f"{None if images.pixels is None else int(images.pixels.shape[0])} != "
-                f"text batch {len(texts.texts)}"
+                f"{len(images)} != text batch {len(texts.texts)}"
             )
         negatives_raw = req.primitives.get("negative_text")
         negatives = negatives_raw if isinstance(negatives_raw, Texts) else None

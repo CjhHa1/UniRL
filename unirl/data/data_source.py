@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from unirl.types.primitives import Images, Texts, Videos
+from unirl.types.primitives import NativeImages, Texts, Videos
 from unirl.types.prompts import RolloutInputs
 
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
@@ -159,7 +159,7 @@ def _reject_unsupported_media_refs(batch: Dict[str, Any], *, context: str) -> No
     The ``media_refs`` channel carries a ``MediaRef(uri, modality, role)``
     URI list. The driver consumes the ``(image, condition)`` (modality,
     role) pair via :func:`_load_condition_images`
-    → ``RolloutInputs.primitives['image']: Images``;
+    → ``RolloutInputs.primitives['image']: NativeImages``;
     all other (modality, role) combinations are not yet typed and
     would be silently dropped (degrading I2V/V2V/text-conditioned jobs
     into a misconfigured run).
@@ -331,7 +331,7 @@ class MultimodalRLDataSource:
         images = _load_condition_images(media_refs)
         if images is not None:
             _validate_homogeneous_images(images)
-            primitives["image"] = Images.from_list([img for img in images if img is not None])
+            primitives["image"] = NativeImages.from_list([img for img in images if img is not None])
         videos = _load_condition_videos(media_refs)
         if videos is not None:
             _validate_homogeneous_videos(videos)
@@ -369,7 +369,7 @@ class MultimodalRLDataSource:
         images = _load_condition_images(media_refs)
         if images is not None:
             _validate_homogeneous_images(images)
-            primitives["image"] = Images.from_list([img for img in images if img is not None])
+            primitives["image"] = NativeImages.from_list([img for img in images if img is not None])
         videos = _load_condition_videos(media_refs)
         if videos is not None:
             _validate_homogeneous_videos(videos)

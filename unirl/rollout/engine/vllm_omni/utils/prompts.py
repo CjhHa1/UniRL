@@ -11,7 +11,7 @@ from typing import List, Tuple
 
 import PIL.Image
 
-from unirl.types.primitives import Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 
 
@@ -67,14 +67,16 @@ def grouped_texts_from_req(req: RolloutReq, *, samples_per_prompt: int, caller: 
 
 
 def pil_images_from_req(req: RolloutReq, n: int) -> List[PIL.Image.Image]:
-    """Extract ``req.primitives['image']`` (Images) as a list of PIL images.
+    """Extract a native/dense image input as a list of PIL images.
 
     Returns an empty list when there's no image primitive. Asserts batch
-    alignment when present; the conversion itself is :meth:`Images.to_pils`.
+    alignment when present.
     """
     images = req.primitives.get("image")
     if images is None:
         return []
+    if not isinstance(images, (NativeImages, Images)):
+        raise TypeError(f"req.primitives['image'] must be NativeImages, got {type(images).__name__}")
     if len(images) != n:
         raise ValueError(f"image batch {len(images)} != prompt count {n}")
     return images.to_pils()

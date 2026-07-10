@@ -22,7 +22,7 @@ from unirl.rollout.engine.sglang.adapters.base import (
 from unirl.rollout.engine.sglang.adapters.text import TextLMAdapter
 from unirl.rollout.engine.sglang.backends import RawResult
 from unirl.rollout.engine.sglang.utils import ResolvedSampling, pil_to_base64
-from unirl.types.primitives import Images
+from unirl.types.primitives import Images, NativeImages
 from unirl.types.rollout_req import RolloutReq
 
 
@@ -75,8 +75,8 @@ class VLMAdapter(TextLMAdapter):
     def extract_images(self, req: RolloutReq, *, n_prompts: int) -> List[Any]:
         image_prim = req.primitives.get("image")
         require(
-            image_prim is not None and isinstance(image_prim, Images),
-            f"{type(self).__name__} requires req.primitives['image']: Images",
+            image_prim is not None and isinstance(image_prim, (NativeImages, Images)),
+            f"{type(self).__name__} requires req.primitives['image']: NativeImages",
         )
         require(
             len(image_prim) == n_prompts,

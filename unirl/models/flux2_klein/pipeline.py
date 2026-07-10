@@ -41,7 +41,7 @@ from typing import Any, Optional, Tuple
 
 from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import DanceSDEStrategy, StepStrategy
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 
@@ -285,11 +285,15 @@ class Flux2KleinPipeline(Pipeline):
         # the transformer actually sees the source. Without this the edit is
         # text-only (the bug this fixes: edited images ignored the source).
         images = req.primitives.get("image")
-        if isinstance(images, Images):
-            if int(images.pixels.shape[0]) != len(texts.texts):
+        if images is not None:
+            if not isinstance(images, (NativeImages, Images)):
+                raise TypeError(
+                    f"Flux2KleinPipeline.generate: req.primitives['image'] must be NativeImages, "
+                    f"got {type(images).__name__}"
+                )
+            if len(images) != len(texts.texts):
                 raise ValueError(
-                    f"Flux2KleinPipeline.generate: image count {int(images.pixels.shape[0])} "
-                    f"!= text count {len(texts.texts)}"
+                    f"Flux2KleinPipeline.generate: image count {len(images)} != text count {len(texts.texts)}"
                 )
             image_tokens, image_ids = self.vae_encode.encode(images, height=int(params.height), width=int(params.width))
             klein_conds.image_latent = image_tokens

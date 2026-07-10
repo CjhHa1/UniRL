@@ -31,7 +31,7 @@ from unirl.models.wan21.vae import WAN21VAEDecodeStage
 from unirl.sde.kernels import DanceSDEStrategy, StepStrategy
 from unirl.types.conditions import ImageEmbedCondition, ImageLatentCondition
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 from unirl.types.sampling import DiffusionSamplingParams
@@ -214,14 +214,14 @@ class WAN22Pipeline(Pipeline):
         image_embed_cond: Optional[ImageEmbedCondition] = None
         images_prim = req.primitives.get("image")
         if images_prim is not None:
-            if not isinstance(images_prim, Images):
+            if not isinstance(images_prim, (NativeImages, Images)):
                 raise TypeError(
-                    f"WAN22Pipeline.generate: req.primitives['image'] must be Images, got {type(images_prim).__name__}"
+                    f"WAN22Pipeline.generate: req.primitives['image'] must be NativeImages, "
+                    f"got {type(images_prim).__name__}"
                 )
-            if int(images_prim.pixels.shape[0]) != len(texts.texts):
+            if len(images_prim) != len(texts.texts):
                 raise ValueError(
-                    f"WAN22Pipeline.generate: image count {images_prim.pixels.shape[0]} "
-                    f"!= text count {len(texts.texts)}"
+                    f"WAN22Pipeline.generate: image count {len(images_prim)} != text count {len(texts.texts)}"
                 )
             image_latent_cond = WAN21ImageLatentEncodeStage(
                 self.bundle,

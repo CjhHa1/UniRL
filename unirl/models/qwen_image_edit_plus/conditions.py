@@ -1,8 +1,9 @@
 """QwenImageEditPlusConditions — typed conditions for Qwen-Image-Edit-Plus.
 
 Mirrors :class:`unirl.models.qwen_image.QwenImageConditions` (same ``text`` +
-``negative_text`` slots) and adds one slot: ``image_latent: ImageLatentCondition``
-carrying the VAE-encoded source image. The diffusion step packs it (2×2
+``negative_text`` slots) and adds one slot:
+``image_latent: RaggedImageLatentCondition`` carrying each VAE-encoded source
+image at its aspect-preserving grid. The diffusion step shape-groups and packs it (2×2
 channel-pack, same as the noise latent) and concatenates along the token
 dimension before the transformer call, then slices the prediction back to the
 noise segment — mirrors ``vde_editplus.py:232,246`` and the FLUX.2-Klein
@@ -21,7 +22,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from unirl.distributed.tensor.batch import Batch, FieldKind, field
-from unirl.types.conditions import Condition, ImageLatentCondition, TextEmbedCondition
+from unirl.types.conditions import Condition, ImageLatentCondition, RaggedImageLatentCondition, TextEmbedCondition
 
 
 @dataclass
@@ -30,7 +31,7 @@ class QwenImageEditPlusConditions(Batch):
 
     text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
     negative_text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
-    image_latent: Optional[ImageLatentCondition] = field(kind=FieldKind.CONCAT, default=None)
+    image_latent: Optional[RaggedImageLatentCondition] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Condition]) -> "QwenImageEditPlusConditions":
@@ -54,10 +55,12 @@ class QwenImageEditPlusConditions(Batch):
                 f"TextEmbedCondition or absent, got {type(negative_text).__name__}"
             )
         image_latent = d.get("image_latent")
-        if image_latent is not None and not isinstance(image_latent, ImageLatentCondition):
+        if isinstance(image_latent, ImageLatentCondition) and image_latent.latents is not None:
+            image_latent = RaggedImageLatentCondition(latents=list(image_latent.latents.unbind(0)))
+        if image_latent is not None and not isinstance(image_latent, RaggedImageLatentCondition):
             raise TypeError(
                 f"QwenImageEditPlusConditions.from_dict: expected d['image_latent'] to be an "
-                f"ImageLatentCondition or absent, got {type(image_latent).__name__}"
+                f"RaggedImageLatentCondition or absent, got {type(image_latent).__name__}"
             )
         return cls(text=text, negative_text=negative_text, image_latent=image_latent)
 

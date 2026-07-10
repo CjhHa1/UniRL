@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from unirl.models.types.ar import ARSamplingParams
 from unirl.models.types.pipeline import Pipeline
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 
@@ -72,7 +72,7 @@ class QwenVLPipeline(Pipeline):
 
         pil_images = None
         images_prim = req.primitives.get("image")
-        if images_prim is not None and isinstance(images_prim, Images):
+        if images_prim is not None and isinstance(images_prim, (NativeImages, Images)):
             pil_images = images_prim.to_pils()
 
         chat_overrides: Dict[str, Any] = dict(req.stage_config.get("chat") or {})

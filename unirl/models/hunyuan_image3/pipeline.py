@@ -51,7 +51,8 @@ class HunyuanImage3Pipeline(Pipeline):
     - ``primitives["negative_text"]`` — rejected for t2i / it2i: the HI3
       tokenizer never consumes negative-prompt text; CFG derives from
       ``guidance_scale > 1.0``.
-    - ``primitives["image"]: Images`` — required for i2t / it2i.
+    - ``primitives["image"]: NativeImages`` — native-resolution input required
+      for i2t / it2i (legacy uniform ``Images`` is accepted).
     - ``stage_params["task"]: str`` — one of ``{"t2t", "i2t", "t2i",
       "it2i", "t2ti"}``. Defaults to ``"t2i"`` if absent.
     - ``stage_params["bot_task"]: str`` — chat-template flag forwarded to

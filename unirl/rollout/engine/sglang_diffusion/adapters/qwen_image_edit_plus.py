@@ -3,9 +3,9 @@
 Sibling of :mod:`unirl.rollout.engine.sglang_diffusion.adapters.qwen_image`
 (the T2I modality) with two image-edit deltas:
 
-- **Request side.** Edit-Plus **requires** ``req.primitives['image']: Images``
+- **Request side.** Edit-Plus **requires** ``req.primitives['image']: NativeImages``
   (fail-fast if absent — Edit-Plus is edit-only). The adapter extracts PILs
-  via :meth:`Images.to_pils` and injects each into the sampling kwargs under
+  via :meth:`NativeImages.to_pils` and injects each into the sampling kwargs under
   ``condition_image`` — a SamplingParams field injected by
   :mod:`._patches.patch_sampling_io` and copied onto ``Req.condition_image``
   in ``prepare_request``. SGLang's ``InputValidationStage`` checks
@@ -20,8 +20,8 @@ Sibling of :mod:`unirl.rollout.engine.sglang_diffusion.adapters.qwen_image`
   captured by :mod:`._patches.patch_conditions` (which extends the IPC-
   survival machinery built for text embeds to also carry ``image_latent`` +
   ``image_latent_sizes`` off the batch). This adapter unpacks the packed
-  latent to spatial ``[B, 16, H_img, W_img]`` and emits it as an
-  :class:`ImageLatentCondition` alongside the inherited ``text`` /
+  latent to spatial ``[16, H_img, W_img]`` per sample and emits a
+  :class:`RaggedImageLatentCondition` alongside the inherited ``text`` /
   ``negative_text`` conditions.
 
 Everything else (packed-trajectory unpack in ``build_segment``, CFG
@@ -45,7 +45,8 @@ import torch
 from unirl.rollout.engine.sglang_diffusion.adapters.base import register_adapter
 from unirl.rollout.engine.sglang_diffusion.adapters.qwen_image import QwenImageAdapter
 from unirl.rollout.engine.sglang_diffusion.backends import RawResult
-from unirl.types.conditions.image import ImageLatentCondition
+from unirl.types.conditions.image import RaggedImageLatentCondition
+from unirl.types.primitives import Images, NativeImages
 from unirl.types.rollout_req import RolloutReq
 
 # Qwen-Image VAE downsample factor (pixel → latent).
@@ -84,9 +85,10 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
         prompts = list(req.primitives["text"].texts)
         unique_prompts, k = self._deexpand_prompts(prompts, req)
         images_prim = req.primitives.get("image")
-        if images_prim is None:
+        if not isinstance(images_prim, (NativeImages, Images)):
             raise ValueError(
-                f"modality={self.model_family!r} requires req.primitives['image'] (Edit-Plus is edit-only); got None."
+                f"modality={self.model_family!r} requires req.primitives['image']: NativeImages "
+                f"(Edit-Plus is edit-only); got {type(images_prim).__name__ if images_prim is not None else 'None'}."
             )
         pil_images = images_prim.to_pils()
         if len(pil_images) != len(prompts):
@@ -122,17 +124,17 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
         slots, then collects the per-result ``image_latent`` (packed
         ``[1, S_img, C*4]``) + ``image_latent_sizes`` (the ``[(vae_width,
         vae_height)]`` pixel pair), unpacks each to spatial
-        ``[1, 16, H_img, W_img]``, and emits the batched tensor as an
-        :class:`ImageLatentCondition`.
+        ``[1, 16, H_img, W_img]``, and preserves the per-sample tensors as a
+        :class:`RaggedImageLatentCondition`.
         """
         cond_dict = super().build_condition(results)
         image_latents = self._collect_image_latents(results)
         if image_latents is not None:
-            cond_dict["image_latent"] = ImageLatentCondition(latents=image_latents)
+            cond_dict["image_latent"] = RaggedImageLatentCondition(latents=image_latents)
         return cond_dict
 
-    def _collect_image_latents(self, results: List[RawResult]) -> Optional[torch.Tensor]:
-        """Concatenate per-result image_latents, unpacked to spatial form.
+    def _collect_image_latents(self, results: List[RawResult]) -> Optional[List[torch.Tensor]]:
+        """Collect per-result image latents without forcing a shared grid.
 
         Each result's ``image_latent`` is the packed source-image latent
         ``[1, S_img, C*4]`` (one-element list injected by ``patch_conditions``).
@@ -165,19 +167,14 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
             latent_h = int(vae_height) // _VAE_SCALE_FACTOR
             latent_w = int(vae_width) // _VAE_SCALE_FACTOR
             spatial = _unpack_latents(packed, latent_h=latent_h, latent_w=latent_w)
-            tensors.append(spatial)
-        # All source-image latents share the same vae_size-derived grid (upstream
-        # normalizes to ~1024²), so dim-0 concat is safe. Guard anyway.
-        shapes = {tuple(t.shape) for t in tensors}
-        if len(shapes) > 1:
-            raise RuntimeError(
-                f"build_condition: Qwen-Image-Edit-Plus image_latent tensors have "
-                f"heterogeneous shapes {sorted(shapes)} — expected a uniform grid "
-                f"(upstream normalizes to vae_size). Check that all source images "
-                f"in the batch have the same aspect ratio, or extend the adapter "
-                f"to ragged-pad."
-            )
-        return torch.cat(tensors, dim=0)
+            if int(spatial.shape[0]) != 1:
+                raise RuntimeError(
+                    f"build_condition: expected one source-image latent per result, got shape {tuple(spatial.shape)}"
+                )
+            tensors.append(spatial[0])
+        if not tensors:
+            raise RuntimeError("build_condition: Qwen-Image-Edit-Plus rollout produced no source-image latents")
+        return tensors
 
     @staticmethod
     def _first_per_group(items: List[Any], group_ids: List[str]) -> List[Any]:

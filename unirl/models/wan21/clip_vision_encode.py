@@ -1,4 +1,4 @@
-"""WAN21CLIPVisionEncodeStage — Images → ImageEmbedCondition via CLIP vision.
+"""WAN21CLIPVisionEncodeStage — native images → CLIP vision condition.
 
 Mirrors diffusers ``pipelines/wan/pipeline_wan_i2v.py`` CLIP encoding:
 preprocess via ``CLIPImageProcessor``, run ``CLIPVisionModel`` with
@@ -30,7 +30,7 @@ import torch
 
 from unirl.models.types.codec import EncodeStage
 from unirl.types.conditions import ImageEmbedCondition
-from unirl.types.primitives import Images
+from unirl.types.primitives import Images, NativeImages
 
 
 @runtime_checkable
@@ -49,7 +49,7 @@ class _VisionBundle(Protocol):
     dtype: torch.dtype
 
 
-class WAN21CLIPVisionEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
+class WAN21CLIPVisionEncodeStage(EncodeStage[NativeImages, ImageEmbedCondition]):
     """Encode reference images through CLIP ViT into patch-token embeds."""
 
     def __init__(self, bundle: _VisionBundle) -> None:
@@ -62,9 +62,9 @@ class WAN21CLIPVisionEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
             )
         self.bundle = bundle
 
-    def encode(self, p: Images) -> ImageEmbedCondition:
-        if not isinstance(p, Images):
-            raise TypeError(f"WAN21CLIPVisionEncodeStage.encode: expected Images, got {type(p).__name__}")
+    def encode(self, p: NativeImages | Images) -> ImageEmbedCondition:
+        if not isinstance(p, (NativeImages, Images)):
+            raise TypeError(f"WAN21CLIPVisionEncodeStage.encode: expected NativeImages, got {type(p).__name__}")
 
         pils = p.to_pils()
         processed = self.bundle.image_processor(images=pils, return_tensors="pt").pixel_values

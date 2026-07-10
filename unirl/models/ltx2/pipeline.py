@@ -18,7 +18,7 @@ from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import StepStrategy
 from unirl.sde.runtime import get_sigma_schedule
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 
@@ -223,7 +223,7 @@ class LTX2Pipeline(Pipeline):
             raise ValueError("LTX2Pipeline.generate: DiffusionSamplingParams required.")
 
         # Determine mode
-        has_image = isinstance(images, Images)
+        has_image = isinstance(images, (NativeImages, Images))
         if has_image:
             # I2V is NOT wired end-to-end yet: the encode step below sets
             # conditions.image_latent, but LTX2DiffusionStep.predict_noise never
@@ -250,11 +250,6 @@ class LTX2Pipeline(Pipeline):
 
         # 2. Build conditions
         conditions = LTX2Conditions.from_dict(embed_result)
-
-        # I2V: encode condition image
-        if has_image and self.vae_encode is not None:
-            image_latents = self.vae_encode.encode(images.pixels)
-            conditions.image_latent = image_latents
 
         # 3. Sigma schedule
         num_steps = int(params.num_inference_steps)

@@ -21,8 +21,8 @@
 #   - bundle/pipeline → QwenImageEditPlus* (in_channels=64, source-image
 #     latent token-concat inside predict_noise).
 #   - data_source → datasets/image_edit (JSONL with prompt + media[image,role=condition]).
-#     MultimodalRLDataSource emits primitives["image"]: Images, which the
-#     Edit-Plus pipeline requires at generate(req) (fail-fast if absent).
+#     MultimodalRLDataSource emits primitives["image"]: NativeImages, preserving
+#     each source image's native aspect ratio until the Edit-Plus VAE processor.
 #   - reward → PickScore (V1). V2 will swap in EditReward for instruction
 #     following — the local PickScore scorer doesn't read the source image,
 #     only the edited output, so it's a reasonable cold-start signal.

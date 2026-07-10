@@ -1,6 +1,8 @@
 """Image conditioning types.
 
-``ImageLatentCondition`` carries VAE latents (img2img, first-frame, etc.).
+``ImageLatentCondition`` carries dense VAE latents (img2img, first-frame, etc.).
+``RaggedImageLatentCondition`` carries per-sample spatial latents whose grids
+may differ (Qwen Image Edit Plus mixed-aspect inputs).
 ``ImageEmbedCondition`` carries ViT-style patch embeddings (SigLIP / CLIP
 vision tower output, AR-emitted-image-token re-embeddings). Other roles
 (``ImageMaskedLatentCondition``, ``ImageTokenCondition``) remain deferred
@@ -10,11 +12,11 @@ to first consumer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, List, Optional, Tuple
+from typing import Any, ClassVar, List, Optional
 
 import torch
 
-from unirl.distributed.tensor.batch import FieldKind, field, shared_field
+from unirl.distributed.tensor.batch import FieldKind, concat_field, field
 from unirl.types.conditions.base import Condition, Modality
 
 
@@ -28,6 +30,23 @@ class ImageLatentCondition(Condition):
 
 
 @dataclass
+class RaggedImageLatentCondition(Condition):
+    """Per-sample VAE latents with heterogeneous spatial grids.
+
+    ``latents[i]`` is one ``[C, H_i, W_i]`` tensor. The list is the sample
+    axis, so Batch concat/select/slice retain alignment without padding or
+    changing image geometry.
+    """
+
+    modality: ClassVar[Modality] = Modality.IMAGE
+
+    latents: List[torch.Tensor] = concat_field(default_factory=list)
+
+    def __len__(self) -> int:
+        return len(self.latents)
+
+
+@dataclass
 class ImageEmbedCondition(Condition):
     """Image conditioning carried as ViT-style patch embeddings.
 
@@ -35,16 +54,18 @@ class ImageEmbedCondition(Condition):
     plus AR-emitted image-vocab token re-embeddings on the diffusion side).
     Same shape as ``TextEmbedCondition.embeds`` but tagged ``Modality.IMAGE``.
 
-    ``spatial_shapes`` is a per-sample list of ``(H, W)`` patch grid sizes,
-    used by ViT encoders that do dynamic positional encoding (e.g. SigLIP2).
-    Optional — cross-attention models that don't need it leave it ``None``.
+    HunyuanImage3 stores ``embeds``, ``attn_mask``, and ``spatial_shapes`` as
+    per-sample lists because patch counts vary with native image geometry.
+    Fixed-grid encoders may use dense tensors for the first two fields. All
+    three remain CONCAT-aligned so DP slice/select never detach one sample's
+    spatial metadata from its embeddings.
     """
 
     modality: ClassVar[Modality] = Modality.IMAGE
 
-    embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
-    attn_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
-    spatial_shapes: Optional[List[Tuple[int, int]]] = shared_field(default=None)
+    embeds: Optional[Any] = field(kind=FieldKind.CONCAT, default=None)
+    attn_mask: Optional[Any] = field(kind=FieldKind.CONCAT, default=None)
+    spatial_shapes: Optional[List[Any]] = field(kind=FieldKind.CONCAT, default=None)
 
 
-__all__ = ["ImageEmbedCondition", "ImageLatentCondition"]
+__all__ = ["ImageEmbedCondition", "ImageLatentCondition", "RaggedImageLatentCondition"]

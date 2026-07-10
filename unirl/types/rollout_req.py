@@ -2,10 +2,11 @@
 
 Pairs with ``RolloutResp`` (in ``unirl/types/rollout_resp.py``). Carries:
 
-- ``primitives: Dict[str, Texts | Images | Videos | Audios]`` — raw inputs
-  keyed by modality-slot name (``"text"``, ``"image"``, ...). The pipeline
-  encodes each via the relevant ``EncodeStage`` / ``EmbedStage`` before
-  generation.
+- ``primitives: Dict[str, Texts | NativeImages | Images | Videos | Audios]`` —
+  raw inputs keyed by modality-slot name (``"text"``, ``"image"``, ...).
+  Native-resolution condition images use ``NativeImages``; dense ``Images`` is
+  retained as a compatibility input for already-uniform callers. The pipeline
+  encodes each via the relevant ``EncodeStage`` / ``EmbedStage`` before generation.
 - ``request_conditions: Dict[str, Condition]`` — precomputed encoded inputs
   the engine should consume verbatim instead of (re-)deriving from
   ``primitives``. Symmetric with ``RolloutResp.tracks[<slot>].conditions``. Key convention:
@@ -57,10 +58,10 @@ import torch
 
 from unirl.distributed.tensor.batch import Batch, FieldKind, concat_field, field, shared_field
 from unirl.types.conditions.base import Condition
-from unirl.types.primitives import Audios, Images, Texts, Videos
+from unirl.types.primitives import Audios, Images, NativeImages, Texts, Videos
 from unirl.types.sampling import BaseSamplingParams
 
-PrimitiveValue = Union[Texts, Images, Videos, Audios]
+PrimitiveValue = Union[Texts, NativeImages, Images, Videos, Audios]
 
 
 @dataclass

@@ -4,7 +4,7 @@ Per-sample types (``Text``, ``Image``, ``Video``, ``Audio``) are plain
 dataclasses used at the user-facing boundary — input construction and
 per-sample iteration in reward functions.
 
-Batch types (``Texts``, ``Images``, ``Videos``, ``Audios``) are
+Batch types (``Texts``, ``NativeImages``, ``Images``, ``Videos``, ``Audios``) are
 ``Batch`` SoA containers used in storage and transport. Round-trip
 helpers (``from_list`` / ``to_list``) bridge between the two forms.
 
@@ -39,15 +39,16 @@ framework-managed hidden attribute:
   slicing becomes incorrect.
 
 These rules generalize to any future ragged-along-dim-0 primitive (e.g.
-``PointClouds`` with varlen point counts). Image-like primitives where
-dim 0 IS the sample axis (``Images.pixels: [B, C, H, W]``) keep using
-``FieldKind.CONCAT`` as before — that's the rectangular case the
-framework's default machinery already handles.
+``PointClouds`` with varlen point counts). Dense decoded images use
+``Images.pixels: [B, C, H, W]`` with ``FieldKind.CONCAT``. Native-resolution
+condition images use ``NativeImages.pixels: List[[C, H_i, W_i]]``: the outer
+list is the sample axis and therefore also uses ``FieldKind.CONCAT``. Spatial
+resize/packing belongs to the consuming model's processor, never the primitive
+batch boundary.
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -55,8 +56,6 @@ import PIL.Image
 import torch
 
 from unirl.distributed.tensor.batch import Batch, FieldKind, concat_field, field
-
-logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Per-sample primitives
@@ -148,14 +147,46 @@ class Texts(Batch):
 
 
 @dataclass
-class Images(Batch):
-    """Batch images packed as a single ``[B, C, H, W]`` tensor.
+class NativeImages(Batch):
+    """Input images kept at their per-sample native resolution.
 
-    Uniform H/W stacks as-is. Mixed resolutions are **resized** (bilinear) to
-    the batch-max ``(H, W)`` — same contract as :meth:`Videos.from_list` —
-    rather than zero-padded (which baked black borders and wrong aspect ratios
-    into condition images; see issue #169). Aspect may still warp to the
-    batch-max ratio; the long-term fix is ragged per-sample storage.
+    ``pixels[i]`` is one ``[C, H_i, W_i]`` tensor in ``[0, 1]``. The outer
+    list is the sample axis, so concat/select/slice preserve heterogeneous
+    spatial sizes. Model-specific processors own the only resize/pack step.
+    """
+
+    pixels: List[torch.Tensor] = concat_field(default_factory=list)
+
+    @classmethod
+    def from_list(cls, items: List[Image]) -> "NativeImages":
+        if not items:
+            raise ValueError("Cannot build NativeImages from an empty list")
+        pixels_list = [img.pixels for img in items]
+        if any(p is None or p.ndim != 3 for p in pixels_list):
+            bad = [None if p is None else tuple(p.shape) for p in pixels_list]
+            raise ValueError(f"NativeImages.from_list expects per-sample pixels [C, H, W], got {bad}")
+        channels = {int(p.shape[0]) for p in pixels_list}
+        if len(channels) != 1:
+            raise ValueError(f"NativeImages.from_list requires a consistent channel count, got {sorted(channels)}")
+        return cls(pixels=pixels_list)
+
+    def to_list(self) -> List[Image]:
+        return [Image(pixels=pixels) for pixels in self.pixels]
+
+    def to_pils(self) -> List[PIL.Image.Image]:
+        """Convert each native-resolution sample to PIL."""
+        return [img.to_pil() for img in self.to_list()]
+
+    def __len__(self) -> int:
+        return len(self.pixels)
+
+
+@dataclass
+class Images(Batch):
+    """Dense decoded/output images packed as one ``[B, C, H, W]`` tensor.
+
+    All samples must have the same shape. Use :class:`NativeImages` for raw
+    condition images whose native spatial sizes may differ.
     """
 
     pixels: torch.Tensor = field(kind=FieldKind.CONCAT, default=None)
@@ -165,36 +196,18 @@ class Images(Batch):
         if not items:
             raise ValueError("Cannot build Images from an empty list")
         pixels_list = [img.pixels for img in items]
+        if any(p is None or p.ndim != 3 for p in pixels_list):
+            bad = [None if p is None else tuple(p.shape) for p in pixels_list]
+            raise ValueError(f"Images.from_list expects per-sample pixels [C, H, W], got {bad}")
         shapes = [tuple(p.shape) for p in pixels_list]
         if len(set(shapes)) != 1:
             channels = {int(p.shape[0]) for p in pixels_list}
             if len(channels) != 1:
                 raise ValueError(f"Images.from_list requires a consistent channel count, got {sorted(channels)}")
-            max_h = max(int(p.shape[-2]) for p in pixels_list)
-            max_w = max(int(p.shape[-1]) for p in pixels_list)
-            logger.warning(
-                "Images.from_list: mixed H/W %s → resizing to (%d, %d) "
-                "(zero-pad removed; aspect may change — see issue #169)",
-                sorted(set(shapes)),
-                max_h,
-                max_w,
+            raise ValueError(
+                "Images.from_list requires uniform [C, H, W] shapes for dense outputs, "
+                f"got {sorted(set(shapes))}; use NativeImages.from_list for native-resolution inputs"
             )
-            # Resize (not zero-pad) ragged images to the batch-max H/W so
-            # mixed-resolution inputs don't get black borders; model-specific
-            # encoders still resize to their requested resolution later.
-            resized = []
-            for p in pixels_list:
-                if int(p.shape[-2]) == max_h and int(p.shape[-1]) == max_w:
-                    resized.append(p)
-                else:
-                    p4 = torch.nn.functional.interpolate(
-                        p.unsqueeze(0).float(),
-                        size=(max_h, max_w),
-                        mode="bilinear",
-                        align_corners=False,
-                    )
-                    resized.append(p4.squeeze(0).to(p.dtype))
-            pixels_list = resized
         stacked = torch.stack(pixels_list, dim=0)
         return cls(pixels=stacked)
 
@@ -342,6 +355,7 @@ __all__ = [
     "Embedding",
     "Image",
     "Images",
+    "NativeImages",
     "Text",
     "TextAndImage",
     "TextAndVideo",

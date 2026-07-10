@@ -37,7 +37,7 @@ from contextlib import nullcontext
 import torch
 
 from unirl.models.types.codec import DecodeStage
-from unirl.types.primitives import Images
+from unirl.types.primitives import Images, NativeImages
 from unirl.types.segments import LatentSegment
 
 from .bundle import Flux2KleinBundle
@@ -127,12 +127,12 @@ class Flux2KleinVAEEncodeStage:
         self.bundle = bundle
 
     @torch.no_grad()
-    def encode(self, images: Images, *, height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:
-        pixels = images.pixels
-        if pixels is None or pixels.ndim != 4 or pixels.shape[1] != 3:
+    def encode(self, images: NativeImages | Images, *, height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:
+        pixels_list = images.pixels if isinstance(images, NativeImages) else list(images.pixels.unbind(0))
+        if not pixels_list or any(pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(
-                f"Flux2KleinVAEEncodeStage.encode: expected pixels [B, 3, H, W] in [0,1], "
-                f"got shape {None if pixels is None else tuple(pixels.shape)}"
+                "Flux2KleinVAEEncodeStage.encode: expected per-sample pixels [3, H, W] in [0,1], "
+                f"got {[tuple(pixels.shape) for pixels in pixels_list]}"
             )
 
         vae = self.bundle.vae
@@ -145,11 +145,14 @@ class Flux2KleinVAEEncodeStage:
         # consistent token count across a GRPO group needs a fixed size. Using
         # the generation (height, width) satisfies both (recipe sizes are
         # multiples of 16) and matches the edited-image resolution.
-        pixels = pixels.to(device=device, dtype=torch.float32)
-        if int(pixels.shape[-2]) != int(height) or int(pixels.shape[-1]) != int(width):
-            pixels = torch.nn.functional.interpolate(
-                pixels, size=(int(height), int(width)), mode="bilinear", align_corners=False
-            )
+        resized_items = []
+        target_size = (int(height), int(width))
+        for pixels in pixels_list:
+            pixels = pixels.to(device=device, dtype=torch.float32).unsqueeze(0)
+            if tuple(pixels.shape[-2:]) != target_size:
+                pixels = torch.nn.functional.interpolate(pixels, size=target_size, mode="bilinear", align_corners=False)
+            resized_items.append(pixels)
+        pixels = torch.cat(resized_items, dim=0)
 
         # [0, 1] → [-1, 1] (VAE input convention).
         scaled = pixels * 2.0 - 1.0

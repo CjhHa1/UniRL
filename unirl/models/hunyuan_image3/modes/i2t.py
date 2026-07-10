@@ -1,7 +1,8 @@
 """i2t — image-to-text autoregressive generation.
 
 Reads ``primitives["text"]: Texts`` (the prompt) and
-``primitives["image"]: Images`` (the image to caption / answer about),
+``primitives["image"]: NativeImages`` (the native-resolution image to
+caption / answer about),
 plus ``stage_params["ar"]: dict`` (optional). Builds chat-templated
 ``input_ids`` with embedded ``<img>`` markers via the chat-template
 wrapper, then runs ``HunyuanImage3ARStage.autoregress`` against the
@@ -22,7 +23,7 @@ import torch
 
 from unirl.models.types.ar import ARSamplingParams
 from unirl.types.conditions import ImageEmbedCondition, ImageLatentCondition
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 
@@ -44,10 +45,10 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
             f"got {type(texts).__name__ if texts is not None else 'None'}"
         )
     images = req.primitives.get("image")
-    if not isinstance(images, Images):
+    if not isinstance(images, (NativeImages, Images)):
         raise TypeError(
             f"HunyuanImage3Pipeline.generate (i2t): "
-            f"req.primitives['image'] must be Images, "
+            f"req.primitives['image'] must be NativeImages, "
             f"got {type(images).__name__ if images is not None else 'None'}"
         )
 

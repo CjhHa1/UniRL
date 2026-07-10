@@ -1,4 +1,4 @@
-"""WAN21ImageLatentEncodeStage — Images → 20-channel mask+VAE latent payload.
+"""WAN21ImageLatentEncodeStage — native images → mask+VAE latent payload.
 
 Mirrors diffusers ``pipelines/wan/pipeline_wan_i2v.py:423-481`` for the
 ``expand_timesteps=False`` path (WAN 2.1 I2V + WAN 2.2 14B I2V). Encode
@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 from unirl.models.types.codec import EncodeStage
 from unirl.types.conditions import ImageLatentCondition
-from unirl.types.primitives import Images
+from unirl.types.primitives import Images, NativeImages
 
 _SPATIAL_DOWNSAMPLE: int = 8
 _TEMPORAL_DOWNSAMPLE: int = 4
@@ -36,7 +36,7 @@ class _VAEBundle(Protocol):
     dtype: torch.dtype
 
 
-class WAN21ImageLatentEncodeStage(EncodeStage[Images, ImageLatentCondition]):
+class WAN21ImageLatentEncodeStage(EncodeStage[NativeImages, ImageLatentCondition]):
     """Encode a reference image into the 20-channel WAN I2V condition payload."""
 
     def __init__(
@@ -52,21 +52,21 @@ class WAN21ImageLatentEncodeStage(EncodeStage[Images, ImageLatentCondition]):
         self.height = int(height)
         self.width = int(width)
 
-    def encode(self, p: Images) -> ImageLatentCondition:
-        if not isinstance(p, Images):
-            raise TypeError(f"WAN21ImageLatentEncodeStage.encode: expected Images, got {type(p).__name__}")
-        pixels = p.pixels
-        if pixels is None or pixels.ndim != 4 or pixels.shape[1] != 3:
+    def encode(self, p: NativeImages | Images) -> ImageLatentCondition:
+        if not isinstance(p, (NativeImages, Images)):
+            raise TypeError(f"WAN21ImageLatentEncodeStage.encode: expected NativeImages, got {type(p).__name__}")
+        pixels_list = p.pixels if isinstance(p, NativeImages) else list(p.pixels.unbind(0))
+        if not pixels_list or any(pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(
-                f"WAN21ImageLatentEncodeStage.encode: expected pixels [B, 3, H, W], "
-                f"got shape {None if pixels is None else tuple(pixels.shape)}"
+                "WAN21ImageLatentEncodeStage.encode: expected per-sample pixels [3, H, W], "
+                f"got {[tuple(pixels.shape) for pixels in pixels_list]}"
             )
 
         device = self.bundle.device
         dtype = self.bundle.dtype
         vae = self.bundle.vae
 
-        batch_size = int(pixels.shape[0])
+        batch_size = len(pixels_list)
         target_h = int(self.height)
         target_w = int(self.width)
         num_frames = int(self.num_frames)
@@ -77,14 +77,19 @@ class WAN21ImageLatentEncodeStage(EncodeStage[Images, ImageLatentCondition]):
         # ``(num_frames - 1) % 4 == 0`` invariant.
         latent_t = (num_frames - 1) // _TEMPORAL_DOWNSAMPLE + 1
 
-        pixels = pixels.to(device=device, dtype=torch.float32)
-        resized = F.interpolate(
-            pixels,
-            size=(target_h, target_w),
-            mode="bicubic",
-            align_corners=False,
-            antialias=True,
-        )
+        resized_items = []
+        for pixels in pixels_list:
+            pixels = pixels.to(device=device, dtype=torch.float32).unsqueeze(0)
+            if tuple(pixels.shape[-2:]) != (target_h, target_w):
+                pixels = F.interpolate(
+                    pixels,
+                    size=(target_h, target_w),
+                    mode="bicubic",
+                    align_corners=False,
+                    antialias=True,
+                )
+            resized_items.append(pixels)
+        resized = torch.cat(resized_items, dim=0)
         # [0, 1] → [-1, 1] (VAE input convention).
         scaled = resized * 2.0 - 1.0
         # Add T axis then zero-pad to (num_frames - 1) blanks → [B, 3, T_pix, H, W].

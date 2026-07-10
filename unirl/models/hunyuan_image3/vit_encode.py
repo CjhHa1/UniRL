@@ -25,18 +25,18 @@ import torch
 
 from unirl.models.types.codec import EncodeStage
 from unirl.types.conditions import ImageEmbedCondition
-from unirl.types.primitives import Images
+from unirl.types.primitives import Images, NativeImages
 
 from .bundle import HunyuanImage3Bundle
 
 
-class HunyuanImage3VitEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
+class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages, ImageEmbedCondition]):
     """SigLIP2-based image → ImageEmbedCondition stage."""
 
     def __init__(self, bundle: HunyuanImage3Bundle) -> None:
         self.bundle = bundle
 
-    def encode(self, p: Images) -> ImageEmbedCondition:
+    def encode(self, p: NativeImages | Images) -> ImageEmbedCondition:
         """Encode pixel images into ViT patch embeddings.
 
         Pixel input convention: ``[B, C, H, W]`` in ``[0, 1]``. SigLIP2
@@ -47,7 +47,14 @@ class HunyuanImage3VitEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
         if p.pixels is None:
             raise ValueError("HunyuanImage3VitEncodeStage.encode: pixels is None")
 
-        x = p.pixels.to(self.bundle.device).to(self.bundle.dtype)
+        pixels_list = p.pixels if isinstance(p, NativeImages) else list(p.pixels.unbind(0))
+        shapes = {tuple(pixels.shape) for pixels in pixels_list}
+        if len(shapes) != 1:
+            raise ValueError(
+                "HunyuanImage3VitEncodeStage.encode requires uniform image shapes; "
+                "use encode_for_cond_vit for native mixed-resolution inputs"
+            )
+        x = torch.stack(pixels_list, dim=0).to(self.bundle.device).to(self.bundle.dtype)
         # [0, 1] → [-1, 1] mirroring upstream image_processor.
         x = x * 2.0 - 1.0
 
@@ -68,7 +75,7 @@ class HunyuanImage3VitEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
     # Chat-template-driven input prep -- canonical i2t / it2i entry point.
     # ------------------------------------------------------------------
 
-    def encode_for_cond_vit(self, p: Images) -> Dict[str, Any]:
+    def encode_for_cond_vit(self, p: NativeImages | Images) -> Dict[str, Any]:
         """Prep cond-image features for the unified MM forward.
 
         Mirrors ``HunyuanImage3ForCausalMM._encode_cond_image``
@@ -79,11 +86,11 @@ class HunyuanImage3VitEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
         cond_vit tensors and the ``vit_kwargs`` dict shape SigLIP2 needs.
 
         Args:
-            p: ``Images`` primitive carrying ``pixels: [B, 3, H, W]``
-                float in ``[0, 1]``.
+            p: ``NativeImages`` carrying per-sample ``[3, H_i, W_i]``
+                float tensors in ``[0, 1]``.
 
         Returns:
-            Dict with the following keys (let ``B = p.pixels.shape[0]``,
+            Dict with the following keys (let ``B = len(p)``,
             ``S_b`` = SigLIP2 patch count for sample b, ``D`` = ViT
             hidden width):
 
@@ -115,11 +122,11 @@ class HunyuanImage3VitEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
                 "transformer has no .image_processor (unloaded checkpoint?)."
             )
 
-        pixels = p.pixels
-        if pixels.dim() != 4 or pixels.shape[1] != 3:
+        pixels_list = p.pixels if isinstance(p, NativeImages) else list(p.pixels.unbind(0))
+        if not pixels_list or any(pixels.dim() != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(
-                f"HunyuanImage3VitEncodeStage.encode_for_cond_vit: pixels must "
-                f"be [B, 3, H, W], got {tuple(pixels.shape)}"
+                "HunyuanImage3VitEncodeStage.encode_for_cond_vit: pixels must be "
+                f"per-sample [3, H, W], got {[tuple(pixels.shape) for pixels in pixels_list]}"
             )
 
         # Convert each sample to PIL RGB for upstream's image_processor.
@@ -131,8 +138,8 @@ class HunyuanImage3VitEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
         cond_vit_images: List[torch.Tensor] = []
         spatial_shapes_list: List[torch.Tensor] = []
         attn_mask_list: List[torch.Tensor] = []
-        for b in range(int(pixels.shape[0])):
-            pil_image = to_pil_image(pixels[b].clamp(0.0, 1.0).float().cpu())
+        for pixels in pixels_list:
+            pil_image = to_pil_image(pixels.clamp(0.0, 1.0).float().cpu())
             if pil_image.mode != "RGB":
                 pil_image = pil_image.convert("RGB")
             if hasattr(image_processor, "preprocess"):

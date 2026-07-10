@@ -27,7 +27,7 @@ class RewardRequest:
     ``primitives``
         Input context — what was fed to the model.  Copied from
         ``RolloutReq.primitives``.  Typical keys: ``"text"`` (prompt
-        ``Texts``), ``"image"`` (conditioning ``Images``).
+        ``Texts``), ``"image"`` (conditioning ``NativeImages``).
 
     ``generated``
         Model output being scored — from ``RolloutTrack.decoded``.

@@ -2,7 +2,7 @@
 
 Four-tier flow, per-sample (navit ``bs=1``)::
 
-    Texts [+ Images] ─build 3 KV contexts─▶ BagelDiffusionConditions ─diffuse─▶ LatentSegment ─vae_decode─▶ Images
+    Texts [+ NativeImages] ─build 3 KV contexts─▶ BagelDiffusionConditions ─diffuse─▶ LatentSegment ─vae_decode─▶ Images
 
 Also serves the text-out modes (t2t / i2t / it2t, via :class:`BagelARStage`) and
 the composed **t2ti** (native think-then-generate: the AR und path plans a
@@ -11,7 +11,7 @@ linked tracks).
 
 Task routing (``_resolve_task``): explicit ``req.stage_config["task"]`` wins;
 else both ``ar`` + ``diffusion`` sampling entries ⇒ ``t2ti``; ``ar`` only ⇒
-text-out; an ``Images`` input ⇒ ``it2i`` (editing), else ``t2i``.
+text-out; a ``NativeImages`` input ⇒ ``it2i`` (editing), else ``t2i``.
 
 Per prompt the pipeline builds the three KV-cache contexts the sampler needs
 (mirroring ``InterleaveInferencer.interleave_inference``, ``think=False``;
@@ -53,7 +53,7 @@ from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.sde.runtime import FlowMatchSchedulePolicy
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack, _track_with_field
 from unirl.types.segments.latent import LatentSegment
@@ -180,13 +180,13 @@ class BagelPipeline(Pipeline):
     def _extract_input_images(self, req: RolloutReq, task: str, *, n_prompts: Optional[int]) -> List[Any]:
         """Validated per-sample input PILs for image-input tasks (it2i / i2t / it2t).
 
-        Requires an ``Images`` primitive, a ViT-loaded bundle (``enable_vit``),
+        Requires a ``NativeImages`` primitive, a ViT-loaded bundle (``enable_vit``),
         and — when prompts are present — a matching per-sample count.
         """
         images_prim = req.primitives.get("image")
-        if not isinstance(images_prim, Images):
+        if not isinstance(images_prim, (NativeImages, Images)):
             raise TypeError(
-                f"BagelPipeline.generate ({task}): req.primitives['image'] must be Images, "
+                f"BagelPipeline.generate ({task}): req.primitives['image'] must be NativeImages, "
                 f"got {type(images_prim).__name__ if images_prim is not None else 'None'}"
             )
         if getattr(self.bundle.model, "vit_model", None) is None:
@@ -272,9 +272,9 @@ class BagelPipeline(Pipeline):
 
         Inference from the modality-keyed ``sampling_params`` dict: both
         ``"ar"`` + ``"diffusion"`` ⇒ ``t2ti`` (think-then-generate); ``"ar"``
-        only ⇒ text-out (``it2t`` with an ``Images`` input, else ``t2t``; pure
+        only ⇒ text-out (``it2t`` with a ``NativeImages`` input, else ``t2t``; pure
         ``i2t`` — image, no prompt — must be explicit); ``"diffusion"`` only ⇒
-        image-out (``it2i`` with an ``Images`` input, else ``t2i``).
+        image-out (``it2i`` with a ``NativeImages`` input, else ``t2i``).
         """
         task = req.stage_config.get("task")
         if task is not None:
@@ -282,7 +282,7 @@ class BagelPipeline(Pipeline):
         sp = req.sampling_params
         if "ar" in sp and "diffusion" in sp:
             return "t2ti"
-        has_image = isinstance(req.primitives.get("image"), Images)
+        has_image = isinstance(req.primitives.get("image"), (NativeImages, Images))
         if "ar" in sp:
             return "it2t" if has_image else "t2t"
         return "it2i" if has_image else "t2i"

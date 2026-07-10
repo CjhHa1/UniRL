@@ -1,7 +1,8 @@
 """it2i — image-edit (text + cond image conditioning, image output).
 
-Reads ``primitives["text"]: Texts`` + ``primitives["image"]: Images``
-(the source image to edit) and ``stage_params["diffusion"]: dict``.
+Reads ``primitives["text"]: Texts`` + ``primitives["image"]: NativeImages``
+(the native-resolution source image to edit) and
+``stage_params["diffusion"]: dict``.
 Encodes the source image via the upstream
 ``HunyuanImage3VitEncodeStage.encode_for_cond_vit`` (image_processor)
 and the model's own ``_encode_cond_image`` for VAE latents, builds the
@@ -22,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from unirl.config.require import require
 from unirl.types.conditions import ImageEmbedCondition, ImageLatentCondition
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 from unirl.types.sampling import DiffusionSamplingParams
@@ -44,9 +45,9 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
     )
     images = req.primitives.get("image")
     require(
-        isinstance(images, Images),
+        isinstance(images, (NativeImages, Images)),
         f"HunyuanImage3Pipeline.generate (it2i): req.primitives['image'] "
-        f"must be Images, "
+        f"must be NativeImages, "
         f"got {type(images).__name__ if images is not None else 'None'}",
     )
     require(

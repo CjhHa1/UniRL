@@ -79,20 +79,17 @@ logger = logging.getLogger(__name__)
 # typed ``list[torch.Tensor] | None`` (one entry per text encoder) on
 # OutputBatch; ``Any``-typed on GenerationResult to match its existing style.
 #
-# ``image_latent`` (7th field, Edit-Plus only) is a single packed
-# ``[B, S_img, C*4]`` tensor — NOT a per-encoder list. It is wrapped as a
-# one-element list ``[tensor]`` at copy time so it flows through the existing
-# list-based merge/slice path unchanged (one "encoder", one tensor). Only
-# Edit-Plus sets ``batch.image_latent`` (via upstream's
-# ``ImageVAEEncodingStage``); T2I models leave it ``None``, so this field is
-# a no-op for every non-Edit-Plus adapter.
+# ``image_latent`` (7th field, Edit-Plus only) is a packed
+# ``[1, S_img, C*4]`` tensor per output. It is represented as
+# ``list[encoder=1][batch]`` so outputs with different ``S_img`` can coexist
+# without padding or concatenating unlike token grids. Only Edit-Plus sets
+# ``batch.image_latent``; T2I models leave it ``None``.
 #
-# ``image_latent_sizes`` (8th field, Edit-Plus only) carries the per-request
+# ``image_latent_sizes`` (8th field, Edit-Plus only) carries each sample's
 # ``vae_image_sizes`` (a ``list[tuple[int, int]]`` of pixel (W, H) pairs from
-# upstream's ``preprocess_vae_image``). The adapter needs these to unpack
-# ``image_latent`` from packed ``[S_img, C*4]`` to spatial ``[C, H_img, W_img]``
-# (S_img alone is ambiguous — multiple H×W grids give the same token count).
-# Wrapped as ``[value]`` to fit the list-based merge/slice path.
+# upstream's ``preprocess_vae_image``). It is represented as
+# ``list[encoder][batch][source_image]`` so grouped outputs and mixed-aspect
+# prompts can be merged and sliced exactly like tensor conditions.
 _COND_FIELDS = (
     "prompt_embeds",
     "pooled_prompt_embeds",
@@ -309,21 +306,72 @@ def _copy_conditions(src, output_batch) -> None:
     # Edit-Plus image_latent: a single packed [B, S_img, C*4] tensor set by
     # upstream's ImageVAEEncodingStage. Not gated on a SamplingParams flag —
     # presence on the batch IS the gate (only Edit-Plus sets it; T2I leaves
-    # it None). Wrapped as [tensor] to fit the list-based merge/slice path.
+    # it None). Preserve a ragged batch axis: [encoder=1][batch].
     image_latent = getattr(src, "image_latent", None)
+    image_batch_size = None
     if image_latent is not None:
         import torch
 
         if torch.is_tensor(image_latent):
-            output_batch.image_latent = [image_latent.detach().cpu()]
+            rows = [row.detach().cpu() for row in image_latent.split(1, dim=0)]
         elif isinstance(image_latent, (list, tuple)):
-            output_batch.image_latent = [t.detach().cpu() if torch.is_tensor(t) else t for t in image_latent]
+            rows = []
+            for latent in image_latent:
+                if torch.is_tensor(latent):
+                    rows.extend(row.detach().cpu() for row in latent.split(1, dim=0))
+                else:
+                    rows.append(latent)
+        else:
+            rows = [image_latent]
+        image_batch_size = len(rows)
+        output_batch.image_latent = [rows]
     # Edit-Plus vae_image_sizes: list[tuple[int, int]] of pixel (W, H) pairs
-    # from upstream's preprocess_vae_image. The adapter needs these to unpack
-    # image_latent to spatial form. Wrapped as [value] for the merge/slice path.
+    # from upstream's preprocess_vae_image. Preserve an explicit batch axis:
+    # [encoder=1][batch][source_image].
     vae_image_sizes = getattr(src, "vae_image_sizes", None)
     if vae_image_sizes is not None:
-        output_batch.image_latent_sizes = [vae_image_sizes]
+        per_sample_sizes = _normalize_vae_image_sizes(vae_image_sizes, image_batch_size)
+        output_batch.image_latent_sizes = [per_sample_sizes]
+
+
+def _normalize_vae_image_sizes(vae_image_sizes, image_batch_size):
+    """Normalize upstream size metadata to ``[batch][source_image]``.
+
+    SGLang versions expose either a flat ``[(W, H)]`` list for one sample,
+    one ``(W, H)`` tuple per batch row, or an already nested
+    ``[batch][source_image]`` list. Reject every other shape here rather than
+    letting the response adapter silently pair a latent with another sample's
+    spatial grid.
+    """
+
+    def _is_size(value) -> bool:
+        return isinstance(value, tuple) and len(value) == 2
+
+    if image_batch_size is None:
+        raise ValueError("vae_image_sizes is present but image_latent is missing")
+    if not isinstance(vae_image_sizes, (list, tuple)):
+        raise TypeError(f"vae_image_sizes must be a list/tuple, got {type(vae_image_sizes).__name__}")
+
+    entries = list(vae_image_sizes)
+    if image_batch_size == 1 and entries and all(_is_size(size) for size in entries):
+        # One sample with one or more source images.
+        return [entries]
+    if len(entries) != image_batch_size:
+        raise ValueError(
+            f"image_latent/vae_image_sizes batch mismatch: latents={image_batch_size}, sizes={len(entries)}"
+        )
+    if all(_is_size(size) for size in entries):
+        # One source image per batch row.
+        return [[size] for size in entries]
+    if all(
+        isinstance(sample_sizes, (list, tuple)) and sample_sizes and all(_is_size(size) for size in sample_sizes)
+        for sample_sizes in entries
+    ):
+        return [list(sample_sizes) for sample_sizes in entries]
+    raise ValueError(
+        "vae_image_sizes must be [(W, H)] or [batch][source_image], "
+        f"got {vae_image_sizes!r} for batch size {image_batch_size}"
+    )
 
 
 def _copy_mapped_conditions(src, output_batch, mapping) -> None:
@@ -498,10 +546,13 @@ def _merge_conditions(merged, output_batches) -> None:
             tensors = [v[enc_idx] for v in per_batch]
             if any(t is None for t in tensors):
                 merged_list.append(None)
+            elif name == "image_latent":
+                # Ragged [batch] tensors. Token counts may differ by aspect.
+                merged_list.append([row for batch_rows in tensors for row in batch_rows])
             elif name == "image_latent_sizes":
-                # Non-tensor (list[tuple[int,int]]); all outputs in a group
-                # share the same source image, so take the first.
-                merged_list.append(tensors[0])
+                # Ragged [batch][source_image] metadata. Extend only the batch
+                # axis; keep each sample's source-image list intact.
+                merged_list.append([entry for batch_entries in tensors for entry in batch_entries])
             else:
                 merged_list.append(torch.cat(tensors, dim=0))
         setattr(merged, name, merged_list)
@@ -537,15 +588,10 @@ def _wrap_result_common(DiffGenerator) -> None:
         idx = 0 if output_index is None else int(output_index)
         for name in _COND_FIELDS:
             val = getattr(output_batch, name, None)
-            if name == "image_latent_sizes":
-                # image_latent_sizes is list[tuple[int,int]] per encoder (NOT
-                # per-output — all outputs in a group share one source image).
-                # _merge_conditions already took tensors[0] across batches, so
-                # the merged value has exactly one entry per encoder. Slicing
-                # by output_index would index past it (e.g. [(1024,1024)][3:4]
-                # = []) → "got 0 source images" in _collect_image_latents.
-                # Pass through unchanged.
-                common[name] = val
+            if name == "image_latent":
+                common[name] = _slice_ragged_tensor_list(val, idx)
+            elif name == "image_latent_sizes":
+                common[name] = _slice_image_size_list(val, idx)
             else:
                 common[name] = _slice_embed_list(val, idx)
         return common
@@ -564,3 +610,55 @@ def _slice_embed_list(embed_list, idx: int):
     if embed_list is None:
         return None
     return [t[idx : idx + 1] if t is not None else None for t in embed_list]
+
+
+def _slice_image_size_list(size_list, idx: int):
+    """Slice one output from ``[encoder][batch][source_image]`` metadata.
+
+    Returns ``[encoder][source_image]``, the shape consumed by
+    ``QwenImageEditPlusAdapter._collect_image_latents``. The legacy
+    ``[encoder][source_image]`` shape is passed through for compatibility.
+    """
+    if size_list is None:
+        return None
+    sliced = []
+    for per_encoder in size_list:
+        if per_encoder is None:
+            sliced.append(None)
+            continue
+        if per_encoder and all(isinstance(size, tuple) and len(size) == 2 for size in per_encoder):
+            if idx != 0:
+                raise IndexError(
+                    "legacy unbatched image_latent_sizes metadata only contains output index 0; "
+                    f"cannot select index {idx}"
+                )
+            sliced.append(per_encoder)
+            continue
+        if idx >= len(per_encoder):
+            raise IndexError(
+                f"image_latent_sizes output index {idx} out of range for batch metadata of length {len(per_encoder)}"
+            )
+        sliced.append(per_encoder[idx])
+    return sliced
+
+
+def _slice_ragged_tensor_list(tensor_list, idx: int):
+    """Slice one output from ``[encoder][batch]`` packed-latent metadata.
+
+    Legacy ``[encoder][B,S,C]`` tensors are sliced on dim 0 for compatibility.
+    """
+    if tensor_list is None:
+        return None
+    sliced = []
+    for per_encoder in tensor_list:
+        if per_encoder is None:
+            sliced.append(None)
+        elif hasattr(per_encoder, "dim"):
+            sliced.append(per_encoder[idx : idx + 1])
+        else:
+            if idx >= len(per_encoder):
+                raise IndexError(
+                    f"image_latent output index {idx} out of range for batch metadata of length {len(per_encoder)}"
+                )
+            sliced.append(per_encoder[idx])
+    return sliced
