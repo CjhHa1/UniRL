@@ -97,20 +97,21 @@ export to Hugging Face, share:
 ### Standalone evaluation
 
 `BaseTrainer.run_eval(load_dir=...)` restores an optional checkpoint and calls
-the subclass `evaluate()` once — no train loop. Thin Hydra wrappers:
+the subclass `evaluate()` once — no train loop. The unified Hydra entrypoint
+selects the trainer with `--domain`:
 
 ```bash
 # Diffusion (PickScore / FlowDPPO recipe)
-PRETRAINED_MODEL=<base> python -m unirl.eval_diffusion \
+PRETRAINED_MODEL=<base> python -m unirl.eval --domain diffusion \
   --config-name=diffusion/sd3/sd3_flowdppo num_devices=8 +load_dir=<ckpt>
 
 # AR (full val set by default; #189)
-EVAL_DATA_PATH=<val.jsonl> QWEN_VL_PATH=<base> python -m unirl.eval_ar \
+EVAL_DATA_PATH=<val.jsonl> QWEN_VL_PATH=<base> python -m unirl.eval --domain ar \
   --config-name=ar/qwen_vl_grpo_geo3k_mc_4x8 num_devices=8 +load_dir=<ckpt>
 ```
 
-In-loop periodic eval (`eval_interval`) is unchanged; the entrypoints above are
-for one-shot ckpt scoring (issue #182).
+In-loop periodic eval (`eval_interval`) is unchanged; the commands above are for
+one-shot ckpt scoring (issue #182).
 
 ```bash
 # 1. Train, saving LoRA-only checkpoints every 200 rollouts

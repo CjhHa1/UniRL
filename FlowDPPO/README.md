@@ -161,19 +161,19 @@ curve above is the **SD3.5-medium** run, going from ~0.75 to ~0.89 over ~270 ste
 
 ## Evaluate a checkpoint
 
-Standalone eval (no train loop) via `python -m unirl.eval_diffusion`. In-domain vs
-out-of-domain is just a different `eval_data_path` (and optionally a different
-`reward` scorer).
+Standalone eval (no train loop) via `python -m unirl.eval --domain diffusion`.
+In-domain vs out-of-domain is just a different `eval_data_path` (and optionally
+a different `reward` scorer).
 
 ```bash
 # Full-weight HF / exported ckpt (base via PRETRAINED_MODEL)
 PRETRAINED_MODEL=<hf-or-local-ckpt> \
-python -m unirl.eval_diffusion --config-name=diffusion/sd3/sd3_flowdppo \
+python -m unirl.eval --domain diffusion --config-name=diffusion/sd3/sd3_flowdppo \
   num_devices=8 +eval_num_prompts=64 +eval_samples_per_prompt=4
 
 # Trained LoRA adapter (base stays PRETRAINED_MODEL)
 PRETRAINED_MODEL=stabilityai/stable-diffusion-3.5-medium \
-python -m unirl.eval_diffusion --config-name=diffusion/sd3/sd3_flowdppo \
+python -m unirl.eval --domain diffusion --config-name=diffusion/sd3/sd3_flowdppo \
   num_devices=8 +load_dir=<checkpoint_dir>
 
 # Out-of-domain: swap the eval prompt list
