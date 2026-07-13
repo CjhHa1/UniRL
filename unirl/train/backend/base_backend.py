@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from concurrent.futures import Future
 from typing import Dict, List, Literal, Optional
 
 import torch
@@ -53,6 +54,80 @@ from unirl.train.lora import inject_lora
 from unirl.train.optim import build_lr_scheduler, build_optimizer
 
 logger = logging.getLogger(__name__)
+
+_PENDING_DCP_SAVE_FUTURE: Optional[Future] = None
+
+
+def _set_pending_dcp_save(future: Future) -> None:
+    """Register the one async DCP upload allowed in this worker process."""
+    global _PENDING_DCP_SAVE_FUTURE
+    if _PENDING_DCP_SAVE_FUTURE is not None:
+        raise RuntimeError("an async DCP save is already pending in this worker process")
+    _PENDING_DCP_SAVE_FUTURE = future
+
+
+def _drain_pending_dcp_save() -> None:
+    """Wait for the process-wide async DCP upload, if any."""
+    global _PENDING_DCP_SAVE_FUTURE
+    future = _PENDING_DCP_SAVE_FUTURE
+    if future is None:
+        return
+    try:
+        future.result()
+    finally:
+        if _PENDING_DCP_SAVE_FUTURE is future:
+            _PENDING_DCP_SAVE_FUTURE = None
+
+
+def _prepare_dcp_directory(
+    path: str,
+    metadata: Dict[str, object],
+    *,
+    process_group: Optional[dist.ProcessGroup],
+) -> None:
+    """Publish app metadata and invalidate any stale DCP completion marker.
+
+    DCP writes ``.metadata`` last. Removing an old copy before an overwrite
+    preserves that commit-marker contract while the new shards are in flight.
+    The rank-0 preparation error is broadcast so no peer enters DCP alone.
+    """
+    local_error: Optional[str] = None
+    local_exc: Optional[Exception] = None
+    metadata_path = os.path.join(path, "metadata.pt")
+    metadata_tmp = f"{metadata_path}.tmp"
+
+    if _current_rank() == 0:
+        try:
+            os.makedirs(path, exist_ok=True)
+            torch.save(metadata, metadata_tmp)
+            dcp_metadata_path = os.path.join(path, ".metadata")
+            if os.path.exists(dcp_metadata_path):
+                os.remove(dcp_metadata_path)
+            torch_checkpoint_path = os.path.join(path, "checkpoint.pt")
+            if os.path.exists(torch_checkpoint_path):
+                os.remove(torch_checkpoint_path)
+            os.replace(metadata_tmp, metadata_path)
+        except Exception as exc:
+            local_exc = exc
+            local_error = f"{type(exc).__name__}: {exc}"
+            try:
+                if os.path.exists(metadata_tmp):
+                    os.remove(metadata_tmp)
+            except OSError:
+                pass
+
+    if dist.is_available() and dist.is_initialized():
+        error_box: List[Optional[str]] = [local_error]
+        dist.broadcast_object_list(error_box, src=0, group=process_group)
+        error = error_box[0]
+    else:
+        error = local_error
+
+    if error is not None:
+        wrapped = RuntimeError(f"failed to prepare DCP checkpoint directory {path!r}: {error}")
+        if local_exc is not None:
+            raise wrapped from local_exc
+        raise wrapped
 
 
 class BaseFSDP2Backend(Remote):
@@ -188,9 +263,6 @@ class BaseFSDP2Backend(Remote):
             )
         self._checkpoint_format: str = checkpoint_format
         self._checkpoint_async: bool = bool(getattr(fsdp_cfg, "checkpoint_async", False))
-        # Future from the most recent ``dcp.async_save`` (None when sync or idle).
-        # Drained before the next save and by ``wait_for_checkpoint``.
-        self._pending_save_future: Optional[object] = None
         # Checkpointed for export tooling: the LoRA fold needs scaling =
         # alpha / rank, and alpha is not derivable from the weights.
         active_lora = lora_cfg or ema_lora_cfg
@@ -399,7 +471,22 @@ class BaseFSDP2Backend(Remote):
         if _current_rank() != 0:
             return
         os.makedirs(path, exist_ok=True)
-        torch.save(state, os.path.join(path, "checkpoint.pt"))
+        checkpoint_path = os.path.join(path, "checkpoint.pt")
+        checkpoint_tmp = f"{checkpoint_path}.tmp"
+        try:
+            torch.save(state, checkpoint_tmp)
+            for stale_dcp_file in (".metadata", "metadata.pt"):
+                stale_path = os.path.join(path, stale_dcp_file)
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+            os.replace(checkpoint_tmp, checkpoint_path)
+        except Exception:
+            try:
+                if os.path.exists(checkpoint_tmp):
+                    os.remove(checkpoint_tmp)
+            except OSError:
+                pass
+            raise
 
     def _save_dcp(self, path: str, step: Optional[int], mode: str) -> None:
         """Sharded save: every rank writes its own shard under ``path``.
@@ -420,10 +507,10 @@ class BaseFSDP2Backend(Remote):
         import torch.distributed.checkpoint as dcp
 
         # Finish any in-flight async save before snapshotting fresh state: two
-        # concurrent writes would race the staging buffers and the shard files.
+        # concurrent DCP collectives can deadlock. The future is process-wide
+        # because PE can colocate two independent backends on the same workers.
         self._drain_checkpoint()
         self._reject_meta(operation="save", checkpoint_format="dcp", mode=mode)
-        os.makedirs(path, exist_ok=True)
         model_sd = drop_meta_entries(sharded_model_state_dict(self.model))
         if mode == "adapter":
             model_sd = {k: v for k, v in model_sd.items() if "lora_A" in k or "lora_B" in k}
@@ -431,24 +518,6 @@ class BaseFSDP2Backend(Remote):
             "model": model_sd,
             "optim": sharded_optimizer_state_dict(self.model, self.optimizer),
         }
-        if self._checkpoint_async:
-            # async_save stages to CPU and coordinates on a CPU collective, so it
-            # needs a process group with a CPU (gloo) backend. The train PG is
-            # NCCL-only (fully_shard auto-init / backend="nccl"), which makes
-            # async_save assert "A CPU backend must be enabled for async save", so
-            # hand it a lazily-created, memoized gloo group. None when not
-            # distributed (single process) — async_save then runs no_dist.
-            pg = None
-            if dist.is_available() and dist.is_initialized():
-                from unirl.utils.distributed_utils import init_gloo_group
-
-                pg = init_gloo_group()
-            self._pending_save_future = dcp.async_save(sharded_state, checkpoint_id=path, process_group=pg)
-        else:
-            dcp.save(sharded_state, checkpoint_id=path)
-
-        if _current_rank() != 0:
-            return
         meta: Dict[str, object] = {
             "optimizer_step_count": self._optimizer_step_count,
             "step": step,
@@ -457,23 +526,35 @@ class BaseFSDP2Backend(Remote):
         }
         if self.scheduler is not None:
             meta["scheduler_state_dict"] = self.scheduler.state_dict()
-        # metadata.pt may land before the async shards, but load() gates the DCP
-        # branch on DCP's own ``.metadata`` — which the background writer emits
-        # last — so a half-written async checkpoint is never read as complete.
-        torch.save(meta, os.path.join(path, "metadata.pt"))
+
+        pg = None
+        if self._checkpoint_async:
+            # async_save stages to CPU and coordinates on a CPU collective, so it
+            # needs a process group with a CPU (gloo) backend. The train PG is
+            # NCCL-only (fully_shard auto-init / backend="nccl"), which makes
+            # async_save assert "A CPU backend must be enabled for async save", so
+            # hand it a lazily-created, memoized gloo group. None when not
+            # distributed (single process) — async_save then runs no_dist.
+            if dist.is_available() and dist.is_initialized():
+                from unirl.utils.distributed_utils import init_gloo_group
+
+                pg = init_gloo_group()
+        _prepare_dcp_directory(path, meta, process_group=pg)
+
+        if self._checkpoint_async:
+            future = dcp.async_save(sharded_state, checkpoint_id=path, process_group=pg)
+            _set_pending_dcp_save(future)
+        else:
+            dcp.save(sharded_state, checkpoint_id=path)
 
     def _drain_checkpoint(self) -> None:
         """Block until a pending async DCP save finishes (no-op if none).
 
         ``dcp.async_save`` returns a future that completes when the background
-        shard write lands; resolving it re-raises any write error on the rank
-        that hit it.
+        shard write lands. The future is process-wide so colocated backends
+        cannot start overlapping DCP collectives on the shared gloo group.
         """
-        future = self._pending_save_future
-        if future is None:
-            return
-        self._pending_save_future = None
-        future.result()
+        _drain_pending_dcp_save()
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def wait_for_checkpoint(self) -> None:
