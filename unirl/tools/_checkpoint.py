@@ -35,9 +35,7 @@ def load_training_checkpoint(path: str) -> Dict[str, object]:
         if os.path.exists(app_metadata) or any(
             name.endswith(".distcp") or name == ".metadata.tmp" for name in os.listdir(path)
         ):
-            raise RuntimeError(
-                f"incomplete DCP checkpoint at {path!r}: async shard flush has not published .metadata"
-            )
+            raise RuntimeError(f"incomplete DCP checkpoint at {path!r}: async shard flush has not published .metadata")
         if os.path.exists(file_path):
             checkpoint = _torch_load(file_path)
             checkpoint["_checkpoint_format"] = "torch"
@@ -77,9 +75,7 @@ def _load_dcp(path: str) -> Dict[str, object]:
         from torch.distributed.checkpoint.default_planner import _EmptyStateDictLoadPlanner
         from torch.distributed.checkpoint.state_dict_loader import _load_state_dict
     except ImportError as exc:
-        raise RuntimeError(
-            f"DCP export requires PyTorch >= 2.4; installed version is {torch.__version__}"
-        ) from exc
+        raise RuntimeError(f"DCP export requires PyTorch >= 2.4; installed version is {torch.__version__}") from exc
 
     sharded: Dict[str, object] = {}
     _load_state_dict(
