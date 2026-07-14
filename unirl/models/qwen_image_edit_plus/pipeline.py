@@ -193,6 +193,10 @@ class QwenImageEditPlusPipeline(Pipeline):
             vae_encode=vae_encode,
             vae_decode=vae_decode,
             shift=float(config.shift),
+            max_sequence_length=config.max_sequence_length,
+            use_condition_image_prompt=config.use_condition_image_prompt,
+            processor_path=config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path,
+            processor_subfolder=config.processor_subfolder,
         )
 
     def generate(self, req: RolloutReq) -> RolloutResp:

@@ -34,7 +34,8 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from unirl.models.types.embedding import EmbedStage
+from unirl.models.qwen_image.text_embed import extract_masked_hidden
+from unirl.models.types.embedding import ImageConditionedEmbedStage
 from unirl.types.conditions import TextEmbedCondition
 from unirl.types.primitives import Images, Texts
 
@@ -74,7 +75,7 @@ def _condition_size_for_aspect(width: int, height: int) -> Tuple[int, int]:
     return int(cond_w), int(cond_h)
 
 
-class QwenImageEditPlusTextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
+class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, Images, TextEmbedCondition]):
     """Condition-image + text → ``TextEmbedCondition`` via Qwen2.5-VL.
 
     The ``embed`` signature takes the source ``Images`` alongside the
@@ -113,11 +114,11 @@ class QwenImageEditPlusTextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
         pre-resized to the condition grid before the processor's own
         smart-resize, matching upstream.
         """
-        from transformers import AutoProcessor
+        from transformers import Qwen2VLProcessor
 
-        return AutoProcessor.from_pretrained(path, subfolder=subfolder)
+        return Qwen2VLProcessor.from_pretrained(path, subfolder=subfolder)
 
-    def embed(self, p: Texts, images: Images) -> TextEmbedCondition:  # type: ignore[override]
+    def embed(self, p: Texts, images: Images) -> TextEmbedCondition:
         """Encode prompts conditioned on the source images."""
         prompt_embeds, prompt_embeds_mask = self._encode(list(p.texts), images)
         return TextEmbedCondition(
@@ -125,17 +126,6 @@ class QwenImageEditPlusTextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
             attn_mask=prompt_embeds_mask,
             pooled=None,
         )
-
-    # ---- helpers -----------------------------------------------------------
-
-    @staticmethod
-    def _extract_masked_hidden(hidden_states: torch.Tensor, mask: torch.Tensor) -> List[torch.Tensor]:
-        """Split a padded ``[B, T, D]`` tensor into ``B`` variable-length
-        ``[t_i, D]`` slices using a ``[B, T]`` 0/1 mask."""
-        bool_mask = mask.bool()
-        valid_lengths = bool_mask.sum(dim=1)
-        selected = hidden_states[bool_mask]
-        return list(torch.split(selected, valid_lengths.tolist(), dim=0))
 
     def _condition_pils(self, images: Images):
         """Convert source ``Images`` to per-sample PILs resized to the
@@ -185,7 +175,7 @@ class QwenImageEditPlusTextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
             )
         hidden_states = encoder_out.hidden_states[-1]
 
-        split_hidden_states = self._extract_masked_hidden(hidden_states, model_inputs.attention_mask)
+        split_hidden_states = extract_masked_hidden(hidden_states, model_inputs.attention_mask)
         # Strip the 64-token edit-template system prefix; the remainder is
         # [image-placeholder tokens][prompt text tokens].
         split_hidden_states = [item[PROMPT_TEMPLATE_START_IDX:] for item in split_hidden_states]

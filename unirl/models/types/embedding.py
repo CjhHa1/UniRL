@@ -3,6 +3,9 @@
 ``EmbedStage[P, C]``: ``Primitive → Condition``. Same shape as
 ``EncodeStage``, separate name for the text-encoder flavor of the operation.
 
+``ImageConditionedEmbedStage[P, ImageP, C]`` covers multimodal text encoders whose
+embedding additionally depends on an image primitive.
+
 The legacy ``SampleStage`` has been removed — its rollout-level role is
 subsumed by typed ``DiffusionStage`` / ``ARStage``.
 """
@@ -12,6 +15,7 @@ from __future__ import annotations
 from typing import Protocol, TypeVar, runtime_checkable
 
 P = TypeVar("P")
+ImageP = TypeVar("ImageP")
 C = TypeVar("C")
 
 
@@ -22,4 +26,11 @@ class EmbedStage(Protocol[P, C]):
     def embed(self, p: P) -> C: ...
 
 
-__all__ = ["EmbedStage"]
+@runtime_checkable
+class ImageConditionedEmbedStage(Protocol[P, ImageP, C]):
+    """Embed a primitive with image context into its condition form."""
+
+    def embed(self, p: P, images: ImageP) -> C: ...
+
+
+__all__ = ["EmbedStage", "ImageConditionedEmbedStage"]
