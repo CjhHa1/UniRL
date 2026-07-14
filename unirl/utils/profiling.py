@@ -27,9 +27,6 @@ Optional knobs (sensible defaults; override any one):
 * ``UNIRL_PROFILE_MEMORY``  — also record CUDA memory alloc/free (default off; bigger trace).
 
 Both modes export a gzipped Chrome/Perfetto trace, one file per profiled rank.
-
-Nsight Systems ranges are controlled independently by ``UNIRL_NVTX``. They are
-disabled by default and never synchronize CUDA, mutate tensors, or consume RNG.
 """
 
 from __future__ import annotations
@@ -48,51 +45,6 @@ def _truthy(value: Optional[str], *, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
-
-
-def nvtx_enabled() -> bool:
-    """Return whether lightweight worker-side NVTX ranges are enabled."""
-    return _truthy(os.environ.get("UNIRL_NVTX")) and torch.cuda.is_available()
-
-
-@contextmanager
-def nvtx_range(name: str) -> Iterator[None]:
-    """Emit a balanced NVTX range when ``UNIRL_NVTX`` and CUDA are enabled."""
-    if not nvtx_enabled():
-        yield
-        return
-
-    torch.cuda.nvtx.range_push(str(name))
-    try:
-        yield
-    finally:
-        torch.cuda.nvtx.range_pop()
-
-
-def cuda_profiler_start(range_name: str) -> bool:
-    """Start a deferred ``cudaProfilerApi`` capture without synchronizing CUDA."""
-    if not torch.cuda.is_available():
-        return False
-
-    cudart = torch.cuda.cudart()
-    cudart.cudaProfilerStart()
-    try:
-        torch.cuda.nvtx.range_push(str(range_name))
-    except Exception:
-        cudart.cudaProfilerStop()
-        raise
-    return True
-
-
-def cuda_profiler_stop(*, range_active: bool) -> None:
-    """Close the capture range and stop deferred profiling, without a CUDA sync."""
-    if not range_active:
-        return
-
-    try:
-        torch.cuda.nvtx.range_pop()
-    finally:
-        torch.cuda.cudart().cudaProfilerStop()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -341,12 +293,8 @@ def maybe_profile_update(owner, rank: int) -> Iterator[None]:
 
 __all__ = [
     "TrainStepProfiler",
-    "cuda_profiler_start",
-    "cuda_profiler_stop",
     "maybe_build_train_profiler",
     "maybe_profile_update",
-    "nvtx_enabled",
-    "nvtx_range",
     "profile_mode",
     "profile_enabled",
     "profile_scope",
