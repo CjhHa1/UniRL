@@ -11,7 +11,10 @@ field is needed here.
 Condition-image conditioning: ``use_condition_image_prompt`` (default True)
 feeds the source image into the Qwen2.5-VL text encoder — the correct
 Edit-Plus behavior (mirrors upstream ``encode_prompt(image=...)`` and the
-SGLang rollout path). Set it False to reproduce the earlier text-only run.
+SGLang rollout path). Set it False for Edit **text-only** encoding: same
+edit chat template / drop-64, empty image prefix (upstream
+``_get_qwen_prompt_embeds(..., image=None)``). This is **not** a switch to
+base Qwen-Image's text-only stage (different system prompt / drop-34).
 """
 
 from __future__ import annotations
@@ -58,14 +61,9 @@ class QwenImageEditPlusPipelineConfig:
 
     max_sequence_length: int = 512
 
-    # Feed the source image into the Qwen2.5-VL text encoder (Edit-Plus
-    # multimodal prompt conditioning). Default True = correct Edit-Plus
-    # behavior; False falls back to the base text-only text-embed stage.
+    # True: source image → Qwen2.5-VL (Picture 1 + vision tokens).
+    # False: Edit text-only (edit template, drop 64, no vision tokens).
     use_condition_image_prompt: bool = True
-    # Subfolder holding the Qwen2.5-VL processor in the checkpoint (diffusers
-    # ``register_modules(processor=...)`` layout). Only read when
-    # ``use_condition_image_prompt`` is True.
-    processor_subfolder: str = "processor"
 
     use_lora: bool = False
     lora_target_modules: Optional[List[str]] = None

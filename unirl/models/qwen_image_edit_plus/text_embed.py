@@ -1,30 +1,20 @@
-"""QwenImageEditPlusTextEmbedStage — condition-image + text → TextEmbedCondition.
+"""QwenImageEditPlusTextEmbedStage — edit chat-template text (+ optional image) → TextEmbedCondition.
 
-Unlike the base :class:`unirl.models.qwen_image.QwenImageTextEmbedStage`
-(text-only), Qwen-Image-Edit-Plus feeds the **source image into the
-Qwen2.5-VL text encoder** so the prompt embeddings carry visual context
-about the image being edited. This mirrors upstream diffusers
-``QwenImageEditPlusPipeline._get_qwen_prompt_embeds`` /
-``pipeline_qwenimage_edit_plus.py`` (and the SGLang rollout path, whose
-captured ``prompt_embeds`` include image-placeholder tokens):
+Mirrors upstream diffusers ``QwenImageEditPlusPipeline._get_qwen_prompt_embeds``
+(``pipeline_qwenimage_edit_plus.py``) and the SGLang rollout path:
 
-- The user content is prefixed with an image tag
-  ``"Picture 1: <|vision_start|><|image_pad|><|vision_end|>"`` and wrapped
-  in the **edit** chat template (different system prompt than base
-  Qwen-Image; ``prompt_template_encode_start_idx = 64`` vs 34).
-- A :class:`transformers.Qwen2VLProcessor` builds ``input_ids`` +
-  ``pixel_values`` + ``image_grid_thw`` (the source image resized to the
-  ``CONDITION_IMAGE_SIZE`` ≈ 384² grid, aspect-preserving, 32-aligned —
-  the *condition* size for the text encoder, distinct from the ≈1024²
-  *VAE* size the latent-concat path uses).
-- The Qwen2.5-VL forward runs with the pixel values; the last hidden
-  state is split per sample, the 64-token system prefix is dropped, and
-  the remainder (image-placeholder tokens followed by the prompt text
-  tokens) is padded to the batch max with a parallel attention mask.
+- Always uses the **edit** chat template (``prompt_template_encode_start_idx = 64``),
+  not base Qwen-Image's template (drop 34).
+- When ``images`` is provided: prefixes
+  ``"Picture 1: <|vision_start|><|image_pad|><|vision_end|>"``, runs the
+  Qwen2.5-VL processor with ``pixel_values`` / ``image_grid_thw`` (source
+  resized to the ≈384² condition grid), then drops the 64-token system prefix.
+- When ``images`` is ``None``: same edit template with an empty image prefix
+  (upstream ``base_img_prompt = ""``) — text-only Edit-Plus encoding, **not**
+  a switch to :class:`~unirl.models.qwen_image.QwenImageTextEmbedStage`.
 
-Set ``QwenImageEditPlusPipelineConfig.use_condition_image_prompt=False`` to
-fall back to the base text-only :class:`QwenImageTextEmbedStage` (reproduces
-the pre-image-conditioning behavior).
+``use_condition_image_prompt=False`` on the pipeline/config means "call this
+stage with ``images=None``", i.e. Edit text-only, aligned with upstream.
 """
 
 from __future__ import annotations
@@ -76,11 +66,11 @@ def _condition_size_for_aspect(width: int, height: int) -> Tuple[int, int]:
 
 
 class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, Images, TextEmbedCondition]):
-    """Condition-image + text → ``TextEmbedCondition`` via Qwen2.5-VL.
+    """Edit-template text (+ optional source images) → ``TextEmbedCondition``.
 
-    The ``embed`` signature takes the source ``Images`` alongside the
-    prompts (both positive and negative branches pass the *same* source
-    images, matching upstream ``encode_prompt(image=...)``).
+    Both CFG branches pass the *same* source images when multimodal (matching
+    upstream ``encode_prompt(image=...)``). Pass ``images=None`` for Edit
+    text-only (upstream ``image is None`` → empty ``base_img_prompt``).
     """
 
     def __init__(
@@ -89,7 +79,6 @@ class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, Images, 
         *,
         max_sequence_length: int = 512,
         processor_path: Optional[str] = None,
-        processor_subfolder: str = "processor",
     ) -> None:
         if max_sequence_length > TOKENIZER_MAX_LENGTH:
             raise ValueError(
@@ -98,28 +87,19 @@ class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, Images, 
             )
         self.bundle = bundle
         self.max_sequence_length = int(max_sequence_length)
-        # The processor (tokenizer merges + image processor) must come from the
-        # same place as the text encoder / tokenizer: honor a text-encoder
-        # override (``config.text_encoder_ckpt_path``) threaded in as
-        # ``processor_path``, else fall back to the main checkpoint.
-        self.processor = self._load_processor(processor_path or bundle.pretrained_path, processor_subfolder)
+        # Same root as text encoder / tokenizer: honor ``processor_path``
+        # (from ``text_encoder_ckpt_path``) else the main checkpoint.
+        self.processor = self._load_processor(processor_path or bundle.pretrained_path)
 
     @staticmethod
-    def _load_processor(path: str, subfolder: str):
-        """Load the Qwen2.5-VL processor (image processor + tokenizer merges).
-
-        The Edit-Plus checkpoint ships the processor under a ``processor/``
-        subfolder (diffusers ``register_modules(processor=...)`` layout). No
-        ``min_pixels`` / ``max_pixels`` override — the source image is
-        pre-resized to the condition grid before the processor's own
-        smart-resize, matching upstream.
-        """
+    def _load_processor(path: str):
+        """Load Qwen2VLProcessor from the checkpoint ``processor/`` subfolder."""
         from transformers import Qwen2VLProcessor
 
-        return Qwen2VLProcessor.from_pretrained(path, subfolder=subfolder)
+        return Qwen2VLProcessor.from_pretrained(path, subfolder="processor")
 
-    def embed(self, p: Texts, images: Images) -> TextEmbedCondition:
-        """Encode prompts conditioned on the source images."""
+    def embed(self, p: Texts, images: Optional[Images] = None) -> TextEmbedCondition:
+        """Encode prompts; optionally condition on source images."""
         prompt_embeds, prompt_embeds_mask = self._encode(list(p.texts), images)
         return TextEmbedCondition(
             embeds=prompt_embeds,
@@ -142,22 +122,28 @@ class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, Images, 
             resized.append(pil)
         return resized
 
-    def _encode(self, prompts: List[str], images: Images) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _encode(self, prompts: List[str], images: Optional[Images]) -> Tuple[torch.Tensor, torch.Tensor]:
         bundle = self.bundle
         device = bundle.device
         dtype = next(bundle.text_encoder.parameters()).dtype
 
-        condition_pils = self._condition_pils(images)
-        if len(condition_pils) != len(prompts):
-            raise ValueError(
-                f"QwenImageEditPlusTextEmbedStage._encode: image count {len(condition_pils)} "
-                f"!= prompt count {len(prompts)}"
-            )
+        # Upstream: image list / tensor → Picture N placeholders; None → "".
+        condition_pils = None
+        if images is not None:
+            condition_pils = self._condition_pils(images)
+            if len(condition_pils) != len(prompts):
+                raise ValueError(
+                    f"QwenImageEditPlusTextEmbedStage._encode: image count {len(condition_pils)} "
+                    f"!= prompt count {len(prompts)}"
+                )
+            base_img_prompt = IMG_PROMPT_TEMPLATE.format(1)
+        else:
+            base_img_prompt = ""
 
-        # One image placeholder per prompt (V1: single source image per prompt).
-        base_img_prompt = IMG_PROMPT_TEMPLATE.format(1)
         txt = [PROMPT_TEMPLATE.format(base_img_prompt + e) for e in prompts]
 
+        # Upstream always goes through the processor; when image is None it
+        # still tokenizes text and omits pixel_values / image_grid_thw.
         model_inputs = self.processor(
             text=txt,
             images=condition_pils,
@@ -165,19 +151,25 @@ class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, Images, 
             return_tensors="pt",
         ).to(device)
 
+        forward_kwargs = {
+            "input_ids": model_inputs.input_ids,
+            "attention_mask": model_inputs.attention_mask,
+            "output_hidden_states": True,
+        }
+        pixel_values = getattr(model_inputs, "pixel_values", None)
+        image_grid_thw = getattr(model_inputs, "image_grid_thw", None)
+        if pixel_values is not None:
+            forward_kwargs["pixel_values"] = pixel_values.to(dtype=dtype)
+        if image_grid_thw is not None:
+            forward_kwargs["image_grid_thw"] = image_grid_thw
+
         with torch.no_grad():
-            encoder_out = bundle.text_encoder(
-                input_ids=model_inputs.input_ids,
-                attention_mask=model_inputs.attention_mask,
-                pixel_values=model_inputs.pixel_values.to(dtype=dtype),
-                image_grid_thw=model_inputs.image_grid_thw,
-                output_hidden_states=True,
-            )
+            encoder_out = bundle.text_encoder(**forward_kwargs)
         hidden_states = encoder_out.hidden_states[-1]
 
         split_hidden_states = extract_masked_hidden(hidden_states, model_inputs.attention_mask)
-        # Strip the 64-token edit-template system prefix; the remainder is
-        # [image-placeholder tokens][prompt text tokens].
+        # Strip the 64-token edit-template system prefix (with or without
+        # image-placeholder tokens after it).
         split_hidden_states = [item[PROMPT_TEMPLATE_START_IDX:] for item in split_hidden_states]
         attn_mask_list = [
             torch.ones(item.size(0), dtype=torch.long, device=item.device) for item in split_hidden_states
@@ -195,7 +187,7 @@ class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, Images, 
         )
 
         # Final slice to the configured budget (image-placeholder tokens are at
-        # the front, so a short prompt keeps its full visual context).
+        # the front when present, so a short prompt keeps its visual context).
         prompt_embeds = prompt_embeds[:, : self.max_sequence_length]
         prompt_embeds_mask = prompt_embeds_mask[:, : self.max_sequence_length]
         return prompt_embeds.to(device=device, dtype=dtype), prompt_embeds_mask

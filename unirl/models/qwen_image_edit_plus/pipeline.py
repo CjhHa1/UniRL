@@ -11,14 +11,14 @@ Text+image → image editing flow::
                                                                          ▼
                                                                        Images
 
-By default the text-embed stage is the Edit-Plus-specific
-:class:`QwenImageEditPlusTextEmbedStage`, which feeds the source image
-into the Qwen2.5-VL text encoder (mirrors upstream
-``encode_prompt(image=...)`` and the SGLang rollout path). Set
-``config.use_condition_image_prompt=False`` to fall back to the base
-text-only :class:`~unirl.models.qwen_image.QwenImageTextEmbedStage`. The
-VAE-decode stage is reused from :mod:`unirl.models.qwen_image`; the
-VAE-encode stage and the diffusion step/stage are Edit-Plus-specific.
+The text-embed stage is always :class:`QwenImageEditPlusTextEmbedStage` (edit
+chat template, drop 64). With ``use_condition_image_prompt=True`` (default) it
+also feeds the source image into Qwen2.5-VL; with ``False`` it keeps the edit
+template but omits vision tokens — matching upstream
+``_get_qwen_prompt_embeds(..., image=None)``, **not** base Qwen-Image's
+text-only stage. The VAE-decode stage is reused from
+:mod:`unirl.models.qwen_image`; the VAE-encode stage and the diffusion
+step/stage are Edit-Plus-specific.
 
 σ schedule contract: identical to :class:`QwenImagePipeline` — the hosting
 engine pins ``req.sigmas`` before calling ``generate(req)``. The schedule's
@@ -29,9 +29,8 @@ engine pins ``req.sigmas`` before calling ``generate(req)``. The schedule's
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
-from unirl.models.qwen_image.text_embed import QwenImageTextEmbedStage
 from unirl.models.qwen_image.vae import QwenImageVAEDecodeStage
 from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
@@ -51,9 +50,6 @@ from .diffusion import (
 from .text_embed import QwenImageEditPlusTextEmbedStage
 from .vae import QwenImageEditPlusVAEEncodeStage
 
-# Either the base text-only stage or the Edit-Plus image-aware stage.
-EmbedStageT = Union[QwenImageTextEmbedStage, QwenImageEditPlusTextEmbedStage]
-
 
 class QwenImageEditPlusPipeline(Pipeline):
     """Qwen-Image-Edit-Plus generate pipeline.
@@ -63,6 +59,9 @@ class QwenImageEditPlusPipeline(Pipeline):
     - ``primitives["text"]: Texts`` — required edit instructions.
     - ``primitives["image"]: Images`` — **required** source images (Edit-Plus
       is edit-only; raises ``TypeError`` if absent — fail-fast, constraint #27).
+      Still required for VAE latent-concat even when
+      ``use_condition_image_prompt=False`` (text encoder then sees edit-template
+      text only).
     - ``primitives["negative_text"]: Texts`` — optional CFG negatives.
     - ``sigmas: Tensor[T+1]`` — pinned by the engine adapter (required).
 
@@ -78,7 +77,7 @@ class QwenImageEditPlusPipeline(Pipeline):
         self,
         *,
         bundle: QwenImageEditPlusBundle,
-        text_embed: Optional[EmbedStageT] = None,
+        text_embed: Optional[QwenImageEditPlusTextEmbedStage] = None,
         diffusion: Optional[QwenImageEditPlusDiffusionStage] = None,
         vae_encode: Optional[QwenImageEditPlusVAEEncodeStage] = None,
         vae_decode: Optional[QwenImageVAEDecodeStage] = None,
@@ -90,24 +89,17 @@ class QwenImageEditPlusPipeline(Pipeline):
         max_sequence_length: int = 512,
         use_condition_image_prompt: bool = True,
         processor_path: Optional[str] = None,
-        processor_subfolder: str = "processor",
     ) -> None:
         super().__init__()
         self.bundle = bundle
+        self.use_condition_image_prompt = bool(use_condition_image_prompt)
         if text_embed is None and bundle.text_encoder is not None:
-            if use_condition_image_prompt:
-                text_embed = QwenImageEditPlusTextEmbedStage(
-                    bundle,
-                    max_sequence_length=max_sequence_length,
-                    processor_path=processor_path,
-                    processor_subfolder=processor_subfolder,
-                )
-            else:
-                text_embed = QwenImageTextEmbedStage(bundle, max_sequence_length=max_sequence_length)
+            text_embed = QwenImageEditPlusTextEmbedStage(
+                bundle,
+                max_sequence_length=max_sequence_length,
+                processor_path=processor_path,
+            )
         self.text_embed = text_embed
-        # Whether the text-embed stage consumes the source image (Edit-Plus
-        # multimodal conditioning) vs the base text-only stage.
-        self._text_embed_uses_image = isinstance(text_embed, QwenImageEditPlusTextEmbedStage)
         if diffusion is None:
             diffusion = QwenImageEditPlusDiffusionStage(
                 model=bundle,
@@ -162,19 +154,15 @@ class QwenImageEditPlusPipeline(Pipeline):
     ) -> "QwenImageEditPlusPipeline":
         """Build the full Edit-Plus pipeline from a config."""
         bundle = QwenImageEditPlusBundle.from_config(config)
-        text_embed: Optional[EmbedStageT] = None
+        text_embed: Optional[QwenImageEditPlusTextEmbedStage] = None
         if bundle.text_encoder is not None:
-            if config.use_condition_image_prompt:
-                text_embed = QwenImageEditPlusTextEmbedStage(
-                    bundle,
-                    max_sequence_length=config.max_sequence_length,
-                    # Honor a text-encoder override so the processor tracks the
-                    # tokenizer/text encoder, not just the main checkpoint.
-                    processor_path=config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path,
-                    processor_subfolder=config.processor_subfolder,
-                )
-            else:
-                text_embed = QwenImageTextEmbedStage(bundle, max_sequence_length=config.max_sequence_length)
+            text_embed = QwenImageEditPlusTextEmbedStage(
+                bundle,
+                max_sequence_length=config.max_sequence_length,
+                # Honor a text-encoder override so the processor tracks the
+                # tokenizer/text encoder, not just the main checkpoint.
+                processor_path=config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path,
+            )
         step = QwenImageEditPlusDiffusionStep()
         diffusion = QwenImageEditPlusDiffusionStage(
             model=bundle,
@@ -196,7 +184,6 @@ class QwenImageEditPlusPipeline(Pipeline):
             max_sequence_length=config.max_sequence_length,
             use_condition_image_prompt=config.use_condition_image_prompt,
             processor_path=config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path,
-            processor_subfolder=config.processor_subfolder,
         )
 
     def generate(self, req: RolloutReq) -> RolloutResp:
@@ -251,15 +238,12 @@ class QwenImageEditPlusPipeline(Pipeline):
         # the chat-template prefix strip makes "" unsafe).
         if negatives is None and float(params.guidance_scale) > 1.0:
             negatives = Texts(texts=[" "] * len(texts.texts))
-        # Edit-Plus feeds the source image into the text encoder (both
-        # branches use the SAME source images, matching upstream
-        # encode_prompt(image=...)); the base fallback is text-only.
-        if self._text_embed_uses_image:
-            text_cond = self.text_embed.embed(texts, images)
-            negative_text_cond = self.text_embed.embed(negatives, images) if negatives is not None else None
-        else:
-            text_cond = self.text_embed.embed(texts)
-            negative_text_cond = self.text_embed.embed(negatives) if negatives is not None else None
+        # Multimodal: both CFG branches share the same source images
+        # (upstream encode_prompt(image=...)). False → Edit text-only
+        # (images=None), still edit template / drop 64.
+        embed_images = images if self.use_condition_image_prompt else None
+        text_cond = self.text_embed.embed(texts, embed_images)
+        negative_text_cond = self.text_embed.embed(negatives, embed_images) if negatives is not None else None
 
         image_latent_cond = self.vae_encode.encode(images, height=int(params.height), width=int(params.width))
 

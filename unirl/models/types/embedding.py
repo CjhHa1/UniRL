@@ -28,9 +28,14 @@ class EmbedStage(Protocol[P, C]):
 
 @runtime_checkable
 class ImageConditionedEmbedStage(Protocol[P, ImageP, C]):
-    """Embed a primitive with image context into its condition form."""
+    """Embed a primitive with optional image context into its condition form.
 
-    def embed(self, p: P, images: ImageP) -> C: ...
+    ``images=None`` means text-only encoding under the same stage (e.g. Edit-Plus
+    keeps the edit chat template; it does not fall back to a different model
+    family's text-only stage).
+    """
+
+    def embed(self, p: P, images: ImageP | None = None) -> C: ...
 
 
 __all__ = ["EmbedStage", "ImageConditionedEmbedStage"]
