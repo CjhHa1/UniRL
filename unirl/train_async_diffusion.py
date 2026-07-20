@@ -9,9 +9,9 @@ weights pushed cross-slab via ``NCCLWeightSync``). The synchronous diffusion
 trainer is unchanged; this is purely additive.
 
 Launch (single node):
-  PRETRAINED_MODEL=/path/to/sd3.5 \
+  BAGEL_PATH=/path/to/BAGEL-7B-MoT \
   python -m unirl.train_async_diffusion \
-    --config-name=diffusion/sd3/sd3_vllmomni_async num_devices=8
+    --config-name=diffusion/bagel/bagel_vllmomni_async num_devices=8
 
 Extra config knobs vs the synchronous separate recipe:
   * ``max_inflight`` — concurrent generations (overlap depth). ``1`` ≈ one-step pipeline.
@@ -28,7 +28,7 @@ from omegaconf import DictConfig
 from unirl.trainer.async_diffusion import AsyncDiffusionTrainer
 
 
-@hydra.main(version_base=None, config_path="../examples", config_name="diffusion/sd3/sd3_vllmomni_async")
+@hydra.main(version_base=None, config_path="../examples", config_name="diffusion/bagel/bagel_vllmomni_async")
 def main(cfg: DictConfig) -> None:
     trainer = AsyncDiffusionTrainer(
         cfg=cfg,
