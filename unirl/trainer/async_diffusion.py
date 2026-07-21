@@ -19,7 +19,8 @@ rollout buffer loop as ``AsyncARTrainer``:
   the reward.
 
 Two numeric knobs (identical semantics to AsyncARTrainer):
-  * ``max_inflight`` — concurrent generations (overlap depth). ``1`` ≈ one-step pipeline.
+  * ``max_inflight`` — must be ``1`` so reap-time transfer never competes with
+    a queued generation on the rollout workers.
   * ``buffer_max_staleness`` — weight-syncs a buffered group may cross. ``0`` (default)
     = on-policy (the launch clamp never lets a generation cross a sync → ``ratio≈1``,
     the sync-separate-parity regime). ``>0`` = off-policy continuous buffer.
@@ -109,6 +110,13 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         layout = diffusion_kwargs.setdefault("layout", "separate")
         if layout != "separate":
             raise ValueError(f"AsyncDiffusionTrainer requires layout='separate', got {layout!r}.")
+        max_inflight = int(max_inflight)
+        if max_inflight != 1:
+            raise ValueError(
+                "AsyncDiffusionTrainer requires max_inflight=1: multiple queued generations "
+                "block the reap-time cross-slab transfer on the rollout workers; "
+                f"got {max_inflight}."
+            )
         super().__init__(**diffusion_kwargs)
 
         if self.weight_sync is None:
@@ -118,7 +126,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             )
 
         # ---- async state ----
-        self._max_inflight = max(1, int(max_inflight))
+        self._max_inflight = max_inflight
         self._buffer_max_staleness = buffer_max_staleness
         self._weight_version = 0  # driver-tracked policy version (# of weight syncs issued)
         # The rollout resp's single track key (e.g. "diffusion"), captured from the

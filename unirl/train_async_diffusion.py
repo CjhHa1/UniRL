@@ -14,7 +14,7 @@ Launch (single node):
     --config-name=diffusion/bagel/bagel_vllmomni_async num_devices=8
 
 Extra config knobs vs the synchronous separate recipe:
-  * ``max_inflight`` — concurrent generations (overlap depth). ``1`` ≈ one-step pipeline.
+  * ``max_inflight`` — must be ``1``; other values fail during trainer initialization.
   * ``buffer_max_staleness`` — weight-syncs a buffered group may cross. ``0``/unset =
     on-policy (``ratio≈1``); ``>0`` = off-policy continuous buffer.
 ``layout`` is forced to ``separate`` (async needs disjoint train/rollout slabs).
