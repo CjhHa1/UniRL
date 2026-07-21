@@ -319,7 +319,9 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         if resumed and self.weight_sync is not None:
             self.weight_sync.sync()  # push restored weights into the fresh engine
         if self.eval_interval > 0:
-            self.evaluate(start_rollout)  # baseline; engine quiescent
+            # Evaluate the policy already resident on the rollout slab. Eval must
+            # neither advance the async weight version nor offload this engine.
+            self.evaluate(start_rollout, sync_weights=False, sleep_after=False)
 
         try:
             for rollout_id in range(start_rollout, num_rollouts):
@@ -336,7 +338,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                 step = rollout_id + 1
                 if self.eval_interval > 0 and step % self.eval_interval == 0:
                     self._drain_all()  # eval shares the engine
-                    self.evaluate(step)
+                    self.evaluate(step, sync_weights=False, sleep_after=False)
                 if save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts):
                     self._drain_all()  # consistent engine + deterministic resume
                     self.maybe_save_checkpoint(
