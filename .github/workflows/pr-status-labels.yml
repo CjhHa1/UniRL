@@ -15,6 +15,11 @@ concurrency:
 
 jobs:
   sync-label:
+    # Fork-triggered review workflows receive a read-only GITHUB_TOKEN, so the
+    # cosmetic label update cannot succeed. Native reviewDecision still gates merge.
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     name: Sync PR status label
     runs-on: ubuntu-latest
     steps:
