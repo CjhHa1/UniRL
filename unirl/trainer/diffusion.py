@@ -63,6 +63,7 @@ class DiffusionTrainer(BaseTrainer):
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
         self._layout = str(layout)
+        self._train_fraction = float(train_fraction)
         # Colocate memory dance: offload the FSDP train state (params + grads +
         # optimizer) to CPU during the rollout's generate so a colocate
         # vLLM/SGLang engine fits, onload before the train backward. Off by

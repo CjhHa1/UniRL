@@ -3,10 +3,11 @@
 Diffusion sibling of :class:`~unirl.trainer.async_ar.AsyncARTrainer`. It subclasses
 :class:`~unirl.trainer.diffusion.DiffusionTrainer` with ``layout="separate"`` to
 REUSE its two-slab build (train slab + dedicated rollout engine slab), the
-``NCCLWeightSync`` cross-slab handshake (``_connect_separate``), and the diffusion
-plumbing (``_build_req`` / ``_drop_decoded`` / ``evaluate`` / checkpoint / FlowGRPO
-``stack.train_track``). On top of that it overlays the SAME single-threaded async
-rollout buffer loop as ``AsyncARTrainer``:
+cross-slab weight-sync wiring (``RemoteLoraWeightSync`` for the BAGEL recipe;
+``NCCLWeightSync`` is also supported by ``_connect_separate``), and the diffusion
+plumbing (``_build_req`` / ``_drop_decoded`` / ``evaluate`` / checkpoint /
+FlowGRPO ``stack.train_track``). On top of that it overlays the SAME
+single-threaded async rollout buffer loop as ``AsyncARTrainer``:
 
 * Generation is launched as **non-blocking Ray futures** on the rollout slab
   (``_generate_async``) and reaped on the driver thread (``_reap_ready``); no
@@ -21,9 +22,9 @@ rollout buffer loop as ``AsyncARTrainer``:
 Two numeric knobs (identical semantics to AsyncARTrainer):
   * ``max_inflight`` — must be ``1`` so reap-time transfer never competes with
     a queued generation on the rollout workers.
-  * ``buffer_max_staleness`` — weight-syncs a buffered group may cross. ``0`` (default)
-    = on-policy (the launch clamp never lets a generation cross a sync → ``ratio≈1``,
-    the sync-separate-parity regime). ``>0`` = off-policy continuous buffer.
+  * ``buffer_max_staleness`` — regular rollout-weight syncs a buffered group
+    may cross. ``0`` (default) never crosses a sync; ``>0`` enables a bounded
+    policy-lag buffer.
 
 Draining all in-flight generations before each weight sync is MANDATORY (a
 weight + KV update corrupts an in-flight generation); that is the single-threaded
@@ -97,7 +98,7 @@ class _RolloutBuffer:
 
 
 class AsyncDiffusionTrainer(DiffusionTrainer):
-    """Disaggregated async diffusion trainer (two slabs, resident engine, NCCL sync)."""
+    """Disaggregated async diffusion trainer (two slabs, resident engine, cross-slab sync)."""
 
     def __init__(
         self,
@@ -121,8 +122,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
 
         if self.weight_sync is None:
             raise ValueError(
-                "AsyncDiffusionTrainer requires a cross-slab weight sync (NCCLWeightSync) — "
-                "add a `sync:` block to the recipe."
+                "AsyncDiffusionTrainer requires a cross-slab weight sync; add a `sync:` block to the recipe."
             )
 
         # ---- async state ----
@@ -225,8 +225,9 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         ``batch_size`` groups (blocking on the oldest in-flight generation if the
         buffer is short).
 
-        The launch clamp is the on-policy guarantee: ``stale=0`` ⇒ never launch
-        into a future sync-window ⇒ no generation crosses a sync ⇒ ``ratio≈1``.
+        The launch clamp guarantees that ``stale=0`` never launches into a
+        future sync window, so no generation crosses a regular rollout-weight
+        sync boundary.
         """
         while True:
             # Reap (and cross-slab-transfer the completed generation's segment)
@@ -316,7 +317,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                 "max_inflight": M,
                 "buffer_max_staleness": stale,
                 "weight_sync_interval": interval,
-                "train_fraction": self._train_fraction if hasattr(self, "_train_fraction") else None,
+                "train_fraction": self._train_fraction,
             },
         )
 

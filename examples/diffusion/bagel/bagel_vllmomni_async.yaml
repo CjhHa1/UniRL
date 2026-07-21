@@ -6,8 +6,7 @@
 # diverges ONLY on the rollout path: instead of the in-process
 # TrainsideRolloutEngine, generation runs in a separate vLLM-Omni worker
 # subprocess (the BAGEL single-stage DiT topology), and the freshly-trained LoRA
-# is pushed into that worker each rollout via a LocalLoraWeightSync — exactly the
-# shape examples/diffusion/sd3_vllmomni.yaml uses for SD3.
+# is pushed cross-slab on the configured cadence via RemoteLoraWeightSync.
 #
 # What makes BAGEL's vllm_omni path different from SD3's (all handled in
 # unirl/rollout/engine/vllm_omni/{adapters,pipelines}/bagel.*):
@@ -46,10 +45,10 @@ train_fraction: 0.5            # 4 train GPUs + 4 rollout GPUs on an 8-GPU pool
 
 # LoRA weight-sync cadence (loop concern, read by the trainer). >1 is required
 # for async overlap: interval=1 drains every step (every rollout is a cold sync
-# boundary, no generation can overlap a train step). interval=4 keeps the
-# on-policy ratio ≈ 1 (the rollout SDE math matches trainside, and
-# old_logp_source=rollout anchors π_old to the emitted logp) while giving 3 of
-# every 4 rollouts a generation overlapped with training.
+# boundary, no generation can overlap a train step). interval=4 gives 3 of every
+# 4 rollouts a generation overlapped with training. old_logp_source=rollout keeps
+# the emitted π_old as a valid importance-sampling anchor; the ratio may move as
+# the resident rollout policy and current train policy diverge.
 weight_sync_interval: 4
 
 # ---- async knobs (AsyncDiffusionTrainer) ----
@@ -61,10 +60,10 @@ weight_sync_interval: 4
 # step (see AsyncDiffusionTrainer._next_batch reap-before-launch). Real overlap
 # needs weight_sync_interval>1 (interval=1 drains every step).
 # buffer_max_staleness: how many weight syncs a buffered group may cross.
-#   0 = on-policy (never crosses a sync; ~174s/rollout on BAGEL 4+4).
+#   0 = never crosses a regular rollout-weight sync (~174s/rollout on BAGEL 4+4).
 #   2 = throughput-optimal continuous buffer (~148s/rollout, matches vllm
-#       colocate); sync-boundary cold rollouts disappear. ratio stays ≈1 with
-#       old_logp_source=rollout (staleness moves gradient freshness, not ratio).
+#       colocate); sync-boundary cold rollouts disappear. The emitted π_old
+#       remains a valid anchor, while the measured ratio may reflect policy lag.
 max_inflight: 1
 buffer_max_staleness: 2
 
@@ -171,7 +170,8 @@ algorithm:
   clip_schedule: constant
   # vllm_omni emits per-step log-probs from the worker SDE scheduler, so the
   # PPO π_old anchor is the rollout's emitted sde_logp (default). The worker SDE
-  # math matches the trainside FlowSDEStrategy so the on-policy ratio stays ≈ 1.
+  # math matches the trainside FlowSDEStrategy; the ratio then measures drift
+  # between that resident rollout policy and the current train policy.
   old_logp_source: rollout
   conditions_cls:
     _target_: hydra.utils.get_class
