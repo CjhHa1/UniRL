@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from hydra.utils import instantiate
 from omegaconf import DictConfig
@@ -316,6 +316,23 @@ class BaseTrainer:
         finally:
             if self.wandb_logger is not None:
                 self.wandb_logger.finish()
+
+    def _finish_after_drain(self, drain: Callable[[], None]) -> None:
+        """Drain async work without masking a primary error, then always finish.
+
+        A drain failure on a clean exit remains fatal. During exception
+        unwinding it is secondary: log it, preserve the original exception, and
+        still flush pending checkpoints and close the logger.
+        """
+        active_exception = sys.exc_info()[0] is not None
+        try:
+            drain()
+        except Exception:
+            if not active_exception:
+                raise
+            logger.exception("Failed to drain in-flight work during trainer teardown")
+        finally:
+            self._finish_wandb()
 
     # ---- checkpointing (shared by single-backend trainers) -----------------
 

@@ -399,12 +399,12 @@ class AsyncARTrainer(ARTrainer):
         self._inflight: List[Dict[str, Any]] = []
         self._launch_id = start_rollout
 
-        if resumed and self.weight_sync is not None:
-            self.weight_sync.sync()  # push restored weights into the fresh engine
-        if self.eval_interval > 0:
-            self.evaluate(rollout_id=-1)  # baseline; engine quiescent
-
         try:
+            if resumed and self.weight_sync is not None:
+                self.weight_sync.sync()  # push restored weights into the fresh engine
+            if self.eval_interval > 0:
+                self.evaluate(rollout_id=-1)  # baseline; engine quiescent
+
             for rollout_id in range(start_rollout, num_rollouts):
                 t0 = time.perf_counter()
                 picked = self._next_batch(rollout_id, interval, M, stale, num_rollouts)
@@ -430,8 +430,7 @@ class AsyncARTrainer(ARTrainer):
                     self.weight_sync.sync()
                     self._weight_version += 1
         finally:
-            self._drain_all()
-            self._finish_wandb()
+            self._finish_after_drain(self._drain_all)
 
     def _next_batch(self, rollout_id: int, interval: int, M: int, stale: int, num_rollouts: int):
         """Top up launches, reap completed generations, and return the freshest

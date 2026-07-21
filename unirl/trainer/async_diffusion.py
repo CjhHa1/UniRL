@@ -325,14 +325,14 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         self._inflight: List[Dict[str, Any]] = []
         self._launch_id = start_rollout
 
-        if resumed and self.weight_sync is not None:
-            self.weight_sync.sync()  # push restored weights into the fresh engine
-        if self.eval_interval > 0:
-            # Evaluate the policy already resident on the rollout slab. Eval must
-            # neither advance the async weight version nor offload this engine.
-            self.evaluate(start_rollout, sync_weights=False, sleep_after=False)
-
         try:
+            if resumed and self.weight_sync is not None:
+                self.weight_sync.sync()  # push restored weights into the fresh engine
+            if self.eval_interval > 0:
+                # Evaluate the policy already resident on the rollout slab. Eval must
+                # neither advance the async weight version nor offload this engine.
+                self.evaluate(start_rollout, sync_weights=False, sleep_after=False)
+
             for rollout_id in range(start_rollout, num_rollouts):
                 t0 = time.perf_counter()
                 picked = self._next_batch(rollout_id, interval, M, stale, num_rollouts)
@@ -358,5 +358,4 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                     self.weight_sync.sync()
                     self._weight_version += 1
         finally:
-            self._drain_all()
-            self._finish_wandb()
+            self._finish_after_drain(self._drain_all)
