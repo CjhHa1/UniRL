@@ -39,6 +39,7 @@ AR path untouched.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -358,5 +359,14 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                     self.weight_sync.sync()
                     self._weight_version += 1
         finally:
-            self._drain_all()
-            self._finish_wandb()
+            # Match BaseTrainer._finish_wandb: cleanup failures must not mask
+            # the exception that caused teardown.
+            active_exception = sys.exc_info()[0] is not None
+            try:
+                self._drain_all()
+            except Exception:
+                if not active_exception:
+                    raise
+                logger.exception("Failed to drain in-flight generations during trainer teardown")
+            finally:
+                self._finish_wandb()
