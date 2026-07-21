@@ -11,9 +11,9 @@ rollout buffer loop as ``AsyncARTrainer``:
 * Generation is launched as **non-blocking Ray futures** on the rollout slab
   (``_generate_async``) and reaped on the driver thread (``_reap_ready``); no
   producer thread, no locks.
-* Reward is scored the moment a generation completes (``_score_into_buffer``), so
-  scoring runs on the rollout side and is OFF the train critical path — the buffer
-  holds already-scored GRPO groups.
+* Reward is scored synchronously at reap time (``_score_into_buffer``) before
+  groups enter the buffer. Generation overlaps training; reward scoring itself
+  does not.
 * Training consumes the freshest ``batch_size`` groups per step
   (``_advantage_and_train``: advantage + FlowGRPO optimizer step); it never calls
   the reward.
@@ -178,9 +178,9 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
     def _score_into_buffer(self, rec: Dict[str, Any], resp: RolloutResp) -> None:
         """Score a completed generation and split its groups into the buffer.
 
-        Scoring (``reward.score_and_attach``) runs here, on the rollout-completion
-        side — OFF the train critical path. Must precede ``_drop_decoded`` (the
-        reward reads ``decoded``).
+        Scoring (``reward.score_and_attach``) is synchronous at reap time,
+        before the next launch and training-batch consumption. It must precede
+        ``_drop_decoded`` because the reward reads ``decoded``.
         """
         req = rec["req"]
         for name, track in list(resp.tracks.items()):

@@ -4,9 +4,9 @@
 Sibling of ``train_diffusion.py`` that drives
 :class:`unirl.trainer.async_diffusion.AsyncDiffusionTrainer` — the disaggregated,
 async variant of the diffusion path (training and rollout on DISJOINT GPU slabs,
-generation overlapped with training, reward scored off the train critical path,
-weights pushed cross-slab via ``NCCLWeightSync``). The synchronous diffusion
-trainer is unchanged; this is purely additive.
+generation overlapped with training, reward scored synchronously at reap time
+rather than overlapped, weights pushed cross-slab via ``NCCLWeightSync``). The
+synchronous diffusion trainer is unchanged.
 
 Launch (single node):
   BAGEL_PATH=/path/to/BAGEL-7B-MoT \
