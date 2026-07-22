@@ -333,6 +333,11 @@ def _load_state_dict_ep_sliced(
                 loaded += 1
                 del block
                 continue
+            if name in ep_shard_dims:
+                raise RuntimeError(
+                    f"EP load: checkpoint contains neither fused tensor {name!r} "
+                    "nor the complete HF per-expert keys needed to rebuild it."
+                )
             missing.append(name)
             continue
 
