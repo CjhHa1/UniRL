@@ -267,6 +267,20 @@ class VeOmniBackend(BaseFSDP2Backend):
     def _offload_model(self) -> None:
         veomni_offload(self.model)
 
+    def _reject_meta(self, *, operation, checkpoint_format, mode) -> None:
+        super()._reject_meta(
+            operation=operation,
+            checkpoint_format=checkpoint_format,
+            mode=mode,
+        )
+        if self._ep_size > 1 and checkpoint_format == "dcp" and mode == "full":
+            raise RuntimeError(
+                f"VeOmniBackend.{operation}: full DCP checkpoints are unsupported "
+                "with ep_size>1 because the outer expert split is not encoded in "
+                "the DTensor placements. Use checkpoint_format='torch' (EP-aware) "
+                "or adapter mode for frozen-expert LoRA."
+            )
+
 
 # ----------------------------------------------------------------------
 # Construction helpers

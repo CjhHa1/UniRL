@@ -208,9 +208,9 @@ else:
 - **梯度裁剪**：`state.py::clip_grad_norm` 已调用 VeOmni 的 EP-aware clip——只要 `_extra_parallel_param_groups` 存在即正确。
 - **优化器**：UniRL `build_optimizer` 已**无条件** `AdamW(foreach=False)`（`unirl/train/optim.py:69`）。单 tensor 逐参数 step，
   天然不跨 mesh stack → **直接兼容 EP**（已用单 optimizer 验证 ep=4 跑通）。
-- **checkpoint/offload**：offload 走 VeOmni；DCP sharded checkpoint 在同一 EP topology 下保留各 rank shard。默认单文件
-  checkpoint 不能直接依赖 DCP full-state gather，因为 EP split 位于 DTensor placement 之外；现由
-  `veomni/ep/checkpoint.py` 对模型参数和 Adam moments 做 `[E/ep]↔[E]` 显式转换。
+- **checkpoint/offload**：offload 走 VeOmni。默认单文件 checkpoint 由 `veomni/ep/checkpoint.py` 对模型参数和
+  Adam moments 做 `[E/ep]↔[E]` 显式转换；full DCP 因外层 EP split 不在 DTensor placement 中而 fail-closed，
+  避免重复 FQN/offset 静默丢专家。冻结专家的 adapter-only DCP 不受影响。
 
 ### 4.3 端到端验证（真实 UniRL 代码路径）
 

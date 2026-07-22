@@ -26,11 +26,9 @@ from unirl.train.backend.veomni.ep.checkpoint import (
 
 
 class _TinyExpertModel(nn.Module):
-    def __init__(self, *, ep_rank: int, device: torch.device) -> None:
+    def __init__(self, expert_param: nn.Parameter) -> None:
         super().__init__()
-        # This is deliberately the VeOmni representation: dim 0 is already the
-        # local E/ep expert block, outside any DTensor placement.
-        self.experts = nn.Parameter(torch.full((2, 3), float(ep_rank + 1), device=device))
+        self.experts = expert_param
         self._extra_parallel_param_groups = {
             "ep": [self.experts],
             "non_extra_parallel": [],
@@ -72,14 +70,23 @@ def main() -> None:
     ps = get_parallel_state()
     ep_rank = int(ps.extra_parallel_rank("ep"))
 
-    model = _TinyExpertModel(ep_rank=ep_rank, device=device)
+    from torch.distributed.tensor import Replicate, Shard, distribute_tensor
+
+    # Match VeOmni exactly: the outer EP split is already applied to this
+    # rank's [E/ep,H] block; the DTensor records only the inner ep_fsdp shard.
+    local_expert_block = torch.full((2, 4), float(ep_rank + 1), device=device)
+    full_ep_mesh = ps.extra_parallel_fsdp_device_mesh["ep"]
+    ep_fsdp_mesh = full_ep_mesh[full_ep_mesh.mesh_dim_names[:-1]]
+    placements = [Replicate()] * (ep_fsdp_mesh.ndim - 1) + [Shard(1)]
+    expert_dtensor = distribute_tensor(local_expert_block, ep_fsdp_mesh, placements)
+    model = _TinyExpertModel(nn.Parameter(expert_dtensor))
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, foreach=False)
     model.experts.grad = torch.full_like(model.experts, 0.1 * (ep_rank + 1))
     optimizer.step()
 
-    expected_param = model.experts.detach().clone()
+    expected_param = model.experts.to_local().detach().clone()
     expected_optim = {
-        key: value.detach().clone()
+        key: (value.to_local() if hasattr(value, "to_local") else value).detach().clone()
         for key, value in optimizer.state[model.experts].items()
         if isinstance(value, torch.Tensor)
     }
@@ -87,7 +94,8 @@ def main() -> None:
     model_state = gather_ep_model_state_dict(model)
     optimizer_state = gather_ep_optimizer_state_dict(model, optimizer)
     if dist.get_rank() == 0:
-        expected_shape = (expected_param.shape[0] * ep_size, *expected_param.shape[1:])
+        local_global_shape = tuple(model.experts.shape)
+        expected_shape = (local_global_shape[0] * ep_size, *local_global_shape[1:])
         assert tuple(model_state["experts"].shape) == expected_shape
         assert tuple(optimizer_state["state"]["experts"]["exp_avg"].shape) == expected_shape
         torch.save({"model": model_state, "optimizer": optimizer_state}, checkpoint_path)
@@ -103,9 +111,11 @@ def main() -> None:
     load_ep_model_state_dict(model, checkpoint["model"], strict=True)
     load_ep_optimizer_state_dict(model, optimizer, checkpoint["optimizer"])
 
-    torch.testing.assert_close(model.experts, expected_param, rtol=0, atol=0)
+    torch.testing.assert_close(model.experts.to_local(), expected_param, rtol=0, atol=0)
     for key, expected in expected_optim.items():
-        torch.testing.assert_close(optimizer.state[model.experts][key], expected, rtol=0, atol=0)
+        actual = optimizer.state[model.experts][key]
+        actual = actual.to_local() if hasattr(actual, "to_local") else actual
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     dist.barrier()
     if dist.get_rank() == 0:
