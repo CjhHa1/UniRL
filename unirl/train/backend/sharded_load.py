@@ -21,6 +21,7 @@ import glob
 import logging
 import os
 import re
+from fnmatch import fnmatchcase
 from typing import Dict
 
 import torch
@@ -207,6 +208,113 @@ def _build_expert_block_from_split(name, dst, key_to_handle, ckpt_keys, ep_size,
     return block.to(device=device, dtype=dst.dtype)
 
 
+def _ep_shard_dims_from_plan(module: nn.Module) -> Dict[str, int]:
+    """Resolve each EP parameter's pre-sliced axis from VeOmni's parallel plan.
+
+    VeOmni records the plan after wildcard resolution in ``_fqn2spec_info``.
+    The ``get_parallel_plan`` fallback keeps this usable with older releases
+    that expose only the original pattern map.
+    """
+    groups = getattr(module, "_extra_parallel_param_groups", None) or {}
+    ep_params = tuple(groups.get("ep", ()))
+    if not ep_params:
+        return {}
+
+    ep_ids = {id(param) for param in ep_params}
+    named_ep = {name: param for name, param in module.named_parameters() if id(param) in ep_ids}
+    if len(named_ep) != len(ep_params):
+        raise RuntimeError(
+            "EP load: could not map every _extra_parallel_param_groups['ep'] "
+            f"parameter to an FQN ({len(named_ep)}/{len(ep_params)} mapped)."
+        )
+
+    resolved: Dict[str, int] = {}
+    spec_by_fqn = getattr(module, "_fqn2spec_info", None) or {}
+    for name, param in named_ep.items():
+        spec = spec_by_fqn.get(name)
+        if spec is None or getattr(spec, "para_name", None) != "ep":
+            continue
+        dim = getattr(getattr(spec, "placement", None), "dim", None)
+        if dim is not None:
+            resolved[name] = _validate_ep_shard_dim(name, int(dim), param)
+
+    missing = [name for name in named_ep if name not in resolved]
+    if missing:
+        get_plan = getattr(module, "get_parallel_plan", None)
+        if callable(get_plan):
+            plan = get_plan()
+            ep_plan = getattr(plan, "extra_parallel_plan", {}).get("ep", {})
+            for name in missing:
+                matches = [
+                    int(placement.dim)
+                    for pattern, placement in ep_plan.items()
+                    if hasattr(placement, "dim") and fnmatchcase(name, pattern)
+                ]
+                if len(set(matches)) > 1:
+                    raise RuntimeError(f"EP load: conflicting shard dims for {name!r}: {matches}.")
+                if matches:
+                    resolved[name] = _validate_ep_shard_dim(name, matches[0], named_ep[name])
+
+    unresolved = [name for name in named_ep if name not in resolved]
+    if unresolved:
+        raise RuntimeError(
+            "EP load: parallel plan does not declare a Shard placement for "
+            f"{len(unresolved)} EP parameter(s): {unresolved[:8]}."
+        )
+    return resolved
+
+
+def _read_ep_checkpoint_block(
+    tensor_slice,
+    *,
+    name: str,
+    ckpt_shape: tuple,
+    global_shape: tuple,
+    ep_size: int,
+    ep_rank: int,
+    ep_dim: int | None,
+) -> torch.Tensor:
+    """Read one parameter, slicing only the axis declared by the EP plan."""
+    if ep_dim is not None and ep_size > 1:
+        expected = list(global_shape)
+        expected[ep_dim] *= ep_size
+        expected_shape = tuple(expected)
+        if ckpt_shape == global_shape:
+            raise RuntimeError(
+                f"EP load: {name!r} contains only one pre-sliced EP block "
+                f"{ckpt_shape}; expected full checkpoint shape {expected_shape}."
+            )
+        if ckpt_shape != expected_shape:
+            raise RuntimeError(
+                f"EP load: EP param {name!r} shape mismatch: checkpoint "
+                f"{ckpt_shape} vs plan-declared full shape {expected_shape} "
+                f"(Shard({ep_dim}), local global shape {global_shape})."
+            )
+        width = global_shape[ep_dim]
+        index = [slice(None)] * len(global_shape)
+        index[ep_dim] = slice(ep_rank * width, (ep_rank + 1) * width)
+        block = tensor_slice[tuple(index)]
+        if tuple(block.shape) != global_shape:
+            raise RuntimeError(f"EP load: sliced {name!r} to {tuple(block.shape)} != {global_shape}.")
+        return block
+
+    if ckpt_shape != global_shape:
+        raise RuntimeError(
+            f"EP load: shape mismatch for non-EP param {name!r}: checkpoint {ckpt_shape} vs global {global_shape}."
+        )
+    return tensor_slice[:]
+
+
+def _validate_ep_shard_dim(name: str, dim: int, param: nn.Parameter) -> int:
+    if dim < 0:
+        dim += param.ndim
+    if dim < 0 or dim >= param.ndim:
+        raise RuntimeError(
+            f"EP load: parallel plan declares invalid Shard({dim}) for {name!r} shape {tuple(param.shape)}."
+        )
+    return dim
+
+
 def _load_state_dict_ep_sliced(
     module: nn.Module,
     weights_dir: str,
@@ -216,10 +324,11 @@ def _load_state_dict_ep_sliced(
 ) -> None:
     """Memory-optimal EP weight load: each rank reads ONLY its expert block.
 
-    The EP plan pre-slices each expert param along the expert dim, so the
-    DTensor's GLOBAL shape is already ``[E/ep, …]`` (the ``ep`` split is baked in
-    per rank, NOT a DTensor placement). The checkpoint stores the full
-    ``[E, …]``. Instead of materializing the full tensor on every rank (8x host
+    The EP plan pre-slices each expert param along its declared ``Shard(dim)``
+    (dim 0 / the expert axis for Qwen3-MoE), so the DTensor's GLOBAL shape is
+    already ``[E/ep, …]``: the ``ep`` split is baked in per rank, NOT a DTensor
+    placement. The checkpoint stores the full ``[E, …]``. Instead of
+    materializing the full tensor on every rank (8x host
     RAM) or broadcasting it from rank 0 (rank-0 full-RAM bottleneck), we
     ``safetensors.get_slice`` the file (mmap, lazy) and index **only this ep
     rank's contiguous ``[E/ep, …]`` byte range** — no rank ever holds the full
@@ -263,6 +372,7 @@ def _load_state_dict_ep_sliced(
             key_to_handle[k] = h
     ckpt_keys = set(key_to_handle)
 
+    ep_shard_dims = _ep_shard_dims_from_plan(module)
     named = dict(module.named_parameters())
     named.update(dict(module.named_buffers()))
 
@@ -299,30 +409,15 @@ def _load_state_dict_ep_sliced(
         ckpt_shape = tuple(sl.get_shape())
         global_shape = tuple(dst.shape)
 
-        # EP-presliced experts: the fused expert param's global shape is [E/ep,…]
-        # while the (stacked) checkpoint holds [E,…]. Only these params are
-        # ep-presliced, so gate the dim-0 slice on the expert-param name — never
-        # infer it from a coincidental ``ckpt==global*ep_size`` shape match on some
-        # other tensor. Slice this rank's contiguous expert block on dim 0.
-        is_expert = name.endswith(".experts.gate_up_proj") or name.endswith(".experts.down_proj")
-        if is_expert and ckpt_shape != global_shape and ep_size > 1:
-            if ckpt_shape[0] != global_shape[0] * ep_size or ckpt_shape[1:] != global_shape[1:]:
-                raise RuntimeError(
-                    f"EP load: expert param {name!r} shape mismatch: checkpoint {ckpt_shape} "
-                    f"vs expected [E={global_shape[0] * ep_size} on dim0, {global_shape[1:]}]."
-                )
-            n = global_shape[0]
-            block = sl[ep_rank * n : (ep_rank + 1) * n]  # only this rank's E/ep experts
-            if tuple(block.shape) != global_shape:
-                raise RuntimeError(f"EP load: sliced {name!r} to {tuple(block.shape)} != {global_shape}.")
-        elif ckpt_shape != global_shape:
-            # Non-expert param whose checkpoint shape disagrees with the sharded
-            # param global shape — a real mismatch, not an ep preslice.
-            raise RuntimeError(
-                f"EP load: shape mismatch for non-expert param {name!r}: checkpoint {ckpt_shape} vs global {global_shape}."
-            )
-        else:
-            block = sl[:]  # whole (small) tensor; global == checkpoint shape
+        block = _read_ep_checkpoint_block(
+            sl,
+            name=name,
+            ckpt_shape=ckpt_shape,
+            global_shape=global_shape,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            ep_dim=ep_shard_dims.get(name),
+        )
 
         block = block.to(device=device, dtype=dst.dtype)
         local_elems += block.numel()
