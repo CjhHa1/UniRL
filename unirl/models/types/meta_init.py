@@ -99,9 +99,10 @@ def recover_rope_inv_freq(model: nn.Module) -> int:
     and reward cannot move.
 
     Robust to module renaming (found by ``inv_freq`` presence, not FQN); recomputes
-    from each rotary module's ``config`` (or the model ``config``), preferring
-    transformers' ``ROPE_INIT_FUNCTIONS`` (handles scaled rope) with a plain
-    default-theta fallback; writes into the LOCAL shard. No-op if already correct.
+    from each rotary module's ``config`` (or the model ``config``): explicit
+    scaled variants use transformers' matching ``ROPE_INIT_FUNCTIONS`` entry,
+    while default Qwen RoPE keeps the rollout-verified theta formula. Writes
+    into the LOCAL shard and fails on unsupported scaling or shape drift.
     """
     device = None
     for p in model.parameters():
@@ -115,20 +116,32 @@ def recover_rope_inv_freq(model: nn.Module) -> int:
         cfg = getattr(m, "config", None) or getattr(model, "config", None)
         if cfg is None:
             raise RuntimeError(f"recover_rope_inv_freq: rotary module {module_name!r} has no config.")
-        # Default (NTK-base) rope inv_freq: 1/theta^(2i/d). This matches the rollout
-        # engine (SGLang/HF) for Qwen3. We deliberately do NOT reroute through
-        # ROPE_INIT_FUNCTIONS[rope_type] or overwrite ``attention_scaling`` here:
-        # ``attention_scaling`` is a plain float attr (survives ``to_empty``, already
-        # correct), and empirically the plain formula tracks the rollout engine best
-        # (ratio ~1.0 vs ~0.94 when a scaled variant is force-applied).
-        theta = getattr(cfg, "rope_theta", None)
-        if theta is None:
-            rp = getattr(cfg, "rope_parameters", None) or getattr(cfg, "rope_scaling", None)
-            if isinstance(rp, dict):
-                theta = rp.get("rope_theta")
-        theta = theta or 10000.0
-        hd = getattr(cfg, "head_dim", None) or (cfg.hidden_size // cfg.num_attention_heads)
-        inv_freq = 1.0 / (theta ** (torch.arange(0, hd, 2, dtype=torch.float32, device=device) / hd))
+        rope_config = getattr(cfg, "rope_parameters", None) or getattr(cfg, "rope_scaling", None)
+        rope_type = getattr(m, "rope_type", None)
+        if rope_type is None and isinstance(rope_config, dict):
+            rope_type = rope_config.get("rope_type") or rope_config.get("type")
+        rope_type = rope_type or "default"
+
+        if rope_type == "default":
+            # Preserve the empirically verified Qwen3 default path used by the
+            # rollout engine; do not reinterpret a default config as scaled RoPE.
+            theta = getattr(cfg, "rope_theta", None)
+            if theta is None and isinstance(rope_config, dict):
+                theta = rope_config.get("rope_theta")
+            theta = theta or 10000.0
+            hd = getattr(cfg, "head_dim", None) or (cfg.hidden_size // cfg.num_attention_heads)
+            inv_freq = 1.0 / (theta ** (torch.arange(0, hd, 2, dtype=torch.float32, device=device) / hd))
+        else:
+            try:
+                from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+                rope_init = ROPE_INIT_FUNCTIONS[rope_type]
+                inv_freq, attention_scaling = rope_init(cfg, device)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"recover_rope_inv_freq: failed to initialize rope_type={rope_type!r} for module {module_name!r}."
+                ) from exc
+            m.attention_scaling = attention_scaling
         with torch.no_grad():
             for bn in ("inv_freq", "original_inv_freq"):
                 b = getattr(m, bn, None)
