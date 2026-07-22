@@ -184,6 +184,9 @@ class Qwen3MoeBundle(Bundle):
         if pretrained_model_ckpt_path is None:
             raise ValueError("Qwen3MoeBundle.from_config: pretrained_model_ckpt_path is required")
 
+        from unirl.train.backend.veomni import _compat
+
+        _compat.ensure_installed()
         from veomni.arguments import OpsImplementationConfig
         from veomni.models.auto import build_foundation_model
 
