@@ -59,6 +59,7 @@ from unirl.train.configs import (
     LoraConfig,
 )
 from unirl.train.deferred import apply_deferred_ops
+from unirl.utils.dtypes import parse_torch_dtype
 
 
 class VeOmniBackend(BaseFSDP2Backend):
@@ -102,6 +103,10 @@ class VeOmniBackend(BaseFSDP2Backend):
         self._rank = dist.get_rank() if dist.is_initialized() else int(rank)
         world = dist.get_world_size() if dist.is_initialized() else 1
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._weight_sync_dtype: torch.dtype = parse_torch_dtype(
+            fsdp_cfg.param_dtype,
+            field_name="training.fsdp.param_dtype",
+        )
 
         _compat.ensure_installed()
         from veomni.distributed.parallel_state import init_parallel_state
@@ -226,6 +231,15 @@ class VeOmniBackend(BaseFSDP2Backend):
     # ------------------------------------------------------------------
     # Engine hooks (VeOmni FSDP2)
     # ------------------------------------------------------------------
+
+    @property
+    def weight_sync_dtype(self) -> torch.dtype:
+        """FSDP compute dtype used on the rollout wire.
+
+        This remains independent of an optional fp32 master dtype so LoRA
+        extraction cannot send fp32 tensors to bf16/fp16-only receivers.
+        """
+        return self._weight_sync_dtype
 
     def _clip_grad_norm(self, max_grad_norm: float) -> torch.Tensor:
         # VeOmni's clip takes the model (dispatches on EP / cpu-offload attrs).
