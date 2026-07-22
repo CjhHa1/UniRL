@@ -115,6 +115,23 @@ class FullWeightSync(Remote):
         self._bucket_bytes = int(bucket_size_mb) * 1024 * 1024
         self._flush_cache = bool(flush_cache)
         self._lora_merged = bool(lora_merged)
+        ep_enabled = bool(
+            getattr(self._backend.model, "_extra_parallel_param_groups", None)
+            and self._backend.model._extra_parallel_param_groups.get("ep")
+        )
+        if ep_enabled and hasattr(self._backend.model, "peft_config"):
+            from unirl.utils.peft_merge import lora_targets_ep_experts
+
+            if lora_targets_ep_experts(self._backend.model):
+                raise ValueError(
+                    "FullWeightSync: LoRA targeting EP-sharded fused experts is unsupported; "
+                    "target attention/shared non-EP modules instead."
+                )
+            if not self._lora_merged:
+                raise ValueError(
+                    "FullWeightSync: EP + LoRA requires lora_merged=True. "
+                    "Use LocalLoraWeightSync/RemoteLoraWeightSync for adapter-only sync."
+                )
         # Which PEFT adapter's weights to push. ``None`` defers to the backend's
         # single source of truth (``rollout_adapter_name``): the EMA shadow
         # ("old") for DiffusionNFT, else "default". See class docstring; a
@@ -184,13 +201,10 @@ class FullWeightSync(Remote):
         from unirl.utils.peft_merge import merged_state_dict, raw_state_dict
 
         remap = self._name_remap
-        # Expert-parallel models: the stacked expert DTensor is sharded across the
-        # ``ep`` group (global shape [E/ep] per rank), and the receiver (SGLang)
-        # expects HF per-expert names. The raw walk would push only [E/ep] under
-        # the fused name, so route EP experts through the EP-aware walk (all-gather
-        # over ep + stacked->per-expert). Full-finetune (raw) path only: under
-        # LoRA, experts are frozen and not re-synced. No-op when EP is disabled.
-        if not self._lora_merged and getattr(self._backend.model, "_extra_parallel_param_groups", None) is not None:
+        # Expert-parallel models always need the EP-aware walk: even when LoRA
+        # is merged, the frozen fused experts still carry only this rank's
+        # [E/ep] block and must be gathered + converted to HF per-expert names.
+        if getattr(self._backend.model, "_extra_parallel_param_groups", None) is not None:
             yield from self._iter_full_tensors_ep()
             return
 
@@ -221,8 +235,8 @@ class FullWeightSync(Remote):
         full ``[E, …]`` stack, then split it back into HF per-expert tensors
         (``experts.{e}.gate_proj`` = ``gate_up[e][:I]``, ``up_proj`` = ``[I:2I]``,
         ``down_proj`` = ``down[e]``) — the reverse of the load converter, the layout
-        SGLang's Qwen3-MoE ``expert_params_mapping`` consumes. Non-expert params are
-        emitted unchanged via ``_to_full_tensor``.
+        SGLang's Qwen3-MoE ``expert_params_mapping`` consumes. Non-expert params
+        use the normal raw/LoRA-merged walk, including PEFT name normalization.
 
         Runs on every train rank in lockstep (the all-gather is collective). Each
         rank ends up with the full per-expert set and pushes it to its co-located
@@ -232,7 +246,7 @@ class FullWeightSync(Remote):
         import torch.distributed as dist
 
         from unirl.train.backend.veomni import _compat
-        from unirl.utils.peft_merge import _to_full_tensor
+        from unirl.utils.peft_merge import merged_state_dict, raw_state_dict
 
         _compat.ensure_installed()
         from veomni.distributed.parallel_state import get_parallel_state
@@ -242,24 +256,24 @@ class FullWeightSync(Remote):
         ep_group = ps.ep_group if ep_size > 1 else None
         remap = self._name_remap
 
-        # This walk reads raw ``state_dict()`` keys directly (needed to reach the
-        # fused expert params for the ep all-gather); it does NOT apply the PEFT
-        # normalization that ``raw_state_dict`` does (strip ``base_model.model.`` /
-        # ``.base_layer.``, skip ``.lora_A``/``.lora_B``). So it would leak PEFT
-        # keys to the receiver. Under LoRA the experts are frozen and not re-synced
-        # anyway, so fail closed rather than emit malformed keys — EP + LoRA
-        # base-weight sync is unsupported until the walk grows PEFT normalization.
-        if hasattr(self._backend.model, "peft_config"):
-            raise NotImplementedError(
-                "EP-aware full-weight sync does not support PEFT/LoRA models "
-                "(_iter_full_tensors_ep reads raw state_dict keys). Under LoRA the "
-                "EP-sharded experts are frozen and need no re-sync; sync only the "
-                "LoRA delta, or add PEFT key normalization to the EP walk."
+        if self._lora_merged:
+            state_walk = merged_state_dict(
+                self._backend.model,
+                adapter_name=self._adapter_name,
+                dtype=self._wire_dtype,
+            )
+        else:
+            state_walk = raw_state_dict(
+                self._backend.model,
+                adapter_name=self._adapter_name,
+                dtype=self._wire_dtype,
             )
 
-        for name, param in self._backend.model.state_dict().items():
-            full = _to_full_tensor(param, self._wire_dtype)  # [E/ep,…] for experts; full otherwise
-
+        # Both source walks normalize PEFT names (strip ``base_model.model.`` and
+        # ``.base_layer.``). The merged walk also folds attention/shared-module
+        # LoRA deltas while leaving frozen fused experts as their local [E/ep]
+        # base blocks, which are gathered below.
+        for name, full in state_walk:
             is_gate_up = name.endswith(".experts.gate_up_proj")
             is_down = name.endswith(".experts.down_proj")
             if (is_gate_up or is_down) and ep_size > 1:

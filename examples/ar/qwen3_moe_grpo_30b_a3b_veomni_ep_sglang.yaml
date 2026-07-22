@@ -149,9 +149,10 @@ algorithm:
     path: unirl.models.qwen3.conditions.Qwen3ARConditions
 
 sync:
-  # OPEN ITEM (PREREQUISITE #2): TensorWeightSync gathers full dense weights to push
-  # into SGLang. EP-sharded stacked experts need an EP-aware gather + stacked->per-expert
-  # remap (SGLang uses HF per-expert names). Listed for completeness; not yet EP-correct.
+  # Full-finetune EP sync: fused experts are gathered across the ep group and
+  # emitted under SGLang's HF per-expert names. For an EP + LoRA recipe, use a
+  # LoRA sync handler or set lora_merged=true; LoRA inside fused expert modules
+  # is rejected because that adapter layout has no safe receiver representation.
   _target_: unirl.distributed.weight_sync.full.tensor.TensorWeightSync
   lora_merged: false
   bucket_size_mb: 64
