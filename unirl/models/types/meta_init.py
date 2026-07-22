@@ -109,12 +109,12 @@ def recover_rope_inv_freq(model: nn.Module) -> int:
         device = loc.device
         break
     n = 0
-    for m in model.modules():
+    for module_name, m in model.named_modules():
         if getattr(m, "inv_freq", None) is None:
             continue
         cfg = getattr(m, "config", None) or getattr(model, "config", None)
         if cfg is None:
-            continue
+            raise RuntimeError(f"recover_rope_inv_freq: rotary module {module_name!r} has no config.")
         # Default (NTK-base) rope inv_freq: 1/theta^(2i/d). This matches the rollout
         # engine (SGLang/HF) for Qwen3. We deliberately do NOT reroute through
         # ROPE_INIT_FUNCTIONS[rope_type] or overwrite ``attention_scaling`` here:
@@ -136,12 +136,31 @@ def recover_rope_inv_freq(model: nn.Module) -> int:
                     continue
                 tgt = b.to_local() if hasattr(b, "to_local") else b
                 src = inv_freq.to(device=tgt.device, dtype=tgt.dtype)
-                if tuple(tgt.shape) == tuple(src.shape):
-                    tgt.copy_(src)
+                if tuple(tgt.shape) != tuple(src.shape):
+                    raise RuntimeError(
+                        f"recover_rope_inv_freq: {module_name}.{bn} shape "
+                        f"{tuple(tgt.shape)} != recomputed {tuple(src.shape)}."
+                    )
+                tgt.copy_(src)
         n += 1
     if n:
         logger.info("recover_rope_inv_freq: recomputed inv_freq on %d rotary module(s)", n)
     return n
+
+
+def finalize_meta_init(transformer: nn.Module, *, dtype: torch.dtype) -> nn.Module:
+    """Apply the shared post-build contract for a meta transformer.
+
+    The dtype cast is metadata-only on meta parameters, so ``to_empty`` later
+    allocates the requested master dtype directly. VeOmni calls
+    ``init_weights`` after materialization; replace it with a no-op because the
+    real checkpoint is loaded immediately afterwards.
+    """
+    if not any(param.is_meta for param in transformer.parameters()):
+        raise ValueError("finalize_meta_init requires a transformer with meta parameters.")
+    transformer = transformer.to(dtype)
+    transformer.init_weights = lambda: None
+    return transformer
 
 
 def build_meta_init_transformer(
@@ -166,8 +185,7 @@ def build_meta_init_transformer(
     with init_empty_weights(include_buffers=False):
         transformer = factory()
     captured = capture_init_state(transformer)
-    transformer = transformer.to(dtype)
-    transformer.init_weights = lambda: None
+    transformer = finalize_meta_init(transformer, dtype=dtype)
     return transformer, captured
 
 
@@ -175,5 +193,6 @@ __all__ = [
     "capture_init_state",
     "restore_init_state",
     "recover_rope_inv_freq",
+    "finalize_meta_init",
     "build_meta_init_transformer",
 ]

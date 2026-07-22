@@ -11,10 +11,9 @@ so it carries:
   all-to-all dispatch / grouped-GEMM / all-to-all combine EP path.
 
 Meta-init only (``VeOmniBackend`` materializes via ``to_empty`` + loads the
-stacked safetensors after sharding). The model's non-persistent RoPE
-``inv_freq`` buffers (absent from the checkpoint, clobbered by ``to_empty``) are
-recomputed from config by a stamped deferred op drained post-load by
-``apply_deferred_ops``.
+stacked safetensors after sharding). The backend's shared
+``recover_rope_inv_freq`` step restores non-persistent RoPE buffers after
+materialization and weight load.
 
 The dense Qwen3 ``Qwen3ARStage`` / ``Qwen3ARConditions`` are reused verbatim —
 the replay forward only needs ``.model`` (decoder) + ``.lm_head``.
@@ -22,96 +21,14 @@ the replay forward only needs ``.model`` (decoder) + ``.lm_head``.
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Optional
 
 import torch
 import torch.nn as nn
 
 from unirl.models.types.bundle import Bundle
-from unirl.train.deferred import _stamp
+from unirl.models.types.meta_init import finalize_meta_init
 from unirl.utils.dtypes import canonical_torch_dtype_name, parse_torch_dtype
-
-logger = logging.getLogger(__name__)
-
-
-def _recompute_rope_buffers(model: nn.Module) -> int:
-    """Recompute non-persistent RoPE ``inv_freq`` from config on the materialized
-    model (``to_empty`` left them as garbage; the checkpoint does not carry them).
-    Best-effort: matches any module exposing ``inv_freq`` + ``config``."""
-    try:
-        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-    except Exception:
-        return 0
-    n = 0
-    device = next(model.parameters()).device
-    for m in model.modules():
-        inv = getattr(m, "inv_freq", None)
-        cfg = getattr(m, "config", None)
-        if inv is None or cfg is None:
-            continue
-        fn = ROPE_INIT_FUNCTIONS.get(getattr(m, "rope_type", "default")) or ROPE_INIT_FUNCTIONS.get("default")
-        if fn is None:
-            continue
-        try:
-            inv_freq, scaling = fn(cfg, device)
-        except Exception:
-            continue
-        with torch.no_grad():
-            # After veomni_parallelize (FSDP2 fully_shard), these non-persistent
-            # buffers can be DTensors. A plain ``buf.copy_(plain_tensor)`` onto a
-            # DTensor raises (mixed DTensor/plain) and was swallowed by the caller's
-            # try/except — leaving the ``to_empty`` ZEROS. inv_freq==0 makes RoPE the
-            # identity (cos=1,sin=0 at every position) => a position-blind model =>
-            # replay logprobs systematically wrong => rollout/replay ratio ~0.11 =>
-            # GRPO fully clipped => reward can't move. Copy into the LOCAL shard.
-            for _bn in ("inv_freq", "original_inv_freq"):
-                _b = getattr(m, _bn, None)
-                if _b is None:
-                    continue
-                _t = _b.to_local() if hasattr(_b, "to_local") else _b
-                _t.copy_(inv_freq.to(device=_t.device, dtype=_t.dtype))
-        m.attention_scaling = scaling
-        n += 1
-    if n:
-        logger.info("Qwen3MoeBundle: recomputed RoPE inv_freq on %d rotary module(s)", n)
-    return n
-
-
-def _capture_rope_init_state(model: nn.Module) -> dict:
-    """Compute the non-persistent RoPE ``inv_freq`` from config as a picklable
-    ``_meta_init_state`` (``{"buffers": {fqn: cpu_tensor}, "attrs": {}}``), the
-    robust bundle-carried recovery path ``load_trainable_weights`` ->
-    ``restore_init_state`` drains after the post-shard weight load.
-
-    Unlike a model-bound deferred closure (which the meta-init code documents can
-    be dropped when the bundle crosses Ray actors), these are plain CPU tensors on
-    the bundle, so the recovery survives transport. ``inv_freq`` depends only on
-    config, so it is recomputable here on the meta model (``m.config`` /
-    ``m.rope_type`` are real Python attrs; only the buffer storage is on meta).
-    ``attention_scaling`` is a plain float attribute untouched by ``to_empty``, so
-    it needs no restore.
-    """
-    try:
-        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-    except Exception:
-        return {"buffers": {}, "attrs": {}}
-    buffers: dict = {}
-    for name, m in model.named_modules():
-        if getattr(m, "inv_freq", None) is None or getattr(m, "config", None) is None:
-            continue
-        fn = ROPE_INIT_FUNCTIONS.get(getattr(m, "rope_type", "default")) or ROPE_INIT_FUNCTIONS.get("default")
-        if fn is None:
-            continue
-        try:
-            inv_freq, _scaling = fn(m.config, torch.device("cpu"))
-        except Exception:
-            continue
-        inv_freq = inv_freq.detach().cpu()
-        buffers[f"{name}.inv_freq"] = inv_freq
-        if getattr(m, "original_inv_freq", None) is not None:
-            buffers[f"{name}.original_inv_freq"] = inv_freq.clone()
-    return {"buffers": buffers, "attrs": {}}
 
 
 class Qwen3MoeBundle(Bundle):
@@ -157,6 +74,8 @@ class Qwen3MoeBundle(Bundle):
         model_precision: str = "bf16",
         moe_implementation: str = "fused_triton",
         attn_implementation: str = "flash_attention_2",
+        meta_init_transformer: bool = True,
+        trust_remote_code: bool = True,
         tokenizer: Any = None,
     ) -> "Qwen3MoeBundle":
         """Build the VeOmni Qwen3-MoE transformer (on meta) + tokenizer.
@@ -173,7 +92,9 @@ class Qwen3MoeBundle(Bundle):
         **stacked** (``experts.gate_up_proj`` / ``down_proj``) and HF **original
         per-expert** (``experts.N.gate_proj`` / ``up_proj`` / ``down_proj``) — the
         EP-aware loader (``unirl.train.backend.sharded_load``) reconstructs each
-        rank's fused expert block from the per-expert keys when needed.
+        rank's fused expert block from the per-expert keys when needed. This
+        VeOmni-only bundle requires ``meta_init_transformer=true`` and fails
+        clearly instead of silently ignoring that config contract.
         """
         if config is not None:
             pretrained_model_ckpt_path = config.pretrained_model_ckpt_path
@@ -181,8 +102,15 @@ class Qwen3MoeBundle(Bundle):
             model_precision = getattr(config, "model_precision", "bf16")
             attn_implementation = getattr(config, "attn_implementation", None) or attn_implementation
             moe_implementation = getattr(config, "moe_implementation", None) or moe_implementation
+            meta_init_transformer = bool(getattr(config, "meta_init_transformer", True))
+            trust_remote_code = bool(getattr(config, "trust_remote_code", True))
         if pretrained_model_ckpt_path is None:
             raise ValueError("Qwen3MoeBundle.from_config: pretrained_model_ckpt_path is required")
+        if not meta_init_transformer:
+            raise ValueError(
+                "Qwen3MoeBundle requires meta_init_transformer=true: VeOmniBackend "
+                "materializes and loads this EP model only after parallelization."
+            )
 
         from unirl.train.backend.veomni import _compat
 
@@ -210,24 +138,13 @@ class Qwen3MoeBundle(Bundle):
             init_device="meta",
             ops_implementation=ops,
         )
-        # VeOmni's parallelize calls init_weights() after to_empty; no-op it (real
-        # weights load right after, via the backend's EP-aware sharded load).
-        transformer.init_weights = lambda: None
-        # RoPE inv_freq is non-persistent (absent from the checkpoint, clobbered by
-        # to_empty). Recover it via BOTH:
-        #  * the bundle-carried _meta_init_state (ROBUST): plain CPU tensors that
-        #    survive Ray-actor transport; load_trainable_weights -> restore_init_state
-        #    copies them into the materialized buffers after the weight load.
-        #  * a stamped in-process closure (belt): drained by apply_deferred_ops for
-        #    any path that skips the bundle-carried restore. Both are idempotent.
-        rope_state = _capture_rope_init_state(transformer)
-        _stamp(transformer, lambda materialized: _recompute_rope_buffers(materialized))
+        transformer = finalize_meta_init(transformer, dtype=dtype)
 
         if tokenizer is None:
             from transformers import AutoTokenizer
 
             tok_path = tokenizer_ckpt_path or pretrained_model_ckpt_path
-            tokenizer = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=trust_remote_code)
             if tokenizer.pad_token is None and tokenizer.eos_token is not None:
                 tokenizer.pad_token = tokenizer.eos_token
 
@@ -241,9 +158,6 @@ class Qwen3MoeBundle(Bundle):
         # Meta-init Pattern B: backend loads stacked safetensors from this dir
         # after EP sharding.
         bundle._transformer_weights_path = pretrained_model_ckpt_path
-        # Ray-safe RoPE recovery (see _capture_rope_init_state): restored by
-        # load_trainable_weights after the weight load.
-        bundle._meta_init_state = rope_state
         return bundle
 
 
