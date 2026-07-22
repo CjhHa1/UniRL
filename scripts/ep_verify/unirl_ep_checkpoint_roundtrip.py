@@ -76,7 +76,8 @@ def main() -> None:
     # rank's [E/ep,H] block; the DTensor records only the inner ep_fsdp shard.
     local_expert_block = torch.full((2, 4), float(ep_rank + 1), device=device)
     full_ep_mesh = ps.extra_parallel_fsdp_device_mesh["ep"]
-    ep_fsdp_mesh = full_ep_mesh[full_ep_mesh.mesh_dim_names[:-1]]
+    ep_fsdp_mesh = full_ep_mesh["ep_fsdp"]
+    assert ep_fsdp_mesh.mesh_dim_names == ("ep_fsdp",)
     placements = [Replicate()] * (ep_fsdp_mesh.ndim - 1) + [Shard(1)]
     expert_dtensor = distribute_tensor(local_expert_block, ep_fsdp_mesh, placements)
     model = _TinyExpertModel(nn.Parameter(expert_dtensor))
@@ -98,6 +99,8 @@ def main() -> None:
         expected_shape = (local_global_shape[0] * ep_size, *local_global_shape[1:])
         assert tuple(model_state["experts"].shape) == expected_shape
         assert tuple(optimizer_state["state"]["experts"]["exp_avg"].shape) == expected_shape
+        blocks = model_state["experts"].reshape(ep_size, local_global_shape[0], *local_global_shape[1:])
+        assert any(not torch.equal(blocks[0], blocks[index]) for index in range(1, ep_size))
         torch.save({"model": model_state, "optimizer": optimizer_state}, checkpoint_path)
     dist.barrier()
 
