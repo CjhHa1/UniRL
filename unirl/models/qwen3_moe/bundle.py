@@ -30,7 +30,7 @@ import torch.nn as nn
 
 from unirl.models.types.bundle import Bundle
 from unirl.train.deferred import _stamp
-from unirl.utils.dtypes import parse_torch_dtype
+from unirl.utils.dtypes import canonical_torch_dtype_name, parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +191,7 @@ class Qwen3MoeBundle(Bundle):
         from veomni.models.auto import build_foundation_model
 
         dtype = parse_torch_dtype(str(model_precision), field_name="Qwen3MoeBundle.model_precision")
+        dtype_name = canonical_torch_dtype_name(dtype, field_name="Qwen3MoeBundle.model_precision")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         ops = OpsImplementationConfig(
@@ -205,7 +206,7 @@ class Qwen3MoeBundle(Bundle):
         transformer = build_foundation_model(
             config_path=pretrained_model_ckpt_path,
             weights_path=None,
-            torch_dtype=model_precision if model_precision in ("float16", "bfloat16", "float32") else "bfloat16",
+            torch_dtype=dtype_name,
             init_device="meta",
             ops_implementation=ops,
         )

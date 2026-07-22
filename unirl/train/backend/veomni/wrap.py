@@ -27,15 +27,9 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from unirl.utils.dtypes import parse_torch_dtype
+from unirl.utils.dtypes import canonical_torch_dtype_name, parse_torch_dtype
 
 logger = logging.getLogger(__name__)
-
-_DTYPE_NAMES = {
-    torch.bfloat16: "bfloat16",
-    torch.float16: "float16",
-    torch.float32: "float32",
-}
 
 
 def veomni_parallelize(
@@ -68,9 +62,7 @@ def veomni_parallelize(
     from veomni.distributed.torch_parallelize import parallelize_model_fsdp2
 
     compute_dtype = parse_torch_dtype(param_dtype, field_name="training.fsdp.param_dtype")
-    dtype_name = _DTYPE_NAMES.get(compute_dtype)
-    if dtype_name is None:
-        raise ValueError(f"veomni_parallelize: unsupported param_dtype {param_dtype!r}")
+    dtype_name = canonical_torch_dtype_name(compute_dtype, field_name="training.fsdp.param_dtype")
 
     # Master-weight dtype: cast on meta (dtype-only, no data) so to_empty
     # materializes storage in this dtype; MixedPrecisionPolicy(param_dtype) then
