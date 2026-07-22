@@ -119,6 +119,19 @@ class FullWeightSync(Remote):
             getattr(self._backend.model, "_extra_parallel_param_groups", None)
             and self._backend.model._extra_parallel_param_groups.get("ep")
         )
+        if ep_enabled:
+            from unirl.train.backend.veomni.ep.models.qwen3_moe import is_fused_expert_param
+            from unirl.train.backend.veomni.ep.placement import ep_named_parameters
+
+            unsupported = [
+                name for name, _ in ep_named_parameters(self._backend.model) if not is_fused_expert_param(name)
+            ]
+            if unsupported:
+                raise ValueError(
+                    "FullWeightSync: EP full-weight sync currently supports the "
+                    "Qwen3-MoE fused expert layout only; use a LoRA sync handler "
+                    f"for this model. Unsupported EP params: {unsupported[:4]}."
+                )
         if ep_enabled and hasattr(self._backend.model, "peft_config"):
             from unirl.utils.peft_merge import lora_targets_ep_experts
 
@@ -242,10 +255,12 @@ class FullWeightSync(Remote):
         rank ends up with the full per-expert set and pushes it to its co-located
         engine, exactly like the dense BROADCAST sync.
         """
-        import torch
-        import torch.distributed as dist
-
         from unirl.train.backend.veomni import _compat
+        from unirl.train.backend.veomni.ep.models.qwen3_moe import (
+            fused_expert_kind,
+            iter_hf_expert_tensors,
+        )
+        from unirl.train.backend.veomni.ep.placement import gather_stacked_expert_block
         from unirl.utils.peft_merge import merged_state_dict, raw_state_dict
 
         _compat.ensure_installed()
@@ -274,15 +289,15 @@ class FullWeightSync(Remote):
         # LoRA deltas while leaving frozen fused experts as their local [E/ep]
         # base blocks, which are gathered below.
         for name, full in state_walk:
-            is_gate_up = name.endswith(".experts.gate_up_proj")
-            is_down = name.endswith(".experts.down_proj")
-            if (is_gate_up or is_down) and ep_size > 1:
-                local = full.contiguous()
-                gathered = [torch.empty_like(local) for _ in range(ep_size)]
-                dist.all_gather(gathered, local, group=ep_group)
-                stacked = torch.cat(gathered, dim=0)  # [E, …]  (ep rank r -> experts r*E/ep …)
-                del gathered, full, local
-            elif is_gate_up or is_down:
+            expert_kind = fused_expert_kind(name)
+            if expert_kind is not None and ep_size > 1:
+                stacked = gather_stacked_expert_block(
+                    full,
+                    ep_size=ep_size,
+                    ep_group=ep_group,
+                )
+                del full
+            elif expert_kind is not None:
                 stacked = full  # ep_size==1: already the full [E,…]
             else:
                 out = _apply_name_remap(name, remap)
@@ -290,23 +305,10 @@ class FullWeightSync(Remote):
                     yield out, full
                 continue
 
-            prefix = name.rsplit(".experts.", 1)[0]
-            num_experts = int(stacked.shape[0])
-            if is_gate_up:
-                inter = stacked.shape[1] // 2
-                for e in range(num_experts):
-                    for nm, t in (
-                        (f"{prefix}.experts.{e}.gate_proj.weight", stacked[e, :inter, :].contiguous()),
-                        (f"{prefix}.experts.{e}.up_proj.weight", stacked[e, inter:, :].contiguous()),
-                    ):
-                        out = _apply_name_remap(nm, remap)
-                        if out is not None:
-                            yield out, t
-            else:  # down_proj
-                for e in range(num_experts):
-                    out = _apply_name_remap(f"{prefix}.experts.{e}.down_proj.weight", remap)
-                    if out is not None:
-                        yield out, stacked[e].contiguous()
+            for hf_name, tensor in iter_hf_expert_tensors(name, stacked):
+                out = _apply_name_remap(hf_name, remap)
+                if out is not None:
+                    yield out, tensor
             del stacked
 
     def _iter_buckets(self) -> Iterator[Tuple[List[Tuple[str, "object"]], bool]]:

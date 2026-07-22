@@ -193,8 +193,8 @@ else:
    仅当 `_extra_parallel_param_groups` 存在（EP 开启）时启用，非 EP 路径**逐字不变**。
 
    **两种 checkpoint 格式均可直接加载（无需离线合并）**：VeOmni **stacked**（`experts.gate_up_proj`/`down_proj`）与
-   HF **原版 per-expert**（`experts.{e}.gate_proj`/`up_proj`/`down_proj`）。后者由 `_build_expert_block_from_split`
-   按 VeOmni `CheckpointTensorConverter` 的映射（`cat([gate,up],dim=0)` 后按专家堆叠，gate 在上）**只重建本 rank 的
+   HF **原版 per-expert**（`experts.{e}.gate_proj`/`up_proj`/`down_proj`）。后者由共享的
+   `ep/models/qwen3_moe.py` 按 VeOmni converter 映射（`cat([gate,up],dim=0)` 后按专家堆叠，gate 在上）**只重建本 rank 的
    `E/ep` 个专家块**（内存仍最优）。已验证 bit-exact：split 的 `experts.5.{gate,up,down}` 与 stacked 切片逐位相等；
    真实 backend + GRPO ep4 加载 split 格式得 loss `-0.51628`，与 stacked 加载**完全一致**。
 
@@ -344,8 +344,8 @@ cd UniRL-pe-perf && PYTHONPATH=../VeOmni:. /root/ep_work/epvenv/bin/python -m to
 3. **落地到生产 RL recipe 仍需（未在本次实现，明确声明）**：
    - 把 `Qwen3MoeBundle` 接入 UniRL 的 pipeline 注册 + recipe YAML（`backend.fsdp_cfg.ep_size`、
      `block_class_names=["Qwen3MoeDecoderLayer"]`、`moe_implementation=fused_triton`），并配真实 rollout（SGLang 服务 MoE）+ reward。
-   - **HF 原版 split-format MoE checkpoint**（`experts.N.gate_proj`）：✅ **已接线**——EP 加载器
-     (`_build_expert_block_from_split`) 按 VeOmni `CheckpointTensorConverter` 映射在加载时逐 rank 重建融合专家块，
+   - **HF 原版 split-format MoE checkpoint**（`experts.N.gate_proj`）：✅ **已接线**——EP 加载器复用
+     `ep/models/qwen3_moe.py` 的单一 HF↔fused 映射，在加载时逐 rank 重建融合专家块，
      无需离线合并（bit-exact 已验证）。真实 Qwen3-30B-A3B HF checkpoint 可直接喂入（仅需本地下载，sharded_load 不拉 HF repo id）。
    - **EP-aware 权重同步**：✅ **已实现**——`FullWeightSync._iter_full_tensors_ep` 对融合专家参数先在 `ep` 组
      `all_gather`（`[E/ep]→[E]`）再 reverse-convert 成 HF per-expert 名（`experts.{e}.gate_proj/up_proj/down_proj`，
@@ -443,6 +443,9 @@ GPT-5.5 对 EP 分支做了 review，5 条发现全部认可并已修复（均�
    读取每个参数的 `Shard(dim)`，只切声明维度；预切 checkpoint、非 EP shape mismatch、部分 split key 均直接报错。
    verify：sync PASS 1536/1536、24/24 bit-exact。
 5. **[Low] `ep_size=0/负` 被吞** → backend 加 `ep_size>=1` fail-fast。
+6. **[Med] HF↔fused 映射与 EP placement 重复** → Qwen3 映射统一到
+   `veomni/ep/models/qwen3_moe.py`，mmap loader 与 full-weight sync 共用；Qwen/HI3 两种传输保留各自内存策略，
+   仅共享 `placement.py` 的 local-block assign/gather，避免把 Qwen 退化成 rank0 全量 broadcast。
 
 修复后回归：GRPO ep4 `loss=-0.51628`/`ratio=1.0`，sync e2e PASS，lint 干净。
 

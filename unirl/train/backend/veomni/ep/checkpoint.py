@@ -30,33 +30,14 @@ from unirl.train.backend.sharded_state import (
     load_model_state_dict,
     load_optimizer_state_dict,
 )
+from unirl.train.backend.veomni.ep.placement import (
+    ep_named_parameters,
+    gather_stacked_expert_block,
+    has_ep_params,
+    materialize_local_block,
+)
 
 EP_CHECKPOINT_VERSION = 1
-
-
-def has_ep_params(model: nn.Module) -> bool:
-    """Whether ``model`` carries VeOmni's non-empty EP parameter group."""
-    groups = getattr(model, "_extra_parallel_param_groups", None)
-    return bool(groups and groups.get("ep"))
-
-
-def ep_named_parameters(model: nn.Module) -> Tuple[Tuple[str, nn.Parameter], ...]:
-    """Return EP parameters in deterministic model order.
-
-    ``_extra_parallel_param_groups`` is attached by ``veomni_parallelize`` from
-    the actual DTensor meshes, so it is the model-agnostic source of truth for
-    Qwen3-MoE and HI3 alike.
-    """
-    groups = getattr(model, "_extra_parallel_param_groups", None) or {}
-    ep_params = tuple(groups.get("ep", ()))
-    ep_ids = {id(param) for param in ep_params}
-    named = tuple((name, param) for name, param in model.named_parameters() if id(param) in ep_ids)
-    if len(named) != len(ep_params):
-        raise RuntimeError(
-            "EP checkpoint: could not map every _extra_parallel_param_groups['ep'] "
-            f"parameter to an FQN ({len(named)}/{len(ep_params)} mapped)."
-        )
-    return named
 
 
 def gather_ep_model_state_dict(model: nn.Module) -> StateDict:
@@ -66,9 +47,13 @@ def gather_ep_model_state_dict(model: nn.Module) -> StateDict:
     rank0 = _current_rank() == 0
 
     for name, param in ep_named_parameters(model):
-        local_block = _materialize_local_block(param)
+        local_block = materialize_local_block(param)
         _validate_local_shape(name, local_block, param)
-        stacked = _gather_stacked_block(local_block, ps)
+        stacked = gather_stacked_expert_block(
+            local_block,
+            ep_size=int(ps.ep_size),
+            ep_group=ps.ep_group,
+        )
         if rank0:
             if name not in full_state:
                 raise RuntimeError(f"EP checkpoint: model state is missing expert parameter {name!r}.")
@@ -130,9 +115,13 @@ def gather_ep_optimizer_state_dict(
                     f"EP checkpoint: optimizer state {name!r}/{state_name!r} has "
                     f"shape {tuple(value.shape)}, expected parameter shape {tuple(param.shape)}."
                 )
-            local_block = _materialize_local_block(value)
+            local_block = materialize_local_block(value)
             _validate_local_shape(f"{name}/{state_name}", local_block, param)
-            stacked = _gather_stacked_block(local_block, ps)
+            stacked = gather_stacked_expert_block(
+                local_block,
+                ep_size=int(ps.ep_size),
+                ep_group=ps.ep_group,
+            )
             if rank0:
                 entry = rank0_entries.get(name)
                 if entry is None or state_name not in entry:
@@ -196,34 +185,6 @@ def _ep_rank(ps) -> int:
     if hasattr(ps, "extra_parallel_rank"):
         return int(ps.extra_parallel_rank("ep"))
     return int(ps.ep_rank)
-
-
-def _materialize_local_block(value: torch.Tensor) -> torch.Tensor:
-    """Replicate a DTensor over its own mesh, yielding this EP rank's block."""
-    try:
-        from torch.distributed.tensor import DTensor, Replicate
-    except ImportError:  # pragma: no cover - older torch
-        from torch.distributed._tensor import DTensor, Replicate
-
-    if isinstance(value, DTensor):
-        work = value
-        if work.to_local().device.type == "cpu":
-            if not torch.cuda.is_available():
-                raise RuntimeError("EP checkpoint: cannot gather a CPU DTensor over an NCCL mesh without CUDA.")
-            work = work.cuda()
-        placements = [Replicate()] * work.device_mesh.ndim
-        return work.redistribute(placements=placements).to_local().detach()
-    return value.detach()
-
-
-def _gather_stacked_block(local_block: torch.Tensor, ps) -> torch.Tensor:
-    """Gather contiguous expert blocks in EP-rank order and concatenate dim 0."""
-    block = local_block.contiguous()
-    if block.device.type == "cpu" and dist.is_initialized() and dist.get_backend(ps.ep_group) == "nccl":
-        block = block.cuda()
-    gathered = [torch.empty_like(block) for _ in range(int(ps.ep_size))]
-    dist.all_gather(gathered, block, group=ps.ep_group)
-    return torch.cat(gathered, dim=0)
 
 
 def _slice_stacked_block(

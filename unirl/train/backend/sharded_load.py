@@ -28,6 +28,8 @@ import torch
 from torch import nn
 
 from unirl.train.backend.sharded_state import _build_state_dict_options, _current_rank
+from unirl.train.backend.veomni.ep.models.qwen3_moe import build_local_fused_block
+from unirl.train.backend.veomni.ep.placement import assign_local_block, ep_named_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -143,71 +145,6 @@ def load_sharded(
     _load_state_dict_sharded(module, state_dict, device=device, strict=strict)
 
 
-def _build_expert_block_from_split(name, dst, key_to_handle, ckpt_keys, ep_size, ep_rank, device):
-    """Reconstruct THIS ep rank's fused expert block from HF per-expert keys.
-
-    Mirrors VeOmni's ``Qwen3MoeCheckpointTensorConverter`` (per-expert HF ->
-    fused v5), but applied **only to the experts this rank owns** so memory stays
-    at ``E/ep``:
-
-        ``{prefix}.experts.{e}.gate_proj.weight`` [I,H] + ``up_proj.weight`` [I,H]
-            -> per expert ``cat([gate, up], dim=0)`` [2I,H], stacked  -> [E/ep, 2I, H]
-        ``{prefix}.experts.{e}.down_proj.weight`` [H,I]  stacked        -> [E/ep, H, I]
-
-    Returns the block tensor on ``device`` (dtype ``dst.dtype``), or ``None`` when
-    ``name`` is not a fused expert param or the per-expert keys are absent (so the
-    caller falls through to the normal missing-key handling).
-    """
-    if name.endswith(".experts.gate_up_proj"):
-        proj = "gate_up_proj"
-    elif name.endswith(".experts.down_proj"):
-        proj = "down_proj"
-    else:
-        return None
-
-    prefix = name.rsplit(".experts.", 1)[0]  # "...mlp"
-    num_local = int(tuple(dst.shape)[0])  # E/ep (the param's global dim-0)
-    start = ep_rank * num_local
-    experts = range(start, start + num_local)
-
-    def _resolve(keys: list) -> "list | None":
-        """None if NO key present (not split format -> caller handles missing);
-        raise if SOME but not all present (corrupt/incomplete checkpoint)."""
-        present = [k for k in keys if k in ckpt_keys]
-        if not present:
-            return None
-        if len(present) != len(keys):
-            raise RuntimeError(
-                f"EP load: incomplete per-expert checkpoint for {name!r}: "
-                f"{len(present)}/{len(keys)} keys present (e.g. missing "
-                f"{next(k for k in keys if k not in ckpt_keys)!r})."
-            )
-        return keys
-
-    if proj == "down_proj":
-        keys = _resolve([f"{prefix}.experts.{e}.down_proj.weight" for e in experts])
-        if keys is None:
-            return None
-        block = torch.stack([key_to_handle[k].get_tensor(k) for k in keys])  # [E/ep, H, I]
-    else:
-        gkeys = _resolve([f"{prefix}.experts.{e}.gate_proj.weight" for e in experts])
-        ukeys = _resolve([f"{prefix}.experts.{e}.up_proj.weight" for e in experts])
-        if gkeys is None or ukeys is None:
-            return None
-        per_expert = [
-            torch.cat([key_to_handle[g].get_tensor(g), key_to_handle[u].get_tensor(u)], dim=0)  # [2I, H]
-            for g, u in zip(gkeys, ukeys)
-        ]
-        block = torch.stack(per_expert)  # [E/ep, 2I, H]
-
-    if tuple(block.shape) != tuple(dst.shape):
-        raise RuntimeError(
-            f"EP load: rebuilt expert block for {name!r} has shape {tuple(block.shape)} "
-            f"!= param global shape {tuple(dst.shape)} (ep_rank={ep_rank}, num_local={num_local})."
-        )
-    return block.to(device=device, dtype=dst.dtype)
-
-
 def _ep_shard_dims_from_plan(module: nn.Module) -> Dict[str, int]:
     """Resolve each EP parameter's pre-sliced axis from VeOmni's parallel plan.
 
@@ -215,18 +152,9 @@ def _ep_shard_dims_from_plan(module: nn.Module) -> Dict[str, int]:
     The ``get_parallel_plan`` fallback keeps this usable with older releases
     that expose only the original pattern map.
     """
-    groups = getattr(module, "_extra_parallel_param_groups", None) or {}
-    ep_params = tuple(groups.get("ep", ()))
-    if not ep_params:
+    named_ep = dict(ep_named_parameters(module))
+    if not named_ep:
         return {}
-
-    ep_ids = {id(param) for param in ep_params}
-    named_ep = {name: param for name, param in module.named_parameters() if id(param) in ep_ids}
-    if len(named_ep) != len(ep_params):
-        raise RuntimeError(
-            "EP load: could not map every _extra_parallel_param_groups['ep'] "
-            f"parameter to an FQN ({len(named_ep)}/{len(ep_params)} mapped)."
-        )
 
     resolved: Dict[str, int] = {}
     spec_by_fqn = getattr(module, "_fqn2spec_info", None) or {}
@@ -344,13 +272,12 @@ def _load_state_dict_ep_sliced(
     Checkpoint formats: both VeOmni **stacked** (``experts.gate_up_proj`` /
     ``down_proj``) and HF **original per-expert** (``experts.{e}.gate_proj`` /
     ``up_proj`` / ``down_proj``) are accepted — the latter is reconstructed per
-    rank via :func:`_build_expert_block_from_split` (VeOmni's converter mapping),
+    rank via :func:`build_local_fused_block` (VeOmni's converter mapping),
     so real Qwen3-MoE HF checkpoints load directly with no offline merge.
     """
     import glob
 
     from safetensors import safe_open
-    from torch.distributed.tensor import DTensor, distribute_tensor
 
     from unirl.train.backend.veomni import _compat
 
@@ -372,6 +299,9 @@ def _load_state_dict_ep_sliced(
             key_to_handle[k] = h
     ckpt_keys = set(key_to_handle)
 
+    def get_checkpoint_tensor(key: str) -> torch.Tensor:
+        return key_to_handle[key].get_tensor(key)
+
     ep_shard_dims = _ep_shard_dims_from_plan(module)
     named = dict(module.named_parameters())
     named.update(dict(module.named_buffers()))
@@ -389,16 +319,17 @@ def _load_state_dict_ep_sliced(
             # (``...experts.gate_up_proj`` / ``...experts.down_proj``) is absent;
             # rebuild THIS ep rank's block from the per-expert ``experts.{e}.*``
             # keys (VeOmni's CheckpointTensorConverter mapping, applied per rank).
-            block = _build_expert_block_from_split(name, dst, key_to_handle, ckpt_keys, ep_size, ep_rank, device)
+            block = build_local_fused_block(
+                fused_param_name=name,
+                expected_shape=tuple(dst.shape),
+                ep_rank=ep_rank,
+                available_keys=ckpt_keys,
+                get_tensor=get_checkpoint_tensor,
+            )
             if block is not None:
+                block = block.to(device=device, dtype=dst.dtype)
                 local_elems += block.numel()
-                if isinstance(dst, DTensor):
-                    sharded = distribute_tensor(block, dst.device_mesh, dst.placements)
-                    with torch.no_grad():
-                        dst.to_local().copy_(sharded.to_local())
-                else:
-                    with torch.no_grad():
-                        dst.copy_(block)
+                assign_local_block(dst, block)
                 loaded += 1
                 del block
                 continue
@@ -421,17 +352,9 @@ def _load_state_dict_ep_sliced(
 
         block = block.to(device=device, dtype=dst.dtype)
         local_elems += block.numel()
-        if isinstance(dst, DTensor):
-            sharded = distribute_tensor(block, dst.device_mesh, dst.placements)
-            with torch.no_grad():
-                dst.to_local().copy_(sharded.to_local())
-        else:
-            with torch.no_grad():
-                dst.copy_(block)
+        assign_local_block(dst, block)
         loaded += 1
         del block
-
-    del handles, key_to_handle  # close mmaps
 
     if strict and missing:
         raise RuntimeError(f"EP load: missing {len(missing)} tensor(s) in checkpoint: {missing[:8]}")
