@@ -42,6 +42,14 @@ from unirl.train.backend.sharded_state import (
     gather_optimizer_state_dict,
     load_optimizer_state_dict,
 )
+from unirl.train.backend.veomni.ep.checkpoint import (
+    EP_CHECKPOINT_VERSION,
+    gather_ep_model_state_dict,
+    gather_ep_optimizer_state_dict,
+    has_ep_params,
+    load_ep_model_state_dict,
+    load_ep_optimizer_state_dict,
+)
 from unirl.train.backend.veomni.state import clip_grad_norm, veomni_offload, veomni_onload
 from unirl.train.backend.veomni.wrap import veomni_parallelize
 from unirl.train.configs import (
@@ -223,18 +231,34 @@ class VeOmniBackend(BaseFSDP2Backend):
         # VeOmni's clip takes the model (dispatches on EP / cpu-offload attrs).
         return clip_grad_norm(self.model, max_grad_norm)
 
+    def _gather_model_state(self, mode: str) -> StateDict:
+        if mode == "full" and has_ep_params(self.model):
+            return gather_ep_model_state_dict(self.model)
+        return super()._gather_model_state(mode)
+
+    def _load_model_state(self, model_state: StateDict, *, strict: bool) -> None:
+        if has_ep_params(self.model):
+            load_ep_model_state_dict(self.model, model_state, strict=strict)
+            return
+        super()._load_model_state(model_state, strict=strict)
+
+    def _torch_checkpoint_metadata(self) -> StateDict:
+        if not has_ep_params(self.model):
+            return {}
+        return {
+            "ep_checkpoint_version": EP_CHECKPOINT_VERSION,
+            "ep_size": self._ep_size,
+        }
+
     def _gather_optimizer_state(self) -> StateDict:
-        # Full optimizer state gathered to rank 0 via DCP (full_state_dict=True);
-        # the base writes only rank 0's. A plain per-rank optimizer.state_dict()
-        # would persist just rank 0's DTensor shard and load it onto every rank,
-        # corrupting ranks>0 momentum on resume. The folded dp_shard x ulysses
-        # mesh is a plain 2D DeviceMesh DCP gathers across both dims (same path
-        # the dcp checkpoint format already uses on this mesh).
+        if has_ep_params(self.model):
+            return gather_ep_optimizer_state_dict(self.model, self.optimizer)
         return gather_optimizer_state_dict(self.model, self.optimizer)
 
     def _load_optimizer_state(self, optimizer_state: StateDict) -> None:
-        # Full state on rank 0, broadcast + resharded into each rank's local
-        # shard (set_optimizer_state_dict, broadcast_from_rank0=True).
+        if has_ep_params(self.model):
+            load_ep_optimizer_state_dict(self.model, self.optimizer, optimizer_state)
+            return
         load_optimizer_state_dict(self.model, self.optimizer, optimizer_state)
 
     def _onload_model(self) -> None:

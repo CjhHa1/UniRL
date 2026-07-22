@@ -29,7 +29,8 @@
    ep1/ep2/ep4 显存 12.12/10.18/**9.90GB（−18%）**，loss 轨迹三者一致（同一份加载权重）。
    **更进一步：跑通了真实 GRPO 训练侧一步**（正式 `unirl/models/qwen3_moe` bundle + `Qwen3ARStage` replay + `GRPO` 算法 +
    EP-aware `optimizer_step`）——ep4 与 ep1 的 step-0 policy_loss **逐位一致（−0.51628）**、`ratio=1`、显存 **−36%**。
-   UniRL 既有的 `AdamW(foreach=False)` 优化器 + DCP checkpoint（DTensor 通用）**无需改动**即兼容 EP。
+   `AdamW(foreach=False)` 的训练 step 直接兼容 EP；单文件 checkpoint 另需显式补齐 DTensor 看不到的外层 EP 维度，
+   本实现已在 save 时把模型权重与 Adam moments 从 `[E/ep,...]` gather 为 `[E,...]`，resume 时按当前 ep-rank 切回。
 
 ---
 
@@ -207,7 +208,9 @@ else:
 - **梯度裁剪**：`state.py::clip_grad_norm` 已调用 VeOmni 的 EP-aware clip——只要 `_extra_parallel_param_groups` 存在即正确。
 - **优化器**：UniRL `build_optimizer` 已**无条件** `AdamW(foreach=False)`（`unirl/train/optim.py:69`）。单 tensor 逐参数 step，
   天然不跨 mesh stack → **直接兼容 EP**（已用单 optimizer 验证 ep=4 跑通）。
-- **checkpoint/offload**：DCP 对 DTensor 通用，offload 走 VeOmni——均与 EP 兼容。
+- **checkpoint/offload**：offload 走 VeOmni；DCP sharded checkpoint 在同一 EP topology 下保留各 rank shard。默认单文件
+  checkpoint 不能直接依赖 DCP full-state gather，因为 EP split 位于 DTensor placement 之外；现由
+  `veomni/ep/checkpoint.py` 对模型参数和 Adam moments 做 `[E/ep]↔[E]` 显式转换。
 
 ### 4.3 端到端验证（真实 UniRL 代码路径）
 
@@ -334,8 +337,9 @@ cd UniRL-pe-perf && PYTHONPATH=../VeOmni:. /root/ep_work/epvenv/bin/python -m to
    外加正式 bundle `unirl/models/qwen3_moe/`。已通过**完整 `VeOmniBackend.__init__` → 真实权重加载 → `optimizer_step`**（§4.4）
    以及**真实 GRPO 训练步**（§4.5：真实 bundle + backend EP + `Qwen3ARStage` replay + `GRPO` 算法 + EP-aware clip）端到端验证：
    ep4 与 ep1 的 step-0 policy_loss **逐位一致（−0.51628）**、ratio=1、显存 −18%~−36%。
-   既有 `foreach=False` 优化器与 DCP checkpoint 天然兼容；过程中发现并修复了两个集成缺口：
-   EP-aware 梯度裁剪的 `_extra_parallel_param_groups`、以及 EP 2D 复合 mesh 的权重加载。
+   既有 `foreach=False` 优化器 step 兼容；过程中发现并修复了三个集成缺口：
+   EP-aware 梯度裁剪的 `_extra_parallel_param_groups`、EP 2D 复合 mesh 的权重加载，以及默认单文件
+   checkpoint 对完整专家权重/Adam moments 的 gather + resume。合成多进程 round-trip 同时校验了模型和优化器状态逐位恢复。
 
 3. **落地到生产 RL recipe 仍需（未在本次实现，明确声明）**：
    - 把 `Qwen3MoeBundle` 接入 UniRL 的 pipeline 注册 + recipe YAML（`backend.fsdp_cfg.ep_size`、
