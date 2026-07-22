@@ -114,7 +114,7 @@ class Qwen3MoeBundle(Bundle):
 
         from unirl.train.backend.veomni import _compat
 
-        _compat.ensure_installed()
+        _compat.ensure_qwen3_moe_installed()
         from veomni.arguments import OpsImplementationConfig
         from veomni.models.auto import build_foundation_model
 

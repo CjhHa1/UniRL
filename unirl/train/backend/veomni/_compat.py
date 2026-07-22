@@ -25,6 +25,11 @@ which is itself clean: safetensors + stable ``transformers.utils`` APIs)
 before ``torch_parallelize`` is imported.  :func:`ensure_installed` runs
 both stub steps in that order; call it before importing any veomni symbol.
 
+The Qwen3-MoE bundle is the one intentional model-layer consumer.
+:func:`ensure_qwen3_moe_installed` preserves the same selective-import
+discipline and registers only that family, without executing
+``veomni.models.transformers.__init__`` and its full model-zoo imports.
+
 Zero veomni functions are replaced; this is selective importing, not
 behavior patching (the veomni dependency is exact-pinned in ``pyproject.toml``).
 """
@@ -107,6 +112,26 @@ def ensure_installed() -> None:
     _install_path_stubs()
     _attach_models_names()
     logger.info("veomni distributed layer installed via selective-import shim")
+
+
+@functools.cache
+def ensure_qwen3_moe_installed() -> None:
+    """Register only VeOmni's Qwen3-MoE modeling implementation.
+
+    ``ensure_installed`` deliberately stubs ``veomni.models`` to avoid importing
+    the entire version-locked model zoo. ``build_foundation_model`` still needs
+    the requested family registered in ``MODELING_REGISTRY``, so stub the
+    intermediate ``transformers`` package as well and execute only
+    ``qwen3_moe/__init__.py``.
+    """
+    ensure_installed()
+    pkg_dir = list(sys.modules["veomni"].__path__)[0]
+    _stub_package(
+        "veomni.models.transformers",
+        os.path.join(pkg_dir, "models", "transformers"),
+    )
+    importlib.import_module("veomni.models.transformers.qwen3_moe")
+    logger.info("veomni Qwen3-MoE modeling registered via selective import")
 
 
 @functools.cache
