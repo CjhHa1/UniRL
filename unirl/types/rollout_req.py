@@ -20,8 +20,12 @@ Pairs with ``RolloutResp`` (in ``unirl/types/rollout_resp.py``). Carries:
   ``sampling_params.get("diffusion")`` / ``.get("ar")`` (``None`` when that
   modality is absent) and use ``total_samples_per_prompt()`` for the per-prompt
   fanout (product across modalities).
-- ``stage_config: Dict[str, Any]`` — model-specific routing metadata
-  (``"task"``, ``"bot_task"``, ``"sys_type"``, ``"chat"``).
+- ``task_config: Dict[str, Any]`` — model-specific task routing metadata
+  (``"task"``, ``"bot_task"``, ``"sys_type"``, ``"chat"``, ``"ar"``), pinned by
+  the recipe's top-level ``task_config:`` block. Selects which mode a multi-task
+  pipeline generates (``BagelPipeline._resolve_task``) and carries the per-task
+  chat-template / AR-sampling overrides. Names no pipeline stage: unrelated to
+  an algorithm's ``stage_attr`` or the vllm-omni ``stage_configs/`` YAMLs.
 - ``sigmas: Optional[torch.Tensor]`` — the σ schedule for this rollout,
   computed main-side via
   :func:`unirl.sde.runtime.ensure_req_sigmas` (which applies the
@@ -70,7 +74,7 @@ class RolloutReq(Batch):
     primitives: Dict[str, PrimitiveValue] = field(kind=FieldKind.CONCAT, default_factory=dict)
     request_conditions: Dict[str, Condition] = field(kind=FieldKind.CONCAT, default_factory=dict)
     sampling_params: Dict[str, BaseSamplingParams] = shared_field(default_factory=dict)
-    stage_config: Dict[str, Any] = shared_field(default_factory=dict)
+    task_config: Dict[str, Any] = shared_field(default_factory=dict)
     # σ schedule is shared across all samples in the request — every
     # sample runs the same num_inference_steps / shift / dynamic-shift μ
     # by construction (geometry varies per-sample only via height/width,
