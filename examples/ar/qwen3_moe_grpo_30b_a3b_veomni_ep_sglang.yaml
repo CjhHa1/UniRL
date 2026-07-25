@@ -7,7 +7,7 @@
 # grouped-GEMM). The single switch is backend.fsdp_cfg.ep_size; ep_size=1 is a true
 # no-op (== the SP/FSDP-only path).
 #
-# PREREQUISITES (see docs/veomni_ep_analysis_report.md §6):
+# PREREQUISITES:
 #   1. A LOCAL checkpoint dir. Both layouts load directly (no offline merge): HF
 #      original per-expert (experts.N.gate_proj/up_proj/down_proj) AND VeOmni stacked
 #      (experts.gate_up_proj/down_proj). The EP-aware loader

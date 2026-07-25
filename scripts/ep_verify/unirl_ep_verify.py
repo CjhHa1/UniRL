@@ -51,6 +51,9 @@ def main():
     )
 
     # ---- EXACT init_parallel_state call from VeOmniBackend.__init__ ----
+    from unirl.train.backend.veomni import _compat
+
+    _compat.ensure_qwen3_moe_installed()
     from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state
 
     if world % fsdp_cfg.sp_size != 0:

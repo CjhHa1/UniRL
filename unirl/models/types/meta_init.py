@@ -75,8 +75,12 @@ def restore_init_state(model: nn.Module, captured: Optional[dict]) -> int:
         # -> rollout/replay logprob mismatch). Copy into the LOCAL shard.
         tgt = live.to_local() if hasattr(live, "to_local") else live
         src = value.to(device=tgt.device, dtype=tgt.dtype)
-        if tuple(tgt.shape) == tuple(src.shape):
-            tgt.copy_(src)
+        if tuple(tgt.shape) != tuple(src.shape):
+            raise RuntimeError(
+                f"restore_init_state: captured buffer {fqn!r} shape {tuple(src.shape)} "
+                f"does not match live local shape {tuple(tgt.shape)}."
+            )
+        tgt.copy_(src)
     for (mod_name, attr), value in attrs.items():
         owner = modules.get(mod_name)
         if owner is not None:

@@ -8,8 +8,7 @@ functions), this drives the **actual** ``VeOmniBackend`` class end to end:
         build optimizer/scheduler)
     -> backend.zero_grad / loss.backward / backend.optimizer_step (EP-aware clip)
 
-on a VeOmni-patched Qwen3-MoE (meta-init + real stacked safetensors load). This
-closes the gap flagged in the report ("未经过完整 VeOmniBackend.__init__").
+on a VeOmni-patched Qwen3-MoE (meta-init + real stacked safetensors load).
 
 Launch: torchrun --nproc_per_node=8 unirl_ep_backend_real.py <config_dir> <ep> <out.json>
 """
@@ -39,8 +38,16 @@ class _SimpleBundle:
         self.transformer = transformer
         self._transformer_weights_path = weights_dir
 
+    def prepare_for_expert_parallel(self):
+        if not callable(getattr(self.transformer, "get_parallel_plan", None)):
+            raise RuntimeError("test transformer does not expose get_parallel_plan()")
+
 
 def build_meta_moe(config_path):
+    from unirl.models.types.meta_init import finalize_meta_init
+    from unirl.train.backend.veomni import _compat
+
+    _compat.ensure_qwen3_moe_installed()
     from veomni.arguments import OpsImplementationConfig
     from veomni.models.auto import build_foundation_model
 
@@ -60,32 +67,22 @@ def build_meta_moe(config_path):
         init_device="meta",
         ops_implementation=ops,
     )
-    # VeOmni's parallelize calls model.init_weights() after to_empty; stamp it to
-    # a no-op (real weights load right after, via the backend's sharded load).
-    model.init_weights = lambda: None
-    return model
+    return finalize_meta_init(model, dtype=torch.bfloat16)
 
 
-def recompute_rope(model, device):
-    """Recompute non-persistent RoPE inv_freq (clobbered by to_empty) from config."""
-    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-
+def validate_recovered_rope(model):
+    """Assert that the backend restored finite, nonzero RoPE frequencies."""
     n = 0
-    for m in model.modules():
-        if hasattr(m, "inv_freq") and hasattr(m, "config") and getattr(m, "inv_freq", None) is not None:
-            rope_type = getattr(m, "rope_type", "default")
-            fn = ROPE_INIT_FUNCTIONS.get(rope_type) or ROPE_INIT_FUNCTIONS.get("default")
-            if fn is None:
-                continue
-            inv_freq, scaling = fn(m.config, device)
-            with torch.no_grad():
-                m.inv_freq.copy_(inv_freq.to(device=m.inv_freq.device, dtype=m.inv_freq.dtype))
-                if getattr(m, "original_inv_freq", None) is not None:
-                    m.original_inv_freq.copy_(
-                        inv_freq.to(device=m.original_inv_freq.device, dtype=m.original_inv_freq.dtype)
-                    )
-            m.attention_scaling = scaling
-            n += 1
+    for name, module in model.named_modules():
+        inv_freq = getattr(module, "inv_freq", None)
+        if inv_freq is None:
+            continue
+        local = inv_freq.to_local() if hasattr(inv_freq, "to_local") else inv_freq
+        if not bool(torch.isfinite(local).all()) or int(torch.count_nonzero(local)) == 0:
+            raise RuntimeError(f"backend did not recover RoPE inv_freq for {name!r}")
+        n += 1
+    if n == 0:
+        raise RuntimeError("test model has no RoPE inv_freq buffer to validate")
     return n
 
 
@@ -119,7 +116,7 @@ def main():
         rank=rank,
     )
     model = backend.model
-    n_rope = recompute_rope(model, device)
+    n_rope = validate_recovered_rope(model)
 
     from veomni.distributed.parallel_state import get_parallel_state
 
@@ -129,7 +126,7 @@ def main():
     if rank == 0:
         print(
             f"[real] ep={ep_size} ep_enabled={ep_enabled} ep_size(ps)={ps.ep_size if ep_enabled else 1} "
-            f"ep_param_groups={has_groups} rope_recomputed={n_rope} model={type(model).__name__}",
+            f"ep_param_groups={has_groups} rope_validated={n_rope} model={type(model).__name__}",
             flush=True,
         )
 
@@ -172,7 +169,7 @@ def main():
             "world": dist.get_world_size(),
             "ep_enabled": bool(ep_enabled),
             "ep_param_groups": bool(has_groups),
-            "rope_recomputed": n_rope,
+            "rope_validated": n_rope,
             "global_peak_alloc_gb": global_peak,
             "median_step_time_s": med,
             "records": records,

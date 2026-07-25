@@ -131,13 +131,7 @@ class VeOmniBackend(BaseFSDP2Backend):
         # ep_size=1 (the default for every VeOmni-backed model) omits the
         # extra_parallel_* kwargs entirely, so the call is byte-identical to the
         # pre-EP path and never depends on the installed veomni accepting them.
-        self._ep_size = int(getattr(fsdp_cfg, "ep_size", 1) or 1)
-        # Fail fast on a bad config value rather than silently coercing (0 -> 1,
-        # negative -> "disabled"): ep_size is a positive degree.
-        if self._ep_size < 1:
-            raise ValueError(f"VeOmniBackend: fsdp_cfg.ep_size must be >= 1, got {self._ep_size}")
-        if self._ep_size > 1 and world % self._ep_size != 0:
-            raise ValueError(f"VeOmniBackend: world_size {world} not divisible by ep_size {self._ep_size}")
+        self._ep_size = _validate_ep_size(getattr(fsdp_cfg, "ep_size", 1), world_size=world)
         extra_parallel_kwargs = (
             {"extra_parallel_sizes": (self._ep_size,), "extra_parallel_names": ("ep",)} if self._ep_size > 1 else {}
         )
@@ -312,6 +306,19 @@ def _validate_fsdp_cfg(fsdp_cfg: FSDPConfig) -> None:
         raise ValueError("VeOmniBackend: cpu_offload=true unsupported in v1 (use FSDPBackend).")
     if not fsdp_cfg.mixed_precision:
         raise ValueError("VeOmniBackend: mixed_precision=false unsupported in v1 (bf16-parity mode is fixed).")
+
+
+def _validate_ep_size(value: object, *, world_size: int) -> int:
+    """Return a valid expert-parallel degree without coercing falsey values."""
+    try:
+        ep_size = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"VeOmniBackend: fsdp_cfg.ep_size must be an integer >= 1, got {value!r}") from exc
+    if ep_size < 1:
+        raise ValueError(f"VeOmniBackend: fsdp_cfg.ep_size must be >= 1, got {ep_size}")
+    if world_size % ep_size != 0:
+        raise ValueError(f"VeOmniBackend: world_size {world_size} not divisible by ep_size {ep_size}")
+    return ep_size
 
 
 __all__ = ["VeOmniBackend"]
