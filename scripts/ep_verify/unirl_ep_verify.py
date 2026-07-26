@@ -83,7 +83,7 @@ def main():
     from veomni.models.auto import build_foundation_model
 
     ops = OpsImplementationConfig(
-        attn_implementation="flash_attention_2",
+        attn_implementation=os.environ.get("ATTN_IMPLEMENTATION", "flash_attention_2"),
         moe_implementation="fused_triton",
         cross_entropy_loss_implementation="eager",
         rms_norm_implementation="eager",
@@ -167,7 +167,9 @@ def main():
             "median_step_time_s": med,
             "records": records,
         }
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         with open(out_path, "w") as f:
             json.dump(out, f, indent=2)
         print(f"[verify] WROTE {out_path}: ep={ep_size} peak={global_peak:.2f}GB median_step={med}", flush=True)
