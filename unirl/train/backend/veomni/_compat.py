@@ -122,7 +122,11 @@ def ensure_qwen3_moe_installed() -> None:
     the entire version-locked model zoo. ``build_foundation_model`` still needs
     the requested family registered in ``MODELING_REGISTRY``, so stub the
     intermediate ``transformers`` package as well and execute only
-    ``qwen3_moe/__init__.py``.
+    ``qwen3_moe/__init__.py``. Qwen3-MoE model construction consumes VeOmni's
+    complete ops registry anyway, so load it before installing the selective
+    attention patch. This ordering matters: installing the attention patch
+    first would leave an intentionally minimal ``veomni.ops`` path stub where
+    ``build_foundation_model`` expects ``apply_ops_config``.
     """
     ensure_installed()
     pkg_dir = list(sys.modules["veomni"].__path__)[0]
@@ -131,6 +135,8 @@ def ensure_qwen3_moe_installed() -> None:
         os.path.join(pkg_dir, "models", "transformers"),
     )
     importlib.import_module("veomni.models.transformers.qwen3_moe")
+    importlib.import_module("veomni.ops")
+    ensure_attention_patch_installed()
     logger.info("veomni Qwen3-MoE modeling registered via selective import")
 
 
