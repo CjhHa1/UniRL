@@ -53,13 +53,32 @@ class WAN21ImageLatentEncodeStage(EncodeStage[NativeImages, ImageLatentCondition
         self.width = int(width)
 
     def encode(self, p: NativeImages | Images) -> ImageLatentCondition:
+        if self.bundle.vae is None:
+            raise RuntimeError(
+                "WAN21ImageLatentEncodeStage.encode: no VAE loaded "
+                "(load_vae=False). The trainer-side pipeline cannot encode "
+                "reference images in this configuration — separate-engine "
+                "recipes encode in the rollout engine; trainside I2V "
+                "requires load_vae=True."
+            )
         if not isinstance(p, (NativeImages, Images)):
-            raise TypeError(f"WAN21ImageLatentEncodeStage.encode: expected NativeImages, got {type(p).__name__}")
-        pixels_list = p.pixels if isinstance(p, NativeImages) else list(p.pixels.unbind(0))
-        if not pixels_list or any(pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
+            raise TypeError(
+                f"WAN21ImageLatentEncodeStage.encode: expected NativeImages or Images, got {type(p).__name__}"
+            )
+        if isinstance(p, NativeImages):
+            pixels_list = p.pixels
+        else:
+            pixels = p.pixels
+            if pixels is None or pixels.ndim != 4 or pixels.shape[1] != 3:
+                raise ValueError(
+                    "WAN21ImageLatentEncodeStage.encode: expected dense pixels "
+                    f"[B, 3, H, W], got {None if pixels is None else tuple(pixels.shape)}"
+                )
+            pixels_list = list(pixels.unbind(0))
+        if not pixels_list or any(pixels is None or pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(
                 "WAN21ImageLatentEncodeStage.encode: expected per-sample pixels [3, H, W], "
-                f"got {[tuple(pixels.shape) for pixels in pixels_list]}"
+                f"got {[None if pixels is None else tuple(pixels.shape) for pixels in pixels_list]}"
             )
 
         device = self.bundle.device

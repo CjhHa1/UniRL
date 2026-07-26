@@ -108,15 +108,32 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages, RaggedImageLaten
             :class:`RaggedImageLatentCondition` with one
             ``[16, H_vae_i/8, W_vae_i/8]`` tensor per sample.
         """
+        if self.bundle.vae is None:
+            raise RuntimeError(
+                "QwenImageEditPlusVAEEncodeStage.encode: no VAE loaded "
+                "(load_vae=False). The trainer-side pipeline cannot encode "
+                "source images in this configuration — separate-engine "
+                "recipes encode in the rollout engine (image_latent arrives "
+                "captured); trainside rollout requires load_vae=True."
+            )
         if not isinstance(images, (NativeImages, Images)):
             raise TypeError(
-                f"QwenImageEditPlusVAEEncodeStage.encode: expected NativeImages, got {type(images).__name__}"
+                f"QwenImageEditPlusVAEEncodeStage.encode: expected NativeImages or Images, got {type(images).__name__}"
             )
-        pixels_list = images.pixels if isinstance(images, NativeImages) else list(images.pixels.unbind(0))
-        if not pixels_list or any(pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
+        if isinstance(images, NativeImages):
+            pixels_list = images.pixels
+        else:
+            pixels = images.pixels
+            if pixels is None or pixels.ndim != 4 or pixels.shape[1] != 3:
+                raise ValueError(
+                    "QwenImageEditPlusVAEEncodeStage.encode: expected dense pixels "
+                    f"[B, 3, H, W] in [0,1], got {None if pixels is None else tuple(pixels.shape)}"
+                )
+            pixels_list = list(pixels.unbind(0))
+        if not pixels_list or any(pixels is None or pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(
                 "QwenImageEditPlusVAEEncodeStage.encode: expected per-sample pixels "
-                f"[3, H, W] in [0,1], got {[tuple(pixels.shape) for pixels in pixels_list]}"
+                f"[3, H, W] in [0,1], got {[None if pixels is None else tuple(pixels.shape) for pixels in pixels_list]}"
             )
         if int(height) % 16 != 0 or int(width) % 16 != 0:
             raise ValueError(

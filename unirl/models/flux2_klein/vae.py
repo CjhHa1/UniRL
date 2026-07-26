@@ -70,6 +70,14 @@ class Flux2KleinVAEDecodeStage(DecodeStage[LatentSegment, Images]):
         trainable params, so only ``clean``'s graph is extended. ``activation_checkpoint``
         (grad only) recomputes the decode in backward to trade compute for memory.
         """
+        if self.bundle.vae is None:
+            raise RuntimeError(
+                "Flux2KleinVAEDecodeStage.decode: no VAE loaded "
+                "(load_vae=False). The trainer-side pipeline cannot decode "
+                "latents in this configuration — separate-engine recipes "
+                "decode in the rollout engine; trainside rollout requires "
+                "load_vae=True."
+            )
         if s.latents is None:
             raise ValueError("Flux2KleinVAEDecodeStage.decode: segment.latents is None")
         if s.latents.ndim != 5:
@@ -128,11 +136,32 @@ class Flux2KleinVAEEncodeStage:
 
     @torch.no_grad()
     def encode(self, images: NativeImages | Images, *, height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:
-        pixels_list = images.pixels if isinstance(images, NativeImages) else list(images.pixels.unbind(0))
-        if not pixels_list or any(pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
+        if self.bundle.vae is None:
+            raise RuntimeError(
+                "Flux2KleinVAEEncodeStage.encode: no VAE loaded "
+                "(load_vae=False). The trainer-side pipeline cannot encode "
+                "source images in this configuration — separate-engine "
+                "recipes encode in the rollout engine; trainside rollout "
+                "requires load_vae=True."
+            )
+        if not isinstance(images, (NativeImages, Images)):
+            raise TypeError(
+                f"Flux2KleinVAEEncodeStage.encode: expected NativeImages or Images, got {type(images).__name__}"
+            )
+        if isinstance(images, NativeImages):
+            pixels_list = images.pixels
+        else:
+            pixels = images.pixels
+            if pixels is None or pixels.ndim != 4 or pixels.shape[1] != 3:
+                raise ValueError(
+                    "Flux2KleinVAEEncodeStage.encode: expected dense pixels "
+                    f"[B, 3, H, W] in [0,1], got {None if pixels is None else tuple(pixels.shape)}"
+                )
+            pixels_list = list(pixels.unbind(0))
+        if not pixels_list or any(pixels is None or pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(
                 "Flux2KleinVAEEncodeStage.encode: expected per-sample pixels [3, H, W] in [0,1], "
-                f"got {[tuple(pixels.shape) for pixels in pixels_list]}"
+                f"got {[None if pixels is None else tuple(pixels.shape) for pixels in pixels_list]}"
             )
 
         vae = self.bundle.vae
