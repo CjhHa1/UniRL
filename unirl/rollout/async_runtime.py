@@ -12,6 +12,7 @@ trajectory scheduling belongs to a separate, resumable-engine abstraction.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Protocol
@@ -23,6 +24,8 @@ from unirl.distributed.tensor import WorkerLocalTransport
 from unirl.distributed.tensor.pytree import infer_batch_size
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -40,14 +43,10 @@ class VersionedGroupBuffer:
     def __init__(self) -> None:
         self._items: List[BufferedRolloutGroup] = []
 
-    def put(self, resp: RolloutResp, *, weight_version: int, gen_id: int) -> None:
-        self._items.append(
-            BufferedRolloutGroup(
-                resp=resp,
-                weight_version=int(weight_version),
-                gen_id=int(gen_id),
-            )
-        )
+    def put_all(self, items: List[BufferedRolloutGroup]) -> None:
+        """Append a prepared batch of groups in one mutation."""
+
+        self._items.extend(items)
 
     def size(self) -> int:
         return len(self._items)
@@ -342,58 +341,76 @@ class AsyncRolloutScheduler:
         job: InflightGeneration,
         on_complete: CompleteGeneration,
     ) -> None:
+        # Complete-or-nothing: collect + score + validate first, then mutate the
+        # buffer once. A failed job remains in-flight and can be retried without
+        # duplicating a prefix of its groups.
         resp = self._dispatcher.collect(job)
-        self._stat_reaped_jobs += 1
         groups = on_complete(job, resp)
         if self._prefetch_batches is not None and len(groups) != self._groups_per_generation:
             raise RuntimeError(
                 f"generation {job.gen_id} produced {len(groups)} root group(s); "
                 f"bounded prefetch reserved {self._groups_per_generation}"
             )
-        for group in groups:
-            self._buffer.put(
-                group,
+        prepared = [
+            BufferedRolloutGroup(
+                resp=group,
                 weight_version=job.weight_version,
                 gen_id=job.gen_id,
             )
+            for group in groups
+        ]
+        self._buffer.put_all(prepared)
+        self._stat_reaped_jobs += 1
         self._stat_buffered_groups += len(groups)
 
     def reap_ready(self, on_complete: CompleteGeneration) -> None:
-        """Collect every ready generation; leave unresolved jobs in flight."""
+        """Collect every ready generation; leave unresolved / failed jobs in flight."""
 
-        ready: List[InflightGeneration] = []
         still: List[InflightGeneration] = []
+        first_error: Optional[Exception] = None
         for job in self._inflight:
-            if self._dispatcher.is_ready(job):
-                ready.append(job)
-            else:
+            if not self._dispatcher.is_ready(job):
                 still.append(job)
-        self._inflight = still
-
-        first_error: Optional[BaseException] = None
-        for job in ready:
+                continue
             try:
                 self._complete(job, on_complete)
-            except BaseException as exc:
+            except Exception as exc:
+                # Keep the failed job so teardown/drain_all can retry it.
+                # KeyboardInterrupt/SystemExit still propagate immediately.
+                still.append(job)
                 if first_error is None:
                     first_error = exc
+                else:
+                    logger.error(
+                        "reap_ready: additional failure for gen_id=%s",
+                        job.gen_id,
+                        exc_info=exc,
+                    )
+        self._inflight = still
         if first_error is not None:
             raise first_error
 
     def drain_all(self, on_complete: CompleteGeneration) -> None:
         """Quiesce every generation and buffer all successfully completed groups."""
 
-        jobs, self._inflight = self._inflight, []
-        first_error: Optional[BaseException] = None
+        jobs, self._inflight = list(self._inflight), []
+        first_error: Optional[Exception] = None
         for job in jobs:
             try:
                 wait_start = time.perf_counter()
                 self._dispatcher.wait(job)
                 self._stat_quiesce_wait_time_s += time.perf_counter() - wait_start
                 self._complete(job, on_complete)
-            except BaseException as exc:
+            except Exception as exc:
+                self._inflight.append(job)
                 if first_error is None:
                     first_error = exc
+                else:
+                    logger.error(
+                        "drain_all: additional failure for gen_id=%s",
+                        job.gen_id,
+                        exc_info=exc,
+                    )
         if first_error is not None:
             raise first_error
 

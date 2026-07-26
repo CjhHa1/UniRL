@@ -37,6 +37,7 @@ opens the colocate ``placement(fraction=1.0)`` block we replace with two slabs).
 
 import inspect
 import logging
+import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -444,8 +445,16 @@ class AsyncARTrainer(ARTrainer):
                         save_mode=save_mode,
                     )
         finally:
+            # Cleanup failures must not hide the exception that initiated
+            # teardown. If training itself succeeded, a drain failure remains
+            # actionable and is re-raised.
+            active_exception = sys.exc_info()[0] is not None
             try:
                 self._drain_all()
+            except Exception:
+                if not active_exception:
+                    raise
+                logger.exception("Failed to drain in-flight generations during trainer teardown")
             finally:
                 self._finish_wandb()
 
