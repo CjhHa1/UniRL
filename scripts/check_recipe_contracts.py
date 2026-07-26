@@ -219,6 +219,10 @@ MUST_REJECT: dict[str, dict] = {
         "rollout": {"_target_": FASTVIDEO},
         "sync": {"_target_": TENSOR_SYNC},
     },
+    "checkpoint sync on an engine without a checkpoint receive path": {
+        "rollout": {"_target_": SGLANG_DIFFUSION},
+        "sync": {"_target_": CHECKPOINT_SYNC},
+    },
     "misspelled layout": {
         "rollout": {"_target_": SGLANG_DIFFUSION},
         "sync": {"_target_": TENSOR_SYNC},

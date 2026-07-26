@@ -10,11 +10,13 @@ instead of somewhere inside a half-built Ray cluster.
 
 Two properties are deliberate:
 
-- **Stdlib only** (like ``require.py``). The gate has to fire *before* the
-  driver pays for torch / sglang / vllm, and staying dependency-free is what
-  guarantees it stays that way. It also lets the same code run as a static
-  guard over every shipped recipe — see ``scripts/check_recipe_contracts.py``,
-  which is how this layer is kept honest in a lint-only CI.
+- **Stdlib only** (like ``require.py``). This keeps the contract predicates
+  lightweight and lets the same code run as a static guard over every shipped
+  recipe without importing torch / sglang / vllm — see
+  ``scripts/check_recipe_contracts.py``, which is how this layer is kept honest
+  in a lint-only CI. Runtime entrypoints still import their trainer modules
+  before ``main`` executes; the gate promises to run before trainer
+  construction and Ray startup, not before all heavy Python imports.
 - **Recipe shape knowledge lives in one place** — :class:`RecipeFacts`. Every
   contract is a predicate over normalized facts, never a hard-coded dotpath,
   because the shapes differ per entry point: a diffusion recipe puts its engine
@@ -53,8 +55,15 @@ SYNC_VIA_IPC = "update_weights_from_ipc"
 SYNC_VIA_TENSOR = "update_weights_from_tensor"
 SYNC_VIA_NCCL = "init_weights_update_group"
 SYNC_VIA_LORA = "set_lora_from_tensors"
+SYNC_VIA_CHECKPOINT = "update_weights_from_path"
 
-SYNC_RECEIVE_METHODS = (SYNC_VIA_IPC, SYNC_VIA_TENSOR, SYNC_VIA_NCCL, SYNC_VIA_LORA)
+SYNC_RECEIVE_METHODS = (
+    SYNC_VIA_IPC,
+    SYNC_VIA_TENSOR,
+    SYNC_VIA_NCCL,
+    SYNC_VIA_LORA,
+    SYNC_VIA_CHECKPOINT,
+)
 
 
 @dataclass(frozen=True)
@@ -95,19 +104,21 @@ ENGINE_FAMILIES: Mapping[str, EngineFamily] = {
         direct_sampling=False,
         weight_sync=frozenset({SYNC_VIA_IPC, SYNC_VIA_TENSOR, SYNC_VIA_NCCL, SYNC_VIA_LORA}),
     ),
-    # Reloads from a checkpoint dir; implements no in-memory receive path.
-    "fastvideo": EngineFamily(direct_sampling=False, weight_sync=frozenset()),
+    # Reloads from a checkpoint path; implements no in-memory receive path.
+    "fastvideo": EngineFamily(
+        direct_sampling=False,
+        weight_sync=frozenset({SYNC_VIA_CHECKPOINT}),
+    ),
 }
 
-#: Which receive entry point each shipped sync handler drives. ``None`` = the
-#: handler round-trips through checkpoint files, so any engine can take it.
+#: Which receive entry point each shipped sync handler drives.
 SYNC_HANDLER_NEEDS: Mapping[str, Optional[str]] = {
     "IPCWeightSync": SYNC_VIA_IPC,
     "TensorWeightSync": SYNC_VIA_TENSOR,
     "NCCLWeightSync": SYNC_VIA_NCCL,
     "LocalLoraWeightSync": SYNC_VIA_LORA,
     "RemoteLoraWeightSync": SYNC_VIA_LORA,
-    "CheckpointWeightSync": None,
+    "CheckpointWeightSync": SYNC_VIA_CHECKPOINT,
 }
 
 #: Recipe sections that may hold a rollout engine ``_target_`` block. Flat
@@ -403,6 +414,7 @@ __all__ = [
     "LAYOUTS",
     "SYNC_HANDLER_NEEDS",
     "SYNC_RECEIVE_METHODS",
+    "SYNC_VIA_CHECKPOINT",
     "SYNC_VIA_IPC",
     "SYNC_VIA_LORA",
     "SYNC_VIA_NCCL",
