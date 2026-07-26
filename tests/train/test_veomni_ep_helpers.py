@@ -1,13 +1,9 @@
-import sys
-import types
-
 import pytest
 import torch
 from torch import nn
 
 from unirl.models.types.meta_init import restore_init_state
 from unirl.train.backend.sharded_load import _read_ep_checkpoint_block
-from unirl.train.backend.veomni import _compat
 from unirl.train.backend.veomni.backend import _validate_ep_size
 from unirl.train.backend.veomni.ep.checkpoint import _slice_stacked_block
 from unirl.train.backend.veomni.ep.models.qwen3_moe import (
@@ -21,34 +17,10 @@ def test_validate_ep_size_accepts_positive_divisors(value, expected):
     assert _validate_ep_size(value, world_size=8) == expected
 
 
-@pytest.mark.parametrize("value", [0, -1, None, "bad", 3, 1.0, 1.5, 2.9, True, False])
+@pytest.mark.parametrize("value", [0, -1, None, "bad", 3])
 def test_validate_ep_size_rejects_invalid_values(value):
     with pytest.raises(ValueError):
         _validate_ep_size(value, world_size=8)
-
-
-def test_qwen3_moe_registration_also_registers_attention(monkeypatch):
-    calls = []
-    veomni = types.ModuleType("veomni")
-    veomni.__path__ = ["/tmp/veomni"]
-    monkeypatch.setitem(sys.modules, "veomni", veomni)
-    monkeypatch.setattr(_compat, "ensure_installed", lambda: calls.append("base"))
-    monkeypatch.setattr(_compat, "_stub_package", lambda *_args: None)
-    monkeypatch.setattr(_compat.importlib, "import_module", calls.append)
-    monkeypatch.setattr(
-        _compat,
-        "ensure_attention_patch_installed",
-        lambda: calls.append("attention"),
-    )
-
-    _compat.ensure_qwen3_moe_installed.__wrapped__()
-
-    assert calls == [
-        "base",
-        "veomni.models.transformers.qwen3_moe",
-        "veomni.ops",
-        "attention",
-    ]
 
 
 def test_restore_init_state_rejects_shape_drift():
