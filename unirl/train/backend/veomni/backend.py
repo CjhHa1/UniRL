@@ -309,10 +309,12 @@ def _validate_fsdp_cfg(fsdp_cfg: FSDPConfig) -> None:
 
 
 def _validate_ep_size(value: object, *, world_size: int) -> int:
-    """Return a valid expert-parallel degree without coercing falsey values."""
+    """Return a valid expert-parallel degree without truncating non-integers."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"VeOmniBackend: fsdp_cfg.ep_size must be an integer >= 1, got {value!r}")
     try:
         ep_size = int(value)
-    except (TypeError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError(f"VeOmniBackend: fsdp_cfg.ep_size must be an integer >= 1, got {value!r}") from exc
     if ep_size < 1:
         raise ValueError(f"VeOmniBackend: fsdp_cfg.ep_size must be >= 1, got {ep_size}")

@@ -17,7 +17,7 @@ def test_validate_ep_size_accepts_positive_divisors(value, expected):
     assert _validate_ep_size(value, world_size=8) == expected
 
 
-@pytest.mark.parametrize("value", [0, -1, None, "bad", 3])
+@pytest.mark.parametrize("value", [0, -1, None, "bad", 3, 1.0, 1.5, 2.9, True, False])
 def test_validate_ep_size_rejects_invalid_values(value):
     with pytest.raises(ValueError):
         _validate_ep_size(value, world_size=8)

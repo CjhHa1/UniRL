@@ -48,7 +48,7 @@ bundle:
   _target_: unirl.models.qwen3_moe.bundle.Qwen3MoeBundle.from_config
   config:
     _target_: unirl.models.qwen3.config.Qwen3PipelineConfig
-    pretrained_model_ckpt_path: ${oc.env:QWEN3_MOE_PATH,Qwen/Qwen3-30B-A3B}
+    pretrained_model_ckpt_path: ${oc.env:QWEN3_MOE_PATH}
     meta_init_transformer: true
     model_precision: bf16
     # flash_attention_2 is the train-side global attn backend (replay + decode).
@@ -109,7 +109,7 @@ rollout:
   config:
     _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
     backend: native
-    pretrained_model_ckpt_path: ${oc.env:QWEN3_MOE_PATH,Qwen/Qwen3-30B-A3B}
+    pretrained_model_ckpt_path: ${oc.env:QWEN3_MOE_PATH}
     tp_size: 1
     max_new_tokens: 8192
     temperature: 1.0
