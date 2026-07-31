@@ -34,6 +34,7 @@ from unirl.models.qwen_image.diffusion import (
     QwenImageDiffusionStage,
     QwenImageDiffusionStep,
     _pack_latents,
+    _text_len_kwargs,
     _unpack_latents,
 )
 
@@ -118,13 +119,14 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
             guidance_value = guidance_scale if distilled_guidance_scale is None else float(distilled_guidance_scale)
             guidance = torch.tensor([guidance_value], device=device, dtype=torch.float32).expand(batch_size)
 
-        # Per-sample true text lengths — RoPE builder slices by max(txt_seq_lens).
+        # Trim to the batch's true max text length so the RoPE text slice and
+        # the tensor width agree on either diffusers version (see
+        # ``_text_len_kwargs``).
         true_lens = prompt_embeds_mask.sum(dim=1).to(torch.long)
         max_true = int(true_lens.max().item())
         if prompt_embeds.shape[1] > max_true:
             prompt_embeds = prompt_embeds[:, :max_true]
             prompt_embeds_mask = prompt_embeds_mask[:, :max_true]
-        txt_seq_lens = true_lens.tolist()
 
         noise_pred_packed = model.transformer(
             hidden_states=packed,
@@ -133,8 +135,8 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
             encoder_hidden_states_mask=prompt_embeds_mask,
             encoder_hidden_states=prompt_embeds,
             img_shapes=img_shapes,
-            txt_seq_lens=txt_seq_lens,
             return_dict=False,
+            **_text_len_kwargs(true_lens),
         )[0]
 
         # Slice back to the noise segment (drop the image-segment prediction).
@@ -154,7 +156,6 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
                 if negative_prompt_embeds.shape[1] > neg_max:
                     negative_prompt_embeds = negative_prompt_embeds[:, :neg_max]
                     negative_prompt_embeds_mask = negative_prompt_embeds_mask[:, :neg_max]
-                negative_txt_seq_lens = neg_true.tolist()
                 negative_noise_pred_packed = model.transformer(
                     hidden_states=packed,
                     timestep=timestep,
@@ -162,8 +163,8 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
                     encoder_hidden_states_mask=negative_prompt_embeds_mask,
                     encoder_hidden_states=negative_prompt_embeds,
                     img_shapes=img_shapes,
-                    txt_seq_lens=negative_txt_seq_lens,
                     return_dict=False,
+                    **_text_len_kwargs(neg_true),
                 )[0]
                 negative_noise_pred_packed = negative_noise_pred_packed[:, :noise_seq_len]
                 # Norm-corrected CFG blend (same as base Qwen-Image).
