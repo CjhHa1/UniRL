@@ -27,6 +27,7 @@ import threading
 import time
 from multiprocessing.process import BaseProcess as _MpBaseProcess
 
+import torch
 from msgspec import field
 
 try:
@@ -34,6 +35,7 @@ try:
 except ImportError:
     from vllm.lora.models import LoRAModel  # type: ignore[no-redef]
 
+from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager, logger
@@ -307,6 +309,147 @@ def patch_dit_lora_loader() -> None:
         return lora_model, peft_helper
 
     setattr(DiffusionLoRAManager, "_load_adapter", hijack__load_adapter)
+
+
+def patch_dit_hi3_lora_module_alias() -> None:
+    """Resolve HI3 DiT LoRA lookups against the checkpoint's module namespace.
+
+    vLLM-Omni registers the HI3 DiT wrappers as ``transformer.layers.*`` while
+    PEFT stores the same projections as ``model.layers.*``. The stock lookup
+    strips the ``transformer.`` prefix and tries ``layers.*``, so on HI3 every
+    qkv/o lookup misses: each rank reports ``active_layers=0``, the adapter
+    buffers stay zero, and the engine samples with the frozen base model while
+    training keeps updating a LoRA nothing consumes. Weight-sync checksums
+    still pass, so the failure is silent.
+
+    Only HI3 is affected — the other diffusion backbones are the top-level
+    model, so their vLLM module names already match PEFT's.
+    """
+    original = DiffusionLoRAManager._get_lora_weights
+    if getattr(original, "_diffrl_hi3_module_alias", False):
+        return
+
+    def wrapped(self, lora_model, full_module_name, _orig=original):
+        weights = _orig(self, lora_model, full_module_name)
+        if weights is not None:
+            return weights
+        prefix = "transformer.layers."
+        if not full_module_name.startswith(prefix):
+            return None
+        return lora_model.get_lora("model.layers." + full_module_name[len(prefix) :])
+
+    wrapped._diffrl_hi3_module_alias = True
+    DiffusionLoRAManager._get_lora_weights = wrapped
+
+
+def patch_dit_hi3_fused_qkv_lora_layout() -> None:
+    """Repack HI3's fused interleaved qkv LoRA-B into vLLM's packed ``[q, k, v]``.
+
+    HI3 stores the fused qkv projection GQA-interleaved — per KV head, the
+    ``q_size // k_size`` query slices followed by one K and one V slice —
+    whereas vLLM's merged qkv linear expects the three projections packed
+    contiguously and splits them *before* the TP shard. Passing the interleaved
+    ``lora_b`` through applies every delta to the wrong output rows: attention
+    projections are silently corrupted, with no error and no checksum failure.
+
+    Independent of :func:`patch_dit_hi3_lora_module_alias` — that one makes the
+    lookup find anything at all, this one makes what it finds correct — but it
+    must be installed *after* it, so the alias lookup has already resolved the
+    weights this repack consumes.
+    """
+    original = DiffusionLoRAManager._get_lora_weights
+    if getattr(original, "_diffrl_hi3_fused_qkv_layout", False):
+        return
+    if not getattr(original, "_diffrl_hi3_module_alias", False):
+        raise RuntimeError(
+            "patch_dit_hi3_fused_qkv_lora_layout must be installed after "
+            "patch_dit_hi3_lora_module_alias. Installed the other way round the "
+            "alias wraps the repack instead of feeding it, and HI3 qkv LoRA is "
+            "silently left in the interleaved layout."
+        )
+
+    warned: set[str] = set()
+
+    def decline(reason: str, module_name: str):
+        """Log the first occurrence of each distinct decline reason.
+
+        Falling back means returning the interleaved layout — i.e. the exact
+        corruption this patch exists to prevent — so it must never be silent.
+        """
+        if reason not in warned:
+            warned.add(reason)
+            logger.warning(
+                "HI3 fused-qkv LoRA repack declined (%s) for %s; the adapter is "
+                "left in HI3's interleaved layout and attention deltas will be "
+                "applied to the wrong output rows.",
+                reason,
+                module_name,
+            )
+
+    def wrapped(self, lora_model, full_module_name, _orig=original):
+        weights = _orig(self, lora_model, full_module_name)
+        if weights is None or isinstance(weights, PackedLoRALayerWeights):
+            return weights
+        if not isinstance(weights, LoRALayerWeights) or not full_module_name.endswith(".qkv_proj"):
+            return weights
+
+        base_layer = getattr(self._lora_modules.get(full_module_name), "base_layer", None)
+        output_sizes = list(getattr(base_layer, "output_sizes", ()) or ())
+        if len(output_sizes) != 3:
+            decline("base layer exposes no 3-way output_sizes", full_module_name)
+            return weights
+
+        lora_b = weights.lora_b
+        if not isinstance(lora_b, torch.Tensor) or lora_b.ndim != 2:
+            decline("lora_b is not a 2-D tensor", full_module_name)
+            return weights
+        if int(lora_b.shape[0]) != sum(int(size) for size in output_sizes):
+            decline("lora_b rows do not sum to output_sizes", full_module_name)
+            return weights
+
+        head_size = getattr(base_layer, "head_size", None)
+        num_kv_heads = getattr(base_layer, "total_num_kv_heads", None)
+        if head_size is None or num_kv_heads is None:
+            decline("base layer exposes no head_size/total_num_kv_heads", full_module_name)
+            return weights
+
+        q_size, k_size, v_size = (int(size) for size in output_sizes)
+        head_size = int(head_size)
+        num_kv_heads = int(num_kv_heads)
+        if k_size != v_size or k_size != num_kv_heads * head_size:
+            decline("k/v sizes are not num_kv_heads * head_size", full_module_name)
+            return weights
+        if q_size % k_size:
+            decline("q_size is not a multiple of k_size", full_module_name)
+            return weights
+
+        q_groups = q_size // k_size
+        rank = int(lora_b.shape[1])
+        try:
+            interleaved = lora_b.reshape(num_kv_heads, q_groups + 2, head_size, rank)
+        except RuntimeError:
+            decline("lora_b does not reshape to the interleaved GQA layout", full_module_name)
+            return weights
+
+        q_b, k_b, v_b = torch.split(interleaved, (q_groups, 1, 1), dim=1)
+        return PackedLoRALayerWeights(
+            module_name=weights.module_name,
+            rank=weights.rank,
+            lora_alphas=[weights.lora_alpha] * 3,
+            lora_a=[weights.lora_a] * 3,
+            lora_b=[
+                q_b.reshape(q_size, rank),
+                k_b.reshape(k_size, rank),
+                v_b.reshape(v_size, rank),
+            ],
+            scaling=[1.0, 1.0, 1.0],
+        )
+
+    wrapped._diffrl_hi3_fused_qkv_layout = True
+    # Carry the alias marker forward so re-invoking either patch stays a no-op
+    # regardless of which one is currently outermost.
+    wrapped._diffrl_hi3_module_alias = True
+    DiffusionLoRAManager._get_lora_weights = wrapped
 
 
 def patch_ar_lora_loader() -> None:
@@ -784,6 +927,11 @@ class VLLMOmniHijack:
 
         patch_qwen3_omni_thinker_lora()
         patch_dit_lora_loader()
+        # Order matters: the alias makes the HI3 DiT lookup resolve at all, the
+        # repack makes what it resolves correct. Installing them the other way
+        # round leaves qkv interleaved (the repack raises if that is attempted).
+        patch_dit_hi3_lora_module_alias()
+        patch_dit_hi3_fused_qkv_lora_layout()
         patch_ar_lora_loader()
         patch_ar_merged_lora_fused_tensor()
         patch_fp32_skip()
