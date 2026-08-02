@@ -311,6 +311,42 @@ def patch_dit_lora_loader() -> None:
     setattr(DiffusionLoRAManager, "_load_adapter", hijack__load_adapter)
 
 
+def _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer):
+    """Split HI3's GQA-interleaved fused qkv ``lora_b`` into ``[q, k, v]`` slices.
+
+    HI3 trains LoRA on a fused ``qkv_proj`` whose checkpoint rows are
+    GQA-interleaved — per KV head, ``q_size // k_size`` query slices followed by
+    one K and one V slice — and training loads it as-is. vLLM's base weight is
+    block ``[q; k; v]`` after ``_split_qkv_weight``, so ``lora_b`` has to mirror
+    that reshape-split or every delta lands on the wrong output rows.
+
+    Returns ``None`` when the layout cannot be recognised, leaving the caller to
+    decide its own fallback.
+
+    Shared by the AR merged-linear ``set_lora`` shim
+    (:func:`patch_ar_merged_lora_fused_tensor`) and the DiT manager-level repack
+    (:func:`patch_dit_hi3_fused_qkv_lora_layout`); the two hook different points
+    of the same layout problem, so the arithmetic lives here once.
+    """
+    if len(output_sizes) != 3:
+        return None
+    head_size = getattr(base_layer, "head_size", None)
+    num_kv_heads = getattr(base_layer, "total_num_kv_heads", None)
+    if head_size is None or num_kv_heads is None:
+        return None
+    q_size, k_size, _v = output_sizes
+    groups = q_size // k_size
+    if groups * k_size != q_size or k_size != num_kv_heads * head_size:
+        return None
+    rank = lora_b.shape[1]
+    try:
+        lora_b_r = lora_b.reshape(num_kv_heads, groups + 2, head_size, rank)
+    except RuntimeError:
+        return None
+    q_b, k_b, v_b = torch.split(lora_b_r, (groups, 1, 1), dim=1)
+    return [q_b.reshape(-1, rank), k_b.reshape(-1, rank), v_b.reshape(-1, rank)]
+
+
 def patch_dit_hi3_lora_module_alias() -> None:
     """Resolve HI3 DiT LoRA lookups against the checkpoint's module namespace.
 
@@ -343,14 +379,15 @@ def patch_dit_hi3_lora_module_alias() -> None:
 
 
 def patch_dit_hi3_fused_qkv_lora_layout() -> None:
-    """Repack HI3's fused interleaved qkv LoRA-B into vLLM's packed ``[q, k, v]``.
+    """Apply the fused-qkv de-interleave on the DiT manager's weight lookup.
 
-    HI3 stores the fused qkv projection GQA-interleaved — per KV head, the
-    ``q_size // k_size`` query slices followed by one K and one V slice —
-    whereas vLLM's merged qkv linear expects the three projections packed
-    contiguously and splits them *before* the TP shard. Passing the interleaved
-    ``lora_b`` through applies every delta to the wrong output rows: attention
-    projections are silently corrupted, with no error and no checksum failure.
+    :func:`patch_ar_merged_lora_fused_tensor` already de-interleaves this layout,
+    but it hooks ``MergedQKVParallelLinearWithLoRA.set_lora`` — a vLLM *layer*
+    entry point. The DiT stage resolves its adapters through
+    ``DiffusionLoRAManager._get_lora_weights`` instead and never reaches that
+    ``set_lora``, so on HI3 the layer-level shim does not fire and the fused
+    ``qkv_proj`` stays interleaved. Both hooks are therefore needed; they share
+    :func:`_deinterleave_fused_qkv_lora_b` so the arithmetic is not duplicated.
 
     Independent of :func:`patch_dit_hi3_lora_module_alias` — that one makes the
     lookup find anything at all, this one makes what it finds correct — but it
@@ -370,21 +407,22 @@ def patch_dit_hi3_fused_qkv_lora_layout() -> None:
 
     warned: set[str] = set()
 
-    def decline(reason: str, module_name: str):
-        """Log the first occurrence of each distinct decline reason.
+    def decline(reason: str, module_name: str) -> None:
+        """Report a skipped repack once per distinct reason.
 
-        Falling back means returning the interleaved layout — i.e. the exact
-        corruption this patch exists to prevent — so it must never be silent.
+        Returning the interleaved layout is the corruption this patch exists to
+        prevent, so no path may skip quietly. Deduplicating by reason rather
+        than by module keeps a 64-layer model to a handful of lines.
         """
-        if reason not in warned:
-            warned.add(reason)
-            logger.warning(
-                "HI3 fused-qkv LoRA repack declined (%s) for %s; the adapter is "
-                "left in HI3's interleaved layout and attention deltas will be "
-                "applied to the wrong output rows.",
-                reason,
-                module_name,
-            )
+        if reason in warned:
+            return
+        warned.add(reason)
+        logger.warning(
+            "HI3 fused-qkv LoRA repack skipped (%s), first seen on %s; the adapter stays "
+            "in HI3's interleaved layout and attention deltas land on the wrong output rows.",
+            reason,
+            module_name,
+        )
 
     def wrapped(self, lora_model, full_module_name, _orig=original):
         weights = _orig(self, lora_model, full_module_name)
@@ -393,55 +431,29 @@ def patch_dit_hi3_fused_qkv_lora_layout() -> None:
         if not isinstance(weights, LoRALayerWeights) or not full_module_name.endswith(".qkv_proj"):
             return weights
 
-        base_layer = getattr(self._lora_modules.get(full_module_name), "base_layer", None)
-        output_sizes = list(getattr(base_layer, "output_sizes", ()) or ())
-        if len(output_sizes) != 3:
-            decline("base layer exposes no 3-way output_sizes", full_module_name)
-            return weights
-
         lora_b = weights.lora_b
         if not isinstance(lora_b, torch.Tensor) or lora_b.ndim != 2:
             decline("lora_b is not a 2-D tensor", full_module_name)
             return weights
-        if int(lora_b.shape[0]) != sum(int(size) for size in output_sizes):
-            decline("lora_b rows do not sum to output_sizes", full_module_name)
+
+        lora_modules = getattr(self, "_lora_modules", None) or {}
+        base_layer = getattr(lora_modules.get(full_module_name), "base_layer", None)
+        output_sizes = [int(size) for size in (getattr(base_layer, "output_sizes", ()) or ())]
+        if not output_sizes or int(lora_b.shape[0]) != sum(output_sizes):
+            decline("base layer exposes no output_sizes matching lora_b's rows", full_module_name)
             return weights
 
-        head_size = getattr(base_layer, "head_size", None)
-        num_kv_heads = getattr(base_layer, "total_num_kv_heads", None)
-        if head_size is None or num_kv_heads is None:
-            decline("base layer exposes no head_size/total_num_kv_heads", full_module_name)
+        slices = _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer)
+        if slices is None:
+            decline("GQA layout unrecognised (check head_size/total_num_kv_heads)", full_module_name)
             return weights
 
-        q_size, k_size, v_size = (int(size) for size in output_sizes)
-        head_size = int(head_size)
-        num_kv_heads = int(num_kv_heads)
-        if k_size != v_size or k_size != num_kv_heads * head_size:
-            decline("k/v sizes are not num_kv_heads * head_size", full_module_name)
-            return weights
-        if q_size % k_size:
-            decline("q_size is not a multiple of k_size", full_module_name)
-            return weights
-
-        q_groups = q_size // k_size
-        rank = int(lora_b.shape[1])
-        try:
-            interleaved = lora_b.reshape(num_kv_heads, q_groups + 2, head_size, rank)
-        except RuntimeError:
-            decline("lora_b does not reshape to the interleaved GQA layout", full_module_name)
-            return weights
-
-        q_b, k_b, v_b = torch.split(interleaved, (q_groups, 1, 1), dim=1)
         return PackedLoRALayerWeights(
             module_name=weights.module_name,
             rank=weights.rank,
             lora_alphas=[weights.lora_alpha] * 3,
             lora_a=[weights.lora_a] * 3,
-            lora_b=[
-                q_b.reshape(q_size, rank),
-                k_b.reshape(k_size, rank),
-                v_b.reshape(v_size, rank),
-            ],
+            lora_b=slices,
             scaling=[1.0, 1.0, 1.0],
         )
 
@@ -503,36 +515,16 @@ def patch_ar_merged_lora_fused_tensor() -> None:
     layer lacks head_size/total_num_kv_heads.
     """
     try:
-        import torch
         from vllm.lora.layers import column_parallel_linear as _cpl
     except (ImportError, AttributeError):
         return
-
-    def _deinterleave_gqa(lora_b, output_sizes, base_layer):
-        if len(output_sizes) != 3:
-            return None
-        head_size = getattr(base_layer, "head_size", None)
-        num_kv_heads = getattr(base_layer, "total_num_kv_heads", None)
-        if head_size is None or num_kv_heads is None:
-            return None
-        q_size, k_size, _v = output_sizes
-        groups = q_size // k_size
-        if groups * k_size != q_size or k_size != num_kv_heads * head_size:
-            return None
-        rank = lora_b.shape[1]
-        try:
-            lora_b_r = lora_b.reshape(num_kv_heads, groups + 2, head_size, rank)
-        except RuntimeError:
-            return None
-        q_b, k_b, v_b = torch.split(lora_b_r, (groups, 1, 1), dim=1)
-        return [q_b.reshape(-1, rank), k_b.reshape(-1, rank), v_b.reshape(-1, rank)]
 
     def _make(orig):
         def _set_lora(self, index, lora_a, lora_b, *args, _orig=orig, **kwargs):
             if isinstance(lora_b, torch.Tensor):
                 output_sizes = list(getattr(self.base_layer, "output_sizes", []) or [])
                 if output_sizes and int(lora_b.shape[0]) == sum(output_sizes):
-                    slices = _deinterleave_gqa(lora_b, output_sizes, self.base_layer)
+                    slices = _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, self.base_layer)
                     lora_b = slices if slices is not None else list(torch.split(lora_b, output_sizes, dim=0))
                     if isinstance(lora_a, torch.Tensor):
                         lora_a = [lora_a] * self.n_slices
