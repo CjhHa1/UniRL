@@ -5,18 +5,18 @@ contracts (``BaseRolloutEngine`` / ``SyncRolloutEngine``); this module records
 the driver side — everything is single-threaded, lock-free, and ray-free
 (non-blocking dispatch is ``Handle.launch_nowait``).
 
-Mechanisms (policy-free — launch ceilings, reap/launch ordering, and step
+Mechanisms (policy-free — launch admission, reap/launch ordering, and step
 loops live in the trainers):
 
 - :class:`VersionedBuffer` — payload-agnostic freshness/staleness buffer.
 - :class:`InflightPool` — non-blocking pool of distributed ``generate`` calls.
 
-Engines, sharing one consumer surface (``poll`` / ``drain_freshest`` /
-``pop_evicted`` / ``quiesce`` + engine-owned ``weight_version``):
+Engines share launch/poll/quiesce mechanisms but own different queue semantics:
 
 - :class:`AsyncBatchRolloutEngine` — batch granularity over a single-turn
   engine slab; one ``submit`` is one non-blocking distributed ``generate``.
-  ``(weight_version, gen_id)`` are stamped at LAUNCH.
+  ``(behavior_version, gen_id)`` are stamped at LAUNCH and one complete
+  generation is consumed atomically in completion-order FIFO.
 - :class:`AsyncAgenticRolloutEngine` — trajectory granularity over the
   ``AgenticRolloutEngine`` rank-0 coordinator; ``submit`` fires a task-pool
   drive and completions stream in via ``poll``. ``(weight_version, gen_id)``
@@ -32,11 +32,13 @@ calling ``rollout.generate(sample)[0]`` directly.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Deque,
     Dict,
     Generic,
     Iterable,
@@ -106,22 +108,63 @@ class VersionedBuffer(Generic[T]):
         return evicted
 
 
-Complete = Callable[[int, int, Any], None]
+@dataclass(frozen=True)
+class RolloutBatch:
+    """One atomic train batch produced by one batch-generation launch."""
+
+    groups: List["Sample"]
+    behavior_version: int
+    gen_id: int
+
+
+class RolloutBatchQueue:
+    """Completion-order FIFO for single-turn batch generations."""
+
+    def __init__(self) -> None:
+        self._items: Deque[RolloutBatch] = deque()
+
+    def put(self, batch: RolloutBatch) -> None:
+        self._items.append(batch)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def pop_next(
+        self,
+        *,
+        train_version: int,
+        max_policy_lag: int,
+    ) -> Optional[RolloutBatch]:
+        if not self._items:
+            return None
+        item = self._items[0]
+        lag = int(train_version) - item.behavior_version
+        if lag < 0:
+            raise RuntimeError(
+                f"generation {item.gen_id} has future behavior version "
+                f"{item.behavior_version} > train version {train_version}"
+            )
+        if lag > int(max_policy_lag):
+            raise RuntimeError(f"generation {item.gen_id} exceeded policy lag budget: lag={lag} > max={max_policy_lag}")
+        return self._items.popleft()
+
+
+CompleteGeneration = Callable[[int, int, Any], None]
 
 
 @dataclass(frozen=True)
 class _InflightJob:
     gen_id: int
-    weight_version: int
+    behavior_version: int
     pending: Any
 
 
 class InflightPool:
     """Non-blocking pool of distributed ``generate`` launches on a rollout Handle.
 
-    Mechanism only: launch ceilings, reap/launch ordering, and step loops are
+    Mechanism only: launch admission, reap/launch ordering, and step loops are
     caller policy. Jobs are launched via ``Handle.launch_nowait`` and completed
-    through ``complete(gen_id, weight_version, payload)`` — all of ``complete``'s
+    through ``complete(gen_id, behavior_version, payload)`` — all of ``complete``'s
     fallible work must happen before it mutates caller state, because a job
     whose completion raises stays in flight for retry.
     """
@@ -138,14 +181,14 @@ class InflightPool:
     def __len__(self) -> int:
         return len(self._jobs)
 
-    def launch(self, sample: Any, *, weight_version: int) -> int:
+    def launch(self, sample: Any, *, behavior_version: int) -> int:
         gen_id = self._next_gen_id
         pending = self._rollout.launch_nowait("generate", sample)
-        self._jobs.append(_InflightJob(gen_id, int(weight_version), pending))
+        self._jobs.append(_InflightJob(gen_id, int(behavior_version), pending))
         self._next_gen_id += 1
         return gen_id
 
-    def reap_ready(self, complete: Complete) -> int:
+    def reap_ready(self, complete: CompleteGeneration) -> int:
         """Complete every ready job; leave unresolved and failed jobs in flight.
 
         A job whose ``result()``/``complete`` raises stays in flight for retry;
@@ -161,7 +204,7 @@ class InflightPool:
                 still.append(job)
                 continue
             try:
-                complete(job.gen_id, job.weight_version, job.pending.result())
+                complete(job.gen_id, job.behavior_version, job.pending.result())
                 completed += 1
             except Exception as exc:
                 still.append(job)
@@ -174,7 +217,7 @@ class InflightPool:
             raise first_error
         return completed
 
-    def drain_all(self, complete: Complete) -> int:
+    def drain_all(self, complete: CompleteGeneration) -> int:
         """Quiesce: complete every job, blocking as needed. Same error contract as
         :meth:`reap_ready`."""
         jobs, self._jobs = self._jobs, []
@@ -182,7 +225,7 @@ class InflightPool:
         completed = 0
         for job in jobs:
             try:
-                complete(job.gen_id, job.weight_version, job.pending.result())
+                complete(job.gen_id, job.behavior_version, job.pending.result())
                 completed += 1
             except Exception as exc:
                 self._jobs.append(job)
@@ -201,12 +244,11 @@ class InflightPool:
 
 
 class AsyncBatchRolloutEngine:
-    """Batch-granular async engine over a ``SyncRolloutEngine`` slab Handle; buffers ``Sample`` groups.
+    """Batch-granular async engine over a ``SyncRolloutEngine`` slab Handle.
 
-    ``complete(gen_id, completed) -> groups`` runs at reap time — scoring must
-    precede training, and on transfer-sensitive backends the next launch. All
-    of ``complete``'s fallible work happens before any buffer mutation, so a
-    failed job stays in flight for retry without double-inserting groups.
+    One generation must produce exactly ``groups_per_batch`` groups and enters a
+    completion-order FIFO atomically. ``behavior_version`` is captured at launch
+    from the exact train snapshot currently synced to the rollout engine.
 
     ``quiesce()`` (drain everything) is MANDATORY before a weight sync, eval, or
     checkpoint: a weight + KV update corrupts an in-flight generation.
@@ -216,21 +258,16 @@ class AsyncBatchRolloutEngine:
         self,
         rollout: Any,
         *,
-        complete: Callable[[int, "Sample"], List["Sample"]],
+        process_completion: Callable[[int, "Sample"], List["Sample"]],
+        groups_per_batch: int,
         start_gen_id: int = 0,
     ) -> None:
-        self._complete = complete
+        if int(groups_per_batch) < 1:
+            raise ValueError(f"groups_per_batch must be >= 1, got {groups_per_batch}")
+        self._process_completion = process_completion
+        self._groups_per_batch = int(groups_per_batch)
         self._pool = InflightPool(rollout, start_gen_id=start_gen_id)
-        self._buffer: VersionedBuffer["Sample"] = VersionedBuffer()
-        self._weight_version = 0
-
-    @property
-    def weight_version(self) -> int:
-        return self._weight_version
-
-    def bump_weight_version(self) -> int:
-        self._weight_version += 1
-        return self._weight_version
+        self._ready = RolloutBatchQueue()
 
     @property
     def next_gen_id(self) -> int:
@@ -238,34 +275,52 @@ class AsyncBatchRolloutEngine:
         return self._pool.next_gen_id
 
     @property
-    def inflight(self) -> int:
+    def inflight_count(self) -> int:
         return len(self._pool)
 
-    def submit(self, sample: "Sample") -> int:
-        """Launch one non-blocking distributed ``generate``; stamps the CURRENT version."""
-        return self._pool.launch(sample, weight_version=self._weight_version)
+    @property
+    def ready_count(self) -> int:
+        return len(self._ready)
+
+    def submit(self, sample: "Sample", *, behavior_version: int) -> int:
+        """Launch one generation under the supplied rollout policy version."""
+
+        return self._pool.launch(sample, behavior_version=behavior_version)
 
     def poll(self) -> int:
         return self._pool.reap_ready(self._on_complete)
 
-    def drain_freshest(self, n: int, *, max_staleness: int) -> Optional[List["Sample"]]:
-        return self._buffer.drain_freshest(n, current_version=self._weight_version, max_staleness=max_staleness)
+    def pop_next_batch(
+        self,
+        *,
+        train_version: int,
+        max_policy_lag: int,
+    ) -> Optional[RolloutBatch]:
+        return self._ready.pop_next(
+            train_version=train_version,
+            max_policy_lag=max_policy_lag,
+        )
 
-    def pop_evicted(self) -> List["Sample"]:
-        return self._buffer.pop_evicted()
-
-    def quiesce(self) -> List["Sample"]:
+    def quiesce(self) -> None:
         self._pool.drain_all(self._on_complete)
-        return []
 
     def wait_oldest(self) -> None:
         """Block until the oldest in-flight generation resolves (reap via ``poll``)."""
         self._pool.wait_oldest()
 
-    def _on_complete(self, gen_id: int, weight_version: int, completed: "Sample") -> None:
-        groups = self._complete(gen_id, completed)  # fallible (scoring) before any buffer put
-        for group in groups:
-            self._buffer.put(group, weight_version=weight_version, gen_id=gen_id)
+    def _on_complete(self, gen_id: int, behavior_version: int, completed: "Sample") -> None:
+        groups = self._process_completion(gen_id, completed)  # fallible before any queue mutation
+        if len(groups) != self._groups_per_batch:
+            raise RuntimeError(
+                f"generation {gen_id} produced {len(groups)} groups; expected groups_per_batch={self._groups_per_batch}"
+            )
+        self._ready.put(
+            RolloutBatch(
+                groups=list(groups),
+                behavior_version=int(behavior_version),
+                gen_id=int(gen_id),
+            )
+        )
 
 
 def root_of(traj: "Sample") -> str:
@@ -407,27 +462,9 @@ class AsyncAgenticRolloutEngine:
         return len(completed)
 
 
-def launch_ceiling(rollout_id: int, *, sync_interval: int, max_staleness: int, num_rollouts: int) -> int:
-    """The batch trainers' on-policy launch clamp — trainer POLICY, defined once.
-
-    A generation launched now is consumed later, so how far ahead the gen_id
-    allocator may run is bounded to ``max_staleness`` weight-sync windows:
-    ``max_staleness=0`` ⇒ never launch into a future sync-window ⇒ no
-    generation crosses a sync ⇒ ``ratio≈1`` (on-policy).
-
-    OWNERSHIP: this is trainer-side POLICY, not engine surface — its vocabulary
-    (``rollout_id`` / ``sync_interval`` / ``num_rollouts``) is the trainers',
-    the engine classes never call it, and it must never become an engine
-    method. It is hosted in this module only because it is the two batch
-    trainers' one shared torch-free home; the step loops that use it stay in
-    the trainers as visible statement order.
-    """
-    return min(num_rollouts, ((rollout_id // sync_interval) + 1 + max_staleness) * sync_interval)
-
-
 __all__ = [
     "AsyncAgenticRolloutEngine",
     "AsyncBatchRolloutEngine",
-    "launch_ceiling",
+    "RolloutBatch",
     "root_of",
 ]

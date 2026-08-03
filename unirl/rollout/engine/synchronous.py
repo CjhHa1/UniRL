@@ -157,6 +157,20 @@ class SyncRolloutEngine(BaseRolloutEngine, ABC):
     def generate(self, sample: Sample) -> Sample:
         """Synchronously fill and return one request ``Sample``."""
 
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def set_policy_version(self, train_version: int) -> None:
+        """Assign the optimizer-update version of the currently loaded weights.
+
+        Weight transports may receive one model through several buckets, so
+        receiver-local API-call counters are not valid policy provenance. The
+        trainer calls this only after a full weight publication succeeds.
+        """
+
+        train_version = int(train_version)
+        if train_version < 0:
+            raise ValueError(f"train_version must be >= 0, got {train_version}")
+        self._weight_version = train_version
+
     def _stamp_weight_version(self, sample: Sample) -> Sample:
         """Stamp ``self._weight_version`` onto the frontier (last) gen Part."""
         v = getattr(self, "_weight_version", None)

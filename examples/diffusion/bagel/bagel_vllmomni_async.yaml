@@ -43,29 +43,18 @@ workers_per_device: 1
 layout: separate
 train_fraction: 0.5            # 4 train GPUs + 4 rollout GPUs on an 8-GPU pool
 
-# LoRA weight-sync cadence (loop concern, read by the trainer). >1 is required
-# for async overlap: interval=1 drains every step (every rollout is a cold sync
-# boundary, no generation can overlap a train step). interval=4 gives 3 of every
-# 4 rollouts a generation overlapped with training. old_logp_source=rollout keeps
-# the emitted π_old as a valid importance-sampling anchor; the ratio may move as
-# the resident rollout policy and current train policy diverge.
-weight_sync_interval: 4
-
-# ---- async knobs (AsyncDiffusionTrainer) ----
+# ---- async control (optimizer-update units) ----
 # max_inflight: concurrent generations. MUST be 1: the trajectory-segment
 # cross-slab transfer (NCCL send) runs on the rollout worker; a second in-flight
 # generation co-tenanting that worker blocks the send behind it (~150s/rollout).
 # With max_inflight=1 the trainer polls (reaps) before topping up launches, so
 # each generation transfers in the idle window before the next launch, then
-# that next generation overlaps the train step. Real overlap needs
-# weight_sync_interval>1 (interval=1 drains every step).
-# buffer_max_staleness: how many weight syncs a buffered group may cross.
-#   0 = never crosses a regular rollout-weight sync (~174s/rollout on BAGEL 4+4).
-#   2 = throughput-optimal continuous buffer (~148s/rollout, matches vllm
-#       colocate); sync-boundary cold rollouts disappear. The emitted π_old
-#       remains a valid anchor, while the measured ratio may reflect policy lag.
+# that next generation overlaps the train step. Real overlap needs admission
+# depth > 1.
+# With num_updates_per_batch=2, max_policy_lag=22 admits a 12-batch
+# behavior-policy cycle: floor(22 / 2) + 1 = 12.
 max_inflight: 1
-buffer_max_staleness: 2
+max_policy_lag: 22
 
 logging:
   report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)
@@ -220,7 +209,7 @@ sampling:
 # LoRA weight sync → vLLM-Omni rollout. Separate slabs ⇒ RemoteLoraWeightSync:
 # rank 0 ships the freshly-trained LoRA adapter to each cross-slab rollout Worker
 # by Ray RPC (no NCCL rendezvous, no name_remap — pushes the adapter directly).
-# The train loop drives cadence via weight_sync_interval.
+# The train loop publishes only when the optimizer-update lag budget binds.
 sync:
   _target_: unirl.distributed.weight_sync.lora.RemoteLoraWeightSync
   verify: true                         # checksum read-back asserts the synced LoRA landed; catches a wrong prefix

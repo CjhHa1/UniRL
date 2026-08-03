@@ -297,7 +297,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
         depths = [len(tr.gen_parts()) for tr in trajs]
         if not train_parts:
             logger.warning("AsyncAgenticTrainer rollout %d produced no trainable turns.", rollout_id)
-            return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
+            return TrainStepResult(0.0, 0.0, 0.0, False, [], {}, optimizer_updates=0), mean_reward
 
         train_part = self._pad_to_dp_multiple(Part.concat(train_parts))
         result = self.stack.train_track(train_part, training_progress=float(training_progress))
