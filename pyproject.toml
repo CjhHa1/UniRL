@@ -196,6 +196,3 @@ known-first-party = ["unirl"]
 
 [tool.ruff.format]
 quote-style = "double"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
