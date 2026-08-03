@@ -56,7 +56,7 @@ def main(cfg: DictConfig) -> None:
         eval_rewards_cfg=cfg.get("eval_rewards"),
         task_config=cfg.get("task_config"),
         max_inflight=int(cfg.get("max_inflight", 1)),
-        max_policy_lag=int(cfg.get("max_policy_lag", 0)),
+        max_policy_lag=cfg.get("max_policy_lag", 0),
     )
     trainer.train(
         num_rollouts=cfg.get("num_rollouts", 100),

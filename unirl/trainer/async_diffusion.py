@@ -86,9 +86,9 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             )
 
         self._max_inflight = max_inflight
-        self._max_policy_lag = int(max_policy_lag)
+        self._max_policy_lag = max_policy_lag
         stack_cfg = diffusion_kwargs["stack_cfg"]
-        self._num_updates_per_batch = int(stack_cfg.get("num_updates_per_batch", 1))
+        self._num_updates_per_batch = stack_cfg.get("num_updates_per_batch", 1)
         if self._max_policy_lag < 0:
             raise ValueError(f"max_policy_lag must be >= 0, got {self._max_policy_lag}")
         if self._num_updates_per_batch < 1:
@@ -148,8 +148,8 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
     def _policy_metrics(self, batch: RolloutBatch) -> dict[str, float]:
         versions = self._policy_versions
         return {
-            "async/behavior_version": float(batch.behavior_version),
-            "async/behavior_lag": float(versions.behavior_lag(batch.behavior_version)),
+            "async/behavior_version": batch.behavior_version,
+            "async/behavior_lag": versions.behavior_lag(batch.behavior_version),
         }
 
     def _advantage_and_train(
@@ -174,13 +174,13 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         part = part.compute_advantages(normalize=True, use_global_std=self._adv_use_global_std)
         sample = sample.replace_frontier(part)
         result = self.stack.train_track(sample.parts[-1], training_progress=float(training_progress))
-        self._policy_versions.record_optimizer_updates(int(result.optimizer_updates))
+        self._policy_versions.record_optimizer_updates(result.optimizer_updates)
         if extra_metrics is not None:
             extra_metrics.update(
                 {
-                    "async/train_version": float(self._policy_versions.train_version),
-                    "async/rollout_lag": float(self._policy_versions.rollout_lag),
-                    "async/optimizer_updates": float(result.optimizer_updates),
+                    "async/train_version": self._policy_versions.train_version,
+                    "async/rollout_lag": self._policy_versions.rollout_lag,
+                    "async/optimizer_updates": result.optimizer_updates,
                 }
             )
         self.wandb_logger.log_rollout_step(

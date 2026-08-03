@@ -307,7 +307,7 @@ class TrainStack(Remote):
             has_backward=has_backward,
             micros=micro_results,
             metrics=aggregated_metrics,
-            optimizer_updates=int(has_backward and math.isfinite(grad_norm)),
+            optimizer_updates=1 if has_backward and math.isfinite(grad_norm) else 0,
         )
 
     def on_rollout_end(self) -> None:
@@ -518,11 +518,11 @@ class TrainStack(Remote):
         aggregated = _aggregate_update_results(results)
         per_update = tuple(
             {
-                **dict(r.metrics),
-                "loss": float(r.loss),
-                "grad_norm": float(r.grad_norm),
-                "lr": float(r.lr),
-                "optimizer_updates": float(r.optimizer_updates),
+                **r.metrics,
+                "loss": r.loss,
+                "grad_norm": r.grad_norm,
+                "lr": r.lr,
+                "optimizer_updates": r.optimizer_updates,
             }
             for r in results
         )

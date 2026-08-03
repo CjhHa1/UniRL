@@ -55,7 +55,7 @@ def main(cfg: DictConfig) -> None:
         eval_temperature=float(cfg.get("eval_temperature", 1.0)),
         train_fraction=float(cfg.get("train_fraction", 0.5)),
         max_inflight=int(cfg.get("max_inflight", 1)),
-        max_policy_lag=int(cfg.get("max_policy_lag", 0)),
+        max_policy_lag=cfg.get("max_policy_lag", 0),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

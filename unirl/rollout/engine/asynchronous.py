@@ -138,13 +138,13 @@ class RolloutBatchQueue:
         if not self._items:
             return None
         item = self._items[0]
-        lag = int(train_version) - item.behavior_version
+        lag = train_version - item.behavior_version
         if lag < 0:
             raise RuntimeError(
                 f"generation {item.gen_id} has future behavior version "
                 f"{item.behavior_version} > train version {train_version}"
             )
-        if lag > int(max_policy_lag):
+        if lag > max_policy_lag:
             raise RuntimeError(f"generation {item.gen_id} exceeded policy lag budget: lag={lag} > max={max_policy_lag}")
         return self._items.popleft()
 
@@ -184,7 +184,7 @@ class InflightPool:
     def launch(self, sample: Any, *, behavior_version: int) -> int:
         gen_id = self._next_gen_id
         pending = self._rollout.launch_nowait("generate", sample)
-        self._jobs.append(_InflightJob(gen_id, int(behavior_version), pending))
+        self._jobs.append(_InflightJob(gen_id, behavior_version, pending))
         self._next_gen_id += 1
         return gen_id
 
@@ -262,10 +262,10 @@ class AsyncBatchRolloutEngine:
         groups_per_batch: int,
         start_gen_id: int = 0,
     ) -> None:
-        if int(groups_per_batch) < 1:
+        if groups_per_batch < 1:
             raise ValueError(f"groups_per_batch must be >= 1, got {groups_per_batch}")
         self._process_completion = process_completion
-        self._groups_per_batch = int(groups_per_batch)
+        self._groups_per_batch = groups_per_batch
         self._pool = InflightPool(rollout, start_gen_id=start_gen_id)
         self._ready = RolloutBatchQueue()
 
@@ -316,9 +316,9 @@ class AsyncBatchRolloutEngine:
             )
         self._ready.put(
             RolloutBatch(
-                groups=list(groups),
-                behavior_version=int(behavior_version),
-                gen_id=int(gen_id),
+                groups=groups,
+                behavior_version=behavior_version,
+                gen_id=gen_id,
             )
         )
 

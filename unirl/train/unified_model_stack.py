@@ -252,7 +252,7 @@ class UnifiedModelTrainStack(Remote):
             logger.warning("UnifiedModelTrainStack._train_one_step: no algorithm reported backward; skipping step.")
 
         lr = self._current_lr()
-        optimizer_updates = int(any_backward and math.isfinite(grad_norm))
+        optimizer_updates = 1 if any_backward and math.isfinite(grad_norm) else 0
         for name, r in list(results.items()):
             results[name] = TrainStepResult(
                 loss=r.loss,

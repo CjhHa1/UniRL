@@ -166,7 +166,6 @@ class SyncRolloutEngine(BaseRolloutEngine, ABC):
         trainer calls this only after a full weight publication succeeds.
         """
 
-        train_version = int(train_version)
         if train_version < 0:
             raise ValueError(f"train_version must be >= 0, got {train_version}")
         self._weight_version = train_version

@@ -138,8 +138,8 @@ class AsyncARTrainer(ARTrainer):
 
         self._train_fraction = float(train_fraction)
         self._max_inflight = max(1, int(max_inflight))
-        self._max_policy_lag = int(max_policy_lag)
-        self._num_updates_per_batch = int(stack_cfg.get("num_updates_per_batch", 1))
+        self._max_policy_lag = max_policy_lag
+        self._num_updates_per_batch = stack_cfg.get("num_updates_per_batch", 1)
         if self._max_policy_lag < 0:
             raise ValueError(f"max_policy_lag must be >= 0, got {self._max_policy_lag}")
         if self._num_updates_per_batch < 1:
@@ -286,8 +286,8 @@ class AsyncARTrainer(ARTrainer):
     def _policy_metrics(self, batch: RolloutBatch) -> Dict[str, float]:
         versions = self._policy_versions
         return {
-            "async/behavior_version": float(batch.behavior_version),
-            "async/behavior_lag": float(versions.behavior_lag(batch.behavior_version)),
+            "async/behavior_version": batch.behavior_version,
+            "async/behavior_lag": versions.behavior_lag(batch.behavior_version),
         }
 
     def _advantage_and_train(
@@ -317,13 +317,13 @@ class AsyncARTrainer(ARTrainer):
         if self.balance_shards:
             train_part = part.balance_shards(self._train_devices)
         result = self.stack.train_track(train_part, training_progress=float(training_progress))
-        self._policy_versions.record_optimizer_updates(int(result.optimizer_updates))
+        self._policy_versions.record_optimizer_updates(result.optimizer_updates)
         if extra_metrics is not None:
             extra_metrics.update(
                 {
-                    "async/train_version": float(self._policy_versions.train_version),
-                    "async/rollout_lag": float(self._policy_versions.rollout_lag),
-                    "async/optimizer_updates": float(result.optimizer_updates),
+                    "async/train_version": self._policy_versions.train_version,
+                    "async/rollout_lag": self._policy_versions.rollout_lag,
+                    "async/optimizer_updates": result.optimizer_updates,
                 }
             )
         self.wandb_logger.log_rollout_step(

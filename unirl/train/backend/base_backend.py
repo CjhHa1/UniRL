@@ -374,7 +374,7 @@ class BaseFSDP2Backend(Remote):
     def get_optimizer_step_count(self) -> int:
         """Return the authoritative number of committed optimizer updates."""
 
-        return int(self._optimizer_step_count)
+        return self._optimizer_step_count
 
     @property
     def rollout_adapter_name(self) -> str:
