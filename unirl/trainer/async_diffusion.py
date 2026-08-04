@@ -51,7 +51,7 @@ import torch
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.engine.asynchronous import AsyncBatchRolloutEngine, RolloutBatch
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.async_policy import PolicyVersionState, launch_slots, next_hard_boundary, unwrap_replicated_int
+from unirl.trainer.async_policy import AsyncBatchControl, next_hard_boundary, unwrap_replicated_int
 from unirl.trainer.diffusion import DiffusionTrainer
 from unirl.types.sample import Sample
 
@@ -86,20 +86,15 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             )
 
         self._max_inflight = max_inflight
-        self._max_policy_lag = max_policy_lag
-        stack_cfg = diffusion_kwargs["stack_cfg"]
-        self._num_updates_per_batch = stack_cfg.get("num_updates_per_batch", 1)
-        if self._max_policy_lag < 0:
-            raise ValueError(f"max_policy_lag must be >= 0, got {self._max_policy_lag}")
-        if self._num_updates_per_batch < 1:
-            raise ValueError(f"stack.num_updates_per_batch must be >= 1, got {self._num_updates_per_batch}")
-        freshness_depth = self._max_policy_lag // self._num_updates_per_batch + 1
-        if freshness_depth == 1:
+        self._control = AsyncBatchControl(
+            max_policy_lag=max_policy_lag,
+            num_updates_per_batch=diffusion_kwargs["stack_cfg"].get("num_updates_per_batch", 1),
+        )
+        if self._control.freshness_depth == 1:
             logger.warning(
                 "async policy-lag settings admit one generation at a time; "
                 "generation cannot overlap the preceding train batch"
             )
-        self._policy_versions = PolicyVersionState()
 
     def _build_async_sample(self, gen_id: int) -> Sample:
         """Consume one data batch and build the request Sample for ``gen_id``."""
@@ -127,31 +122,6 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         """
         self._async_engine.quiesce()
 
-    def _sync_rollout_weights(self, *, force: bool = False) -> bool:
-        """Load the current train weights into an empty rollout engine."""
-
-        versions = self._policy_versions
-        if not force and versions.rollout_version == versions.train_version:
-            return False
-        self._drain_all()
-        if self._async_engine.ready_count != 0:
-            raise RuntimeError(
-                f"cannot sync rollout weights with completed batches queued: "
-                f"ready_count={self._async_engine.ready_count}"
-            )
-        target = versions.train_version
-        self.weight_sync.sync()
-        self.rollout.set_policy_version(target)
-        versions.mark_rollout_synced(target)
-        return True
-
-    def _policy_metrics(self, batch: RolloutBatch) -> dict[str, float]:
-        versions = self._policy_versions
-        return {
-            "async/behavior_version": batch.behavior_version,
-            "async/behavior_lag": versions.behavior_lag(batch.behavior_version),
-        }
-
     def _advantage_and_train(
         self,
         sample: Sample,
@@ -174,15 +144,9 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         part = part.compute_advantages(normalize=True, use_global_std=self._adv_use_global_std)
         sample = sample.replace_frontier(part)
         result = self.stack.train_track(sample.parts[-1], training_progress=float(training_progress))
-        self._policy_versions.record_optimizer_updates(result.optimizer_updates)
+        self._control.record_optimizer_updates(result.optimizer_updates)
         if extra_metrics is not None:
-            extra_metrics.update(
-                {
-                    "async/train_version": self._policy_versions.train_version,
-                    "async/rollout_lag": self._policy_versions.rollout_lag,
-                    "async/optimizer_updates": result.optimizer_updates,
-                }
-            )
+            extra_metrics.update(self._control.train_metrics(result.optimizer_updates))
         self.wandb_logger.log_rollout_step(
             rollout_id,
             result,
@@ -208,15 +172,15 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             self.backend.get_optimizer_step_count(),
             name="backend optimizer step count",
         )
-        self._policy_versions = PolicyVersionState(train_version=train_version)
+        self._control.restore(train_version)
         for _ in range(start_rollout):
             self.data_source.get_samples(self.batch_size)
         self._init_wandb(
             num_rollouts=num_rollouts,
             extra={
                 "max_inflight": self._max_inflight,
-                "max_policy_lag": self._max_policy_lag,
-                "num_updates_per_batch": self._num_updates_per_batch,
+                "max_policy_lag": self._control.max_policy_lag,
+                "num_updates_per_batch": self._control.num_updates_per_batch,
                 "train_fraction": self._train_fraction,
             },
         )
@@ -229,7 +193,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         )
 
         if resumed:
-            self._sync_rollout_weights(force=True)
+            self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
         if self.eval_interval > 0:
             self.evaluate(start_rollout, sync_weights=False, sleep_after=False)
 
@@ -254,22 +218,16 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                     training_progress=training_progress,
                     rollout_id=rollout_id,
                     t0=t0,
-                    extra_metrics=self._policy_metrics(batch),
+                    extra_metrics=self._control.behavior_metrics(batch.behavior_version),
                 )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
 
                 step = rollout_id + 1
                 eval_due = self.eval_interval > 0 and step % self.eval_interval == 0
                 save_due = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
-                sync_due = step < num_rollouts and self._policy_versions.rollout_lag > self._max_policy_lag
+                sync_due = step < num_rollouts and self._control.rollout_lag > self._control.max_policy_lag
                 if eval_due or save_due or sync_due:
-                    if self._async_engine.inflight_count + self._async_engine.ready_count != 0:
-                        raise RuntimeError(
-                            "async sync boundary retained rollout work: "
-                            f"inflight_count={self._async_engine.inflight_count}, "
-                            f"ready_count={self._async_engine.ready_count}"
-                        )
-                    self._sync_rollout_weights()
+                    self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
 
                 if eval_due:
                     self.evaluate(step, sync_weights=False, sleep_after=False)
@@ -309,11 +267,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         engine = self._async_engine
         while True:
             engine.poll()
-            slots = launch_slots(
-                train_version=self._policy_versions.train_version,
-                rollout_version=self._policy_versions.rollout_version,
-                num_updates_per_batch=self._num_updates_per_batch,
-                max_policy_lag=self._max_policy_lag,
+            slots = self._control.launch_slots(
                 inflight_count=engine.inflight_count,
                 ready_count=engine.ready_count,
                 max_inflight=self._max_inflight,
@@ -324,11 +278,11 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             for _ in range(slots):
                 engine.submit(
                     self._build_async_sample(engine.next_gen_id),
-                    behavior_version=self._policy_versions.rollout_version,
+                    behavior_version=self._control.rollout_version,
                 )
             batch = engine.pop_next_batch(
-                train_version=self._policy_versions.train_version,
-                max_policy_lag=self._max_policy_lag,
+                train_version=self._control.train_version,
+                max_policy_lag=self._control.max_policy_lag,
             )
             if batch is not None:
                 return batch
