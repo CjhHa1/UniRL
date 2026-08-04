@@ -133,19 +133,22 @@ class RolloutBatchQueue:
         self,
         *,
         train_version: int,
-        max_policy_lag: int,
+        staleness_budget: int,
     ) -> Optional[RolloutBatch]:
         if not self._items:
             return None
         item = self._items[0]
-        lag = train_version - item.behavior_version
-        if lag < 0:
+        staleness = train_version - item.behavior_version
+        if staleness < 0:
             raise RuntimeError(
                 f"generation {item.gen_id} has future behavior version "
                 f"{item.behavior_version} > train version {train_version}"
             )
-        if lag > max_policy_lag:
-            raise RuntimeError(f"generation {item.gen_id} exceeded policy lag budget: lag={lag} > max={max_policy_lag}")
+        if staleness > staleness_budget:
+            raise RuntimeError(
+                f"generation {item.gen_id} exceeded its staleness budget: "
+                f"staleness={staleness} > budget={staleness_budget} optimizer updates"
+            )
         return self._items.popleft()
 
 
@@ -248,7 +251,9 @@ class AsyncBatchRolloutEngine:
 
     One generation must produce exactly ``groups_per_batch`` groups and enters a
     completion-order FIFO atomically. ``behavior_version`` is captured at launch
-    from the exact train snapshot currently synced to the rollout engine.
+    from the exact train snapshot currently synced to the rollout engine, so
+    ``staleness_budget`` is compared in committed optimizer updates — the caller
+    resolves it from a batch count before passing it down.
 
     ``quiesce()`` (drain everything) is MANDATORY before a weight sync, eval, or
     checkpoint: a weight + KV update corrupts an in-flight generation.
@@ -294,11 +299,11 @@ class AsyncBatchRolloutEngine:
         self,
         *,
         train_version: int,
-        max_policy_lag: int,
+        staleness_budget: int,
     ) -> Optional[RolloutBatch]:
         return self._ready.pop_next(
             train_version=train_version,
-            max_policy_lag=max_policy_lag,
+            staleness_budget=staleness_budget,
         )
 
     def quiesce(self) -> None:

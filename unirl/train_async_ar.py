@@ -17,7 +17,8 @@ Extra config knobs vs the colocate recipe:
     must both be integers, AND ``batch_size * samples_per_prompt`` must be divisible
     by each slab size (DP_SCATTER divisibility).
   * ``max_inflight`` — concurrent generations (resource/overlap limit).
-  * ``max_policy_lag`` — maximum optimizer-update lag at batch admission.
+  * ``max_staleness`` — how many whole rollout batches the behavior policy may
+    trail the train policy by at batch admission.
 """
 
 from __future__ import annotations
@@ -26,10 +27,12 @@ import hydra
 from omegaconf import DictConfig
 
 from unirl.trainer.async_ar import AsyncARTrainer
+from unirl.trainer.async_policy import reject_removed_async_keys
 
 
 @hydra.main(version_base=None, config_path="../examples", config_name="ar/qwen3_grpo_4b_base_dapo_sglang_async")
 def main(cfg: DictConfig) -> None:
+    reject_removed_async_keys(cfg)
     trainer = AsyncARTrainer(
         cfg=cfg,
         batch_size=cfg.batch_size,
@@ -55,7 +58,7 @@ def main(cfg: DictConfig) -> None:
         eval_temperature=float(cfg.get("eval_temperature", 1.0)),
         train_fraction=float(cfg.get("train_fraction", 0.5)),
         max_inflight=int(cfg.get("max_inflight", 1)),
-        max_policy_lag=cfg.get("max_policy_lag", 0),
+        max_staleness=cfg.get("max_staleness", 0),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

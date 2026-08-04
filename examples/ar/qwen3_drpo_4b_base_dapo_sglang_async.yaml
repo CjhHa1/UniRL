@@ -23,11 +23,12 @@ num_rollouts: 800
 
 # Train slab share (rollout gets the rest). 0.5 -> equal split.
 train_fraction: 0.5
-# Async control. Policy lag is measured in committed optimizer updates.
-# max_policy_lag=0 keeps the behavior/train versions aligned at batch
-# admission; max_inflight remains a resource cap.
+# Async control. max_staleness counts whole rollout batches the behavior policy
+# may trail the train policy by; admission depth is max_staleness + 1.
+# max_staleness=0 keeps the behavior/train versions aligned at batch admission;
+# max_inflight remains a resource cap.
 max_inflight: 1
-max_policy_lag: 0
+max_staleness: 0
 
 eval_interval: 10
 adv_normalization_scope: group

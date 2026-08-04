@@ -9,14 +9,17 @@ generation with training.
 
 ONE single-threaded loop (slime's "one trainer loop; async-depth is a knob"
 principle, implemented with UniRL-native non-blocking Ray dispatch instead of
-slime's thread+asyncio). Async freshness is measured directly in committed
-optimizer updates:
+slime's thread+asyncio). Async freshness rides a clock of committed optimizer
+updates, but the budget is stated in whole rollout batches:
 
 * ``max_inflight`` — how many generations run concurrently (overlap/parallelism
   depth). ``1`` ≈ the classic one-step pipeline; higher fans out more.
-* ``max_policy_lag`` — inclusive train-minus-behavior optimizer-update
-  lag at batch admission. ``0`` aligns policy versions; the rollout-anchored
-  PPO ratio remains the numerical source of truth.
+* ``max_staleness`` — how many whole rollout batches the behavior policy may
+  trail the train policy by, checked at batch admission and consumption. ``0``
+  aligns policy versions; the rollout-anchored PPO ratio remains the numerical
+  source of truth. Batches are the unit because admission only ever runs at a
+  batch boundary; with ``num_updates_per_batch > 1`` the updates after the first
+  in a batch additionally drift by up to ``num_updates_per_batch - 1``.
 
 Generation runs through :class:`~unirl.rollout.engine.asynchronous.AsyncBatchRolloutEngine`
 (non-blocking Ray futures over the rollout Handle) on the single driver thread —
@@ -101,7 +104,7 @@ class AsyncARTrainer(ARTrainer):
         eval_temperature: float = 1.0,
         train_fraction: float = 0.5,
         max_inflight: int = 1,
-        max_policy_lag: int = 0,
+        max_staleness: int = 0,
     ) -> None:
         validate_qwen3_5_training_contract(
             pipeline_cfg=pipeline_cfg,
@@ -139,19 +142,18 @@ class AsyncARTrainer(ARTrainer):
         self._train_fraction = float(train_fraction)
         self._max_inflight = max(1, int(max_inflight))
         self._control = AsyncBatchControl(
-            max_policy_lag=max_policy_lag,
+            max_staleness=max_staleness,
             num_updates_per_batch=stack_cfg.get("num_updates_per_batch", 1),
         )
-        if self._max_inflight > self._control.freshness_depth:
+        if self._max_inflight > self._control.admission_depth:
             logger.warning(
-                "max_inflight=%d exceeds the policy-lag admission depth %d; the extra concurrency cannot be used",
+                "max_inflight=%d exceeds the staleness admission depth %d; the extra concurrency cannot be used",
                 self._max_inflight,
-                self._control.freshness_depth,
+                self._control.admission_depth,
             )
-        if self._control.freshness_depth == 1:
+        if self._control.max_staleness == 0:
             logger.warning(
-                "async policy-lag settings admit one generation at a time; "
-                "generation cannot overlap the preceding train batch"
+                "max_staleness=0 admits one generation at a time; generation cannot overlap the preceding train batch"
             )
         self._train_devices = int(round(self.num_devices * self._train_fraction))
         if self._train_devices <= 0 or self._train_devices >= self.num_devices:
@@ -323,7 +325,8 @@ class AsyncARTrainer(ARTrainer):
             extra={
                 "adv_normalization_scope": self.adv_normalization_scope,
                 "max_inflight": self._max_inflight,
-                "max_policy_lag": self._control.max_policy_lag,
+                "max_staleness": self._control.max_staleness,
+                "staleness_budget": self._control.staleness_budget,
                 "num_updates_per_batch": self._control.num_updates_per_batch,
             },
         )
@@ -368,7 +371,7 @@ class AsyncARTrainer(ARTrainer):
                 step = rollout_id + 1
                 eval_due = self.eval_interval > 0 and step % self.eval_interval == 0
                 save_due = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
-                sync_due = step < num_rollouts and self._control.rollout_lag > self._control.max_policy_lag
+                sync_due = step < num_rollouts and self._control.publish_lag > self._control.staleness_budget
                 if eval_due or save_due or sync_due:
                     self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
 
@@ -420,11 +423,11 @@ class AsyncARTrainer(ARTrainer):
             engine.poll()
             batch = engine.pop_next_batch(
                 train_version=self._control.train_version,
-                max_policy_lag=self._control.max_policy_lag,
+                staleness_budget=self._control.staleness_budget,
             )
             if batch is not None:
                 return batch
             if engine.inflight_count:
                 engine.wait_oldest()
             else:
-                raise RuntimeError("async rollout queue is empty and policy lag admits no new generation")
+                raise RuntimeError("async rollout queue is empty and the staleness budget admits no new generation")

@@ -23,8 +23,13 @@ diffusion hooks:
 Async control uses the same optimizer-update clock as AsyncARTrainer:
   * ``max_inflight`` — must be ``1`` so a reap-time transfer never competes with
     a queued generation on the rollout workers.
-  * ``max_policy_lag`` — inclusive train-minus-behavior lag at batch
-    admission, measured in committed optimizer updates.
+  * ``max_staleness`` — how many whole rollout batches the behavior policy may
+    trail the train policy by, checked at batch admission and consumption. The
+    clock underneath counts committed optimizer updates; the budget is stated in
+    batches because those are the only points where admission can react.
+    ``num_updates_per_batch > 1`` therefore also means the updates after the
+    first in a batch run at up to ``num_updates_per_batch - 1`` more updates of
+    drift than the admitted figure.
 
 ``_next_rollout_batch`` polls (reaps) BEFORE topping up launches, which is what makes the
 overlap fast here: reaping a generation pulls its trajectory segment off the
@@ -65,7 +70,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         self,
         *,
         max_inflight: int = 1,
-        max_policy_lag: int = 0,
+        max_staleness: int = 0,
         **diffusion_kwargs: Any,
     ) -> None:
         layout = diffusion_kwargs.setdefault("layout", "separate")
@@ -87,13 +92,12 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
 
         self._max_inflight = max_inflight
         self._control = AsyncBatchControl(
-            max_policy_lag=max_policy_lag,
+            max_staleness=max_staleness,
             num_updates_per_batch=diffusion_kwargs["stack_cfg"].get("num_updates_per_batch", 1),
         )
-        if self._control.freshness_depth == 1:
+        if self._control.max_staleness == 0:
             logger.warning(
-                "async policy-lag settings admit one generation at a time; "
-                "generation cannot overlap the preceding train batch"
+                "max_staleness=0 admits one generation at a time; generation cannot overlap the preceding train batch"
             )
 
     def _build_async_sample(self, gen_id: int) -> Sample:
@@ -179,7 +183,8 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             num_rollouts=num_rollouts,
             extra={
                 "max_inflight": self._max_inflight,
-                "max_policy_lag": self._control.max_policy_lag,
+                "max_staleness": self._control.max_staleness,
+                "staleness_budget": self._control.staleness_budget,
                 "num_updates_per_batch": self._control.num_updates_per_batch,
                 "train_fraction": self._train_fraction,
             },
@@ -225,7 +230,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                 step = rollout_id + 1
                 eval_due = self.eval_interval > 0 and step % self.eval_interval == 0
                 save_due = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
-                sync_due = step < num_rollouts and self._control.rollout_lag > self._control.max_policy_lag
+                sync_due = step < num_rollouts and self._control.publish_lag > self._control.staleness_budget
                 if eval_due or save_due or sync_due:
                     self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
 
@@ -282,11 +287,11 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                 )
             batch = engine.pop_next_batch(
                 train_version=self._control.train_version,
-                max_policy_lag=self._control.max_policy_lag,
+                staleness_budget=self._control.staleness_budget,
             )
             if batch is not None:
                 return batch
             if engine.inflight_count:
                 engine.wait_oldest()
             else:
-                raise RuntimeError("async rollout queue is empty and policy lag admits no new generation")
+                raise RuntimeError("async rollout queue is empty and the staleness budget admits no new generation")
