@@ -36,6 +36,7 @@ from unirl.models.qwen_image.diffusion import (
     _pack_latents,
     _unpack_latents,
 )
+from unirl.types.conditions import ImageLatentCondition
 
 from .bundle import QwenImageEditPlusBundle
 from .conditions import QwenImageEditPlusConditions
@@ -179,9 +180,29 @@ class QwenImageEditPlusDiffusionStage(QwenImageDiffusionStage):
     all pick up the source-image concat automatically (verified delegation
     chain: ``step_with_logp`` → ``step`` → ``self.predict_noise``).
 
-    The type parameter widens to :class:`QwenImageEditPlusConditions`; no
-    body override is needed.
+    The type parameter widens to :class:`QwenImageEditPlusConditions`. One
+    override is needed: batched-step replay tiles the conditioning, and the base
+    tiler only knows the text fields.
     """
+
+    @staticmethod
+    def _tile_conditions(conditions: QwenImageEditPlusConditions, repeats: int) -> QwenImageEditPlusConditions:
+        """Tile the text fields via the base, then the source-image latent.
+
+        The base tiler builds a :class:`QwenImageConditions`, which has no
+        ``image_latent`` slot, so batched replay reached ``predict_noise`` with
+        the source image gone. Every ``repeats`` block replays the same ``B``
+        trajectories, so the latent repeats block-wise like the text fields.
+        """
+        base = QwenImageDiffusionStage._tile_conditions(conditions, repeats)
+        source = conditions.image_latent
+        tiled_source: Optional[ImageLatentCondition] = None
+        if source is not None:
+            latents = source.latents
+            tiled_source = ImageLatentCondition(
+                latents=latents.repeat(repeats, *([1] * (latents.dim() - 1))) if latents is not None else None
+            )
+        return QwenImageEditPlusConditions(text=base.text, negative_text=base.negative_text, image_latent=tiled_source)
 
 
 __all__ = [
