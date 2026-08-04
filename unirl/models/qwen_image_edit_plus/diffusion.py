@@ -34,7 +34,6 @@ from unirl.models.qwen_image.diffusion import (
     QwenImageDiffusionStage,
     QwenImageDiffusionStep,
     _pack_latents,
-    _text_len_kwargs,
     _unpack_latents,
 )
 
@@ -91,7 +90,6 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
         packed = _pack_latents(sample).to(dtype=dtype)
         noise_seq_len = int(packed.shape[1])
 
-        # --- Source-image latent concat (Edit-Plus extension) -------------
         image_latent_cond = conditions.image_latent
         if image_latent_cond is None or image_latent_cond.latents is None:
             raise ValueError(
@@ -101,11 +99,10 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
         image_latents = image_latent_cond.latents.to(device=device, dtype=dtype)
         img_latent_h = int(image_latents.shape[-2])
         img_latent_w = int(image_latents.shape[-1])
-        image_packed = _pack_latents(image_latents)  # [B, (ih/2)*(iw/2), C*4]
+        image_packed = _pack_latents(image_latents)
         packed = torch.cat([packed, image_packed], dim=1)
         img_shapes = [[(1, latent_h // 2, latent_w // 2), (1, img_latent_h // 2, img_latent_w // 2)]] * batch_size
 
-        # Qwen-Image's transformer takes raw sigma as the timestep input.
         if sigma.dim() == 0:
             timestep = sigma.unsqueeze(0).expand(batch_size).to(device, dtype=dtype)
         elif sigma.shape[0] != batch_size:
@@ -113,20 +110,17 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
         else:
             timestep = sigma.to(device, dtype=dtype)
 
-        # Distilled-guidance scalar (guidance_embeds variants only).
         guidance = None
         if getattr(model.transformer.config, "guidance_embeds", False):
             guidance_value = guidance_scale if distilled_guidance_scale is None else float(distilled_guidance_scale)
             guidance = torch.tensor([guidance_value], device=device, dtype=torch.float32).expand(batch_size)
 
-        # Trim to the batch's true max text length so the RoPE text slice and
-        # the tensor width agree on either diffusers version (see
-        # ``_text_len_kwargs``).
         true_lens = prompt_embeds_mask.sum(dim=1).to(torch.long)
         max_true = int(true_lens.max().item())
         if prompt_embeds.shape[1] > max_true:
             prompt_embeds = prompt_embeds[:, :max_true]
             prompt_embeds_mask = prompt_embeds_mask[:, :max_true]
+        txt_seq_lens = true_lens.tolist()
 
         noise_pred_packed = model.transformer(
             hidden_states=packed,
@@ -135,11 +129,10 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
             encoder_hidden_states_mask=prompt_embeds_mask,
             encoder_hidden_states=prompt_embeds,
             img_shapes=img_shapes,
+            txt_seq_lens=txt_seq_lens,
             return_dict=False,
-            **_text_len_kwargs(true_lens),
         )[0]
 
-        # Slice back to the noise segment (drop the image-segment prediction).
         noise_pred_packed = noise_pred_packed[:, :noise_seq_len]
 
         if guidance_scale > 1.0:
@@ -156,6 +149,7 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
                 if negative_prompt_embeds.shape[1] > neg_max:
                     negative_prompt_embeds = negative_prompt_embeds[:, :neg_max]
                     negative_prompt_embeds_mask = negative_prompt_embeds_mask[:, :neg_max]
+                negative_txt_seq_lens = neg_true.tolist()
                 negative_noise_pred_packed = model.transformer(
                     hidden_states=packed,
                     timestep=timestep,
@@ -163,11 +157,10 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
                     encoder_hidden_states_mask=negative_prompt_embeds_mask,
                     encoder_hidden_states=negative_prompt_embeds,
                     img_shapes=img_shapes,
+                    txt_seq_lens=negative_txt_seq_lens,
                     return_dict=False,
-                    **_text_len_kwargs(neg_true),
                 )[0]
                 negative_noise_pred_packed = negative_noise_pred_packed[:, :noise_seq_len]
-                # Norm-corrected CFG blend (same as base Qwen-Image).
                 comb = negative_noise_pred_packed + guidance_scale * (noise_pred_packed - negative_noise_pred_packed)
                 cond_norm = torch.norm(noise_pred_packed, dim=-1, keepdim=True)
                 comb_norm = torch.norm(comb, dim=-1, keepdim=True)
