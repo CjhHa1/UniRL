@@ -54,6 +54,7 @@ from unirl.trainer.async_policy import (
     AsyncBatchControl,
     log_admission_notes,
     next_hard_boundary,
+    sync_period_batches,
     unwrap_replicated_int,
 )
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
@@ -150,7 +151,6 @@ class AsyncARTrainer(ARTrainer):
             max_staleness=max_staleness,
             num_updates_per_batch=stack_cfg.get("num_updates_per_batch", 1),
         )
-        log_admission_notes(self._control, max_inflight=self._max_inflight)
         self._train_devices = int(round(self.num_devices * self._train_fraction))
         if self._train_devices <= 0 or self._train_devices >= self.num_devices:
             raise ValueError(
@@ -324,7 +324,21 @@ class AsyncARTrainer(ARTrainer):
                 "max_staleness": self._control.max_staleness,
                 "staleness_budget": self._control.staleness_budget,
                 "num_updates_per_batch": self._control.num_updates_per_batch,
+                "sync_period_batches": sync_period_batches(
+                    self._control,
+                    eval_interval=self.eval_interval,
+                    save_interval=save_interval,
+                ),
             },
+        )
+        # Reported here rather than in __init__: save_interval only arrives with
+        # the train call, and it clamps the publication period just as the
+        # staleness budget does.
+        log_admission_notes(
+            self._control,
+            max_inflight=self._max_inflight,
+            eval_interval=self.eval_interval,
+            save_interval=save_interval,
         )
 
         self._async_engine = AsyncBatchRolloutEngine(

@@ -134,12 +134,40 @@ class AsyncBatchControl:
         }
 
 
-def log_admission_notes(control: AsyncBatchControl, *, max_inflight: int) -> None:
+def sync_period_batches(
+    control: AsyncBatchControl,
+    *,
+    eval_interval: int = 0,
+    save_interval: int = 0,
+) -> int:
+    """Batches between weight publications, once every admission limit is applied.
+
+    The staleness budget alone would publish every ``admission_depth`` batches,
+    but :func:`next_hard_boundary` clamps admission as well, so an eval or
+    checkpoint interval below that depth becomes the period instead.
+    """
+
+    period = control.admission_depth
+    for interval in (eval_interval, save_interval):
+        if interval > 0:
+            period = min(period, interval)
+    return period
+
+
+def log_admission_notes(
+    control: AsyncBatchControl,
+    *,
+    max_inflight: int,
+    eval_interval: int = 0,
+    save_interval: int = 0,
+) -> None:
     """Report admission settings whose effect differs from what the value suggests.
 
-    All three are legitimate configurations, so none of them is an error; each is
-    a case where the recipe's number does not buy what its name implies.
+    All of these are legitimate configurations, so none is an error; each is a
+    case where the recipe's number does not buy what its name implies.
     """
+
+    period = sync_period_batches(control, eval_interval=eval_interval, save_interval=save_interval)
 
     if control.max_staleness == 0:
         logger.warning(
@@ -153,8 +181,7 @@ def log_admission_notes(control: AsyncBatchControl, *, max_inflight: int) -> Non
         )
     # The loop reaps before it launches, so one completed batch can sit in the
     # ready queue behind the in-flight ones; anything past that never becomes
-    # concurrency, it only defers the sync (which fires after admission_depth
-    # batches, when publish_lag first exceeds the budget).
+    # concurrency, it only defers the sync.
     usable_depth = max_inflight + 1
     if control.admission_depth > usable_depth:
         logger.info(
@@ -165,7 +192,19 @@ def log_admission_notes(control: AsyncBatchControl, *, max_inflight: int) -> Non
             control.admission_depth,
             usable_depth,
             max_inflight,
+            period,
+        )
+    if period < control.admission_depth:
+        logger.warning(
+            "eval/checkpoint boundaries publish every %d batches, below the %d the staleness "
+            "budget allows (eval_interval=%d, save_interval=%d), so max_staleness=%d is never "
+            "fully spent — data tops out at %d batches stale",
+            period,
             control.admission_depth,
+            eval_interval,
+            save_interval,
+            control.max_staleness,
+            period - 1,
         )
 
 
@@ -203,5 +242,6 @@ __all__ = [
     "AsyncBatchControl",
     "log_admission_notes",
     "next_hard_boundary",
+    "sync_period_batches",
     "unwrap_replicated_int",
 ]
