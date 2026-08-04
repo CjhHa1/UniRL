@@ -193,7 +193,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         )
 
         if resumed:
-            self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
+            self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync, force=True)
         if self.eval_interval > 0:
             self.evaluate(start_rollout, sync_weights=False, sleep_after=False)
 

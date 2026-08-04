@@ -14,7 +14,6 @@ class AsyncBatchControl:
     num_updates_per_batch: int
     train_version: int = 0
     rollout_version: int = 0
-    rollout_initialized: bool = False
 
     def __post_init__(self) -> None:
         if self.max_policy_lag < 0:
@@ -37,7 +36,6 @@ class AsyncBatchControl:
     def restore(self, train_version: int) -> None:
         self.train_version = train_version
         self.rollout_version = 0
-        self.rollout_initialized = False
 
     def behavior_lag(self, behavior_version: int) -> int:
         lag = self.train_version - behavior_version
@@ -66,8 +64,8 @@ class AsyncBatchControl:
         allowed = min(freshness, num_rollouts - trained_batches, hard_boundary - trained_batches)
         return max(0, min(max_inflight - inflight_count, allowed - inflight_count - ready_count))
 
-    def sync_rollout(self, engine: Any, rollout: Any, weight_sync: Any) -> bool:
-        if self.rollout_initialized and self.rollout_lag == 0:
+    def sync_rollout(self, engine: Any, rollout: Any, weight_sync: Any, *, force: bool = False) -> bool:
+        if not force and self.rollout_lag == 0:
             return False
         engine.quiesce()
         if engine.ready_count:
@@ -77,7 +75,6 @@ class AsyncBatchControl:
         weight_sync.sync()
         rollout.set_policy_version(self.train_version)
         self.rollout_version = self.train_version
-        self.rollout_initialized = True
         return True
 
     def behavior_metrics(self, behavior_version: int) -> dict[str, int]:

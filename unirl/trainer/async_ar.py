@@ -335,8 +335,8 @@ class AsyncARTrainer(ARTrainer):
             start_gen_id=start_rollout,
         )
 
-        if resumed:
-            self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
+        if resumed or self.eval_interval > 0:
+            self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync, force=True)
         if self.eval_interval > 0:
             self.evaluate(rollout_id=-1)
 
