@@ -2,9 +2,9 @@
 
 Two quantities ride the optimizer-update clock and only one of them is staleness:
 
-* ``staleness`` — updates between the current train weights and the behavior
-  policy that generated a batch, i.e. the off-policyness of the data actually
-  being trained on. This is AReaL's ``eta`` / ``max_head_offpolicyness``.
+* ``staleness`` — updates between the behavior policy that generated a batch and
+  the train weights that batch starts training against, i.e. the off-policyness
+  of the data. This is AReaL's ``eta`` / ``max_head_offpolicyness``.
 * ``publish_lag`` — updates between the current train weights and the snapshot
   last published to the rollout engine. This is sync debt: no batch is that
   stale, but it is what makes a weight sync due.
@@ -14,6 +14,13 @@ admission and consumption only ever run at a batch boundary. Stating it in raw
 updates instead would quantize it to ``num_updates_per_batch`` — 22 and 23 would
 both mean a 12-batch depth — and silently change meaning whenever that count
 changes. ``staleness_budget`` converts once into the clock the versions count in.
+
+Batch entry is also the only point the budget is enforced at, which matters once
+``num_updates_per_batch > 1``: the anchor is frozen for the whole batch while the
+weights keep moving, so update ``i`` trains at ``staleness + i - 1`` and the worst
+case any gradient step sees is ``staleness_budget + num_updates_per_batch - 1``.
+That extra span is the in-batch off-policyness PPO already assumes — the frozen
+anchor and ``clip_range`` cover it — so it is deliberately outside the budget.
 """
 
 from __future__ import annotations
