@@ -27,12 +27,10 @@ import hydra
 from omegaconf import DictConfig
 
 from unirl.trainer.async_ar import AsyncARTrainer
-from unirl.trainer.async_policy import reject_removed_async_keys
 
 
 @hydra.main(version_base=None, config_path="../examples", config_name="ar/qwen3_grpo_4b_base_dapo_sglang_async")
 def main(cfg: DictConfig) -> None:
-    reject_removed_async_keys(cfg)
     trainer = AsyncARTrainer(
         cfg=cfg,
         batch_size=cfg.batch_size,

@@ -50,7 +50,12 @@ from unirl.models.qwen3_5.validation import validate_qwen3_5_training_contract
 from unirl.rollout.engine.asynchronous import AsyncBatchRolloutEngine, RolloutBatch
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
-from unirl.trainer.async_policy import AsyncBatchControl, next_hard_boundary, unwrap_replicated_int
+from unirl.trainer.async_policy import (
+    AsyncBatchControl,
+    log_admission_notes,
+    next_hard_boundary,
+    unwrap_replicated_int,
+)
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
@@ -145,16 +150,7 @@ class AsyncARTrainer(ARTrainer):
             max_staleness=max_staleness,
             num_updates_per_batch=stack_cfg.get("num_updates_per_batch", 1),
         )
-        if self._max_inflight > self._control.admission_depth:
-            logger.warning(
-                "max_inflight=%d exceeds the staleness admission depth %d; the extra concurrency cannot be used",
-                self._max_inflight,
-                self._control.admission_depth,
-            )
-        if self._control.max_staleness == 0:
-            logger.warning(
-                "max_staleness=0 admits one generation at a time; generation cannot overlap the preceding train batch"
-            )
+        log_admission_notes(self._control, max_inflight=self._max_inflight)
         self._train_devices = int(round(self.num_devices * self._train_fraction))
         if self._train_devices <= 0 or self._train_devices >= self.num_devices:
             raise ValueError(

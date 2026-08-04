@@ -26,12 +26,10 @@ import hydra
 from omegaconf import DictConfig
 
 from unirl.trainer.async_diffusion import AsyncDiffusionTrainer
-from unirl.trainer.async_policy import reject_removed_async_keys
 
 
 @hydra.main(version_base=None, config_path="../examples", config_name="diffusion/bagel/bagel_vllmomni_async")
 def main(cfg: DictConfig) -> None:
-    reject_removed_async_keys(cfg)
     trainer = AsyncDiffusionTrainer(
         cfg=cfg,
         batch_size=cfg.batch_size,

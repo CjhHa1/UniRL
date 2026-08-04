@@ -18,41 +18,11 @@ changes. ``staleness_budget`` converts once into the clock the versions count in
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import logging
 from dataclasses import dataclass
 from typing import Any
 
-_REMOVED_ASYNC_KEYS = {
-    "max_policy_lag": (
-        "max_policy_lag was replaced by max_staleness: the budget now counts whole rollout "
-        "batches instead of committed optimizer updates. Divide the old value by "
-        "stack.num_updates_per_batch and rename the key."
-    ),
-    "buffer_max_staleness": (
-        "buffer_max_staleness (weight-syncs a buffered group could cross, under "
-        "freshest-first selection) was replaced by max_staleness, which counts whole "
-        "rollout batches under completion-order FIFO. The units do not correspond; pick a "
-        "new value rather than carrying the old one over."
-    ),
-    "weight_sync_interval": (
-        "weight_sync_interval was removed: weight sync is now driven by max_staleness and "
-        "by eval/checkpoint boundaries, not by a fixed counter."
-    ),
-}
-
-
-def reject_removed_async_keys(cfg: Mapping[str, Any]) -> None:
-    """Fail a recipe still carrying a removed or re-denominated async knob.
-
-    Every one of these is a silent-wrong hazard rather than a crash: an ignored
-    key runs at the default, and reading ``max_policy_lag`` as ``max_staleness``
-    yields a perfectly valid budget that is ``num_updates_per_batch`` times the
-    intended one. Nothing downstream can tell either case from a deliberate one.
-    """
-
-    for key, message in _REMOVED_ASYNC_KEYS.items():
-        if key in cfg:
-            raise ValueError(message)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -157,6 +127,41 @@ class AsyncBatchControl:
         }
 
 
+def log_admission_notes(control: AsyncBatchControl, *, max_inflight: int) -> None:
+    """Report admission settings whose effect differs from what the value suggests.
+
+    All three are legitimate configurations, so none of them is an error; each is
+    a case where the recipe's number does not buy what its name implies.
+    """
+
+    if control.max_staleness == 0:
+        logger.warning(
+            "max_staleness=0 admits one generation at a time; generation cannot overlap the preceding train batch"
+        )
+    if max_inflight > control.admission_depth:
+        logger.warning(
+            "max_inflight=%d exceeds the staleness admission depth %d; the extra concurrency cannot be used",
+            max_inflight,
+            control.admission_depth,
+        )
+    # The loop reaps before it launches, so one completed batch can sit in the
+    # ready queue behind the in-flight ones; anything past that never becomes
+    # concurrency, it only defers the sync (which fires after admission_depth
+    # batches, when publish_lag first exceeds the budget).
+    usable_depth = max_inflight + 1
+    if control.admission_depth > usable_depth:
+        logger.info(
+            "max_staleness=%d admits %d outstanding batches but the loop holds at most %d "
+            "(max_inflight=%d plus one reaped); the surplus does not deepen the pipeline, it "
+            "sets the weight-sync period to %d batches",
+            control.max_staleness,
+            control.admission_depth,
+            usable_depth,
+            max_inflight,
+            control.admission_depth,
+        )
+
+
 def next_hard_boundary(
     trained_batches: int,
     *,
@@ -189,7 +194,7 @@ def unwrap_replicated_int(value: object, *, name: str) -> int:
 
 __all__ = [
     "AsyncBatchControl",
+    "log_admission_notes",
     "next_hard_boundary",
-    "reject_removed_async_keys",
     "unwrap_replicated_int",
 ]

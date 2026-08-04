@@ -56,7 +56,12 @@ import torch
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.engine.asynchronous import AsyncBatchRolloutEngine, RolloutBatch
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.async_policy import AsyncBatchControl, next_hard_boundary, unwrap_replicated_int
+from unirl.trainer.async_policy import (
+    AsyncBatchControl,
+    log_admission_notes,
+    next_hard_boundary,
+    unwrap_replicated_int,
+)
 from unirl.trainer.diffusion import DiffusionTrainer
 from unirl.types.sample import Sample
 
@@ -95,10 +100,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             max_staleness=max_staleness,
             num_updates_per_batch=diffusion_kwargs["stack_cfg"].get("num_updates_per_batch", 1),
         )
-        if self._control.max_staleness == 0:
-            logger.warning(
-                "max_staleness=0 admits one generation at a time; generation cannot overlap the preceding train batch"
-            )
+        log_admission_notes(self._control, max_inflight=self._max_inflight)
 
     def _build_async_sample(self, gen_id: int) -> Sample:
         """Consume one data batch and build the request Sample for ``gen_id``."""
