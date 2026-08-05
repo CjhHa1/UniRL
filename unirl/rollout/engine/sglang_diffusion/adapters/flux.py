@@ -70,16 +70,9 @@ class Flux2KleinAdapter(ImageAdapter):
             )
         gen_part = sample.frontier_gen_part(DiffusionSamplingParams)
         prompts = list(text_turns[0].texts)
-        unique_prompts, k = self._deexpand_prompts(prompts, gen_part.group_ids)
+        unique_prompts, k = utils.deexpand_prompts_from_groups(prompts, list(gen_part.group_ids))
         pil_images = image_batches[0].to_pils()
-        if len(pil_images) != len(prompts):
-            raise ValueError(f"image count {len(pil_images)} != prompt count {len(prompts)}")
-        if k > 1:
-            unique_pils = self._first_per_group(pil_images, list(gen_part.group_ids))
-            if len(unique_pils) != len(unique_prompts):
-                raise ValueError(f"collapsed image count {len(unique_pils)} != unique prompts {len(unique_prompts)}")
-        else:
-            unique_pils = pil_images
+        unique_pils = utils.first_per_group(pil_images, list(gen_part.group_ids)) if k > 1 else pil_images
         target_size = (int(gen_part.sampling_params.width), int(gen_part.sampling_params.height))
         if any(pil.size != target_size for pil in unique_pils):
             from PIL import Image as PILImage
@@ -105,16 +98,16 @@ class Flux2KleinAdapter(ImageAdapter):
         and FLUX.2 never sets ``vae_image_sizes``. Both ``None`` for pure T2I.
         """
         cond_dict = super().build_condition(results)
-        tokens = self._stack_condition_field(results, "image_latent")
+        tokens = self._concat_condition_field(results, "image_latent")
         if tokens is None:
             return cond_dict
-        ids = self._stack_condition_field(results, "condition_image_latent_ids")
+        ids = self._concat_condition_field(results, "condition_image_latent_ids")
         require(ids is not None, "ti2i returned image_latent but no condition_image_latent_ids; replay needs both.")
         cond_dict["image_latent"] = ImageLatentCondition(latents=tokens)
         cond_dict["image_latent_ids"] = ImageLatentCondition(latents=ids)
         return cond_dict
 
-    def _stack_condition_field(self, results: List[RawResult], name: str) -> Optional[torch.Tensor]:
+    def _concat_condition_field(self, results: List[RawResult], name: str) -> Optional[torch.Tensor]:
         """Concat a per-result single-tensor conditions field over dim 0.
 
         ``patch_conditions`` ships each field as a one-element list holding that
@@ -135,24 +128,9 @@ class Flux2KleinAdapter(ImageAdapter):
         shapes = {tuple(t.shape) for t in tensors}
         require(
             len(shapes) == 1,
-            f"{name} has mixed shapes {sorted(shapes)} — bucket by aspect ratio or normalize the dataset.",
+            f"{name} has mixed shapes {sorted(shapes)} after fixed-size condition preprocessing.",
         )
         return torch.cat(tensors, dim=0)
-
-    @staticmethod
-    def _first_per_group(items: List[Any], group_ids: List[str]) -> List[Any]:
-        """First item of each group, in first-seen group order."""
-        seen: set[str] = set()
-        out: List[Any] = []
-        for item, gid in zip(items, group_ids):
-            if gid not in seen:
-                seen.add(gid)
-                out.append(item)
-        return out
-
-    def _deexpand_prompts(self, prompts: List[str], group_ids: List[str]):
-        """Collapse K-expanded prompts back to unique + repeat count."""
-        return utils.deexpand_prompts_from_groups(prompts, list(group_ids))
 
     def build_segment(
         self,

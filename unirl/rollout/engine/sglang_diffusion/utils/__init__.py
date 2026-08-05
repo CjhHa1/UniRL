@@ -7,6 +7,7 @@ package is the generic mechanics those methods lean on.
 
 from unirl.rollout.engine.sglang_diffusion.utils.prompts import (
     deexpand_prompts_from_groups,
+    first_per_group,
 )
 from unirl.rollout.engine.sglang_diffusion.utils.tensors import (
     decode_sample,
@@ -27,6 +28,7 @@ from unirl.rollout.engine.sglang_diffusion.utils.tracks import (
 
 __all__ = [
     "deexpand_prompts_from_groups",
+    "first_per_group",
     "decode_sample",
     "fuse_encoder_outputs",
     "normalize_media",

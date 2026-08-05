@@ -85,17 +85,12 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedI
         self.bundle = bundle
 
     @torch.no_grad()
-    def encode(self, images: NativeImages | Images, *, height: int, width: int) -> RaggedImageLatentCondition:
+    def encode(self, images: NativeImages | Images) -> RaggedImageLatentCondition:
         """Encode source pixels into a ragged latent condition.
 
         Args:
             images: source images with one native ``[3, H_i, W_i]`` tensor per
                 sample in ``[0, 1]``.
-            height, width: generation grid (must be divisible by 16: 8× VAE
-                downsample + 2× patchify). Used only for the 16-alignment
-                guard; the source image is resized to the upstream
-                ``VAE_IMAGE_SIZE`` grid (≈1024²), NOT to the generation
-                grid, matching sglang/vllm_omni rollout engines.
 
         Returns:
             :class:`RaggedImageLatentCondition` with one
@@ -113,27 +108,9 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedI
             raise TypeError(
                 f"QwenImageEditPlusVAEEncodeStage.encode: expected NativeImages or Images, got {type(images).__name__}"
             )
-        if isinstance(images, NativeImages):
-            pixels_list = images.pixels
-        else:
-            pixels = images.pixels
-            if pixels is None or pixels.ndim != 4 or pixels.shape[1] != 3:
-                raise ValueError(
-                    "QwenImageEditPlusVAEEncodeStage.encode: expected dense pixels "
-                    f"[B, 3, H, W] in [0,1], got {None if pixels is None else tuple(pixels.shape)}"
-                )
-            pixels_list = list(pixels.unbind(0))
-        if not pixels_list or any(pixels is None or pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
-            raise ValueError(
-                "QwenImageEditPlusVAEEncodeStage.encode: expected per-sample pixels "
-                f"[3, H, W] in [0,1], got {[None if pixels is None else tuple(pixels.shape) for pixels in pixels_list]}"
-            )
-        if int(height) % 16 != 0 or int(width) % 16 != 0:
-            raise ValueError(
-                f"QwenImageEditPlusVAEEncodeStage.encode: height ({height}) and "
-                f"width ({width}) must be divisible by 16 (8× VAE + 2× patchify)"
-            )
         source_pils = images.to_pils()
+        if not source_pils:
+            raise ValueError("QwenImageEditPlusVAEEncodeStage.encode: empty image batch")
 
         vae = self.bundle.vae
         device = self.bundle.device
@@ -144,9 +121,8 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedI
         # call to stay dense. Portrait and landscape samples never influence
         # one another's resize target.
         groups: Dict[tuple[int, int], List[int]] = {}
-        for index, pixels in enumerate(pixels_list):
-            src_h, src_w = int(pixels.shape[-2]), int(pixels.shape[-1])
-            vae_w, vae_h = _vae_size_for_aspect(src_w, src_h)
+        for index, pil in enumerate(source_pils):
+            vae_w, vae_h = _vae_size_for_aspect(*pil.size)
             groups.setdefault((vae_h, vae_w), []).append(index)
 
         # Per-channel normalization mirrors the upstream Edit-Plus pipeline.
@@ -175,7 +151,7 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedI
             for local_index, source_index in enumerate(indices):
                 by_index[source_index] = image_latents[local_index]
 
-        return RaggedImageLatentCondition(latents=[by_index[index] for index in range(len(pixels_list))])
+        return RaggedImageLatentCondition(latents=[by_index[index] for index in range(len(source_pils))])
 
 
 __all__ = ["QwenImageEditPlusVAEEncodeStage"]

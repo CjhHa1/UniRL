@@ -192,10 +192,7 @@ def build_media_preview_for_part(
         input_pixels: Optional[List[Any]] = None
         if isinstance(input_image, (NativeImages, Images)):
             input_image = map_tree(input_image, hydrate)
-            if isinstance(input_image, NativeImages):
-                input_pixels = list(input_image.pixels)
-            elif input_image.pixels is not None:
-                input_pixels = list(input_image.pixels.unbind(0))
+            input_pixels = [image.pixels for image in input_image.to_list()]
         show_edit_pairs = input_pixels is not None and len(input_pixels) >= int(pixels.shape[0])
         for idx in range(int(pixels.shape[0])):
             if len(selected_indices) >= limit:

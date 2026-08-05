@@ -49,7 +49,7 @@ class _VisionBundle(Protocol):
     dtype: torch.dtype
 
 
-class WAN21CLIPVisionEncodeStage(EncodeStage[NativeImages, ImageEmbedCondition]):
+class WAN21CLIPVisionEncodeStage(EncodeStage[NativeImages | Images, ImageEmbedCondition]):
     """Encode reference images through CLIP ViT into patch-token embeds."""
 
     def __init__(self, bundle: _VisionBundle) -> None:
@@ -64,7 +64,9 @@ class WAN21CLIPVisionEncodeStage(EncodeStage[NativeImages, ImageEmbedCondition])
 
     def encode(self, p: NativeImages | Images) -> ImageEmbedCondition:
         if not isinstance(p, (NativeImages, Images)):
-            raise TypeError(f"WAN21CLIPVisionEncodeStage.encode: expected NativeImages, got {type(p).__name__}")
+            raise TypeError(
+                f"WAN21CLIPVisionEncodeStage.encode: expected NativeImages or Images, got {type(p).__name__}"
+            )
 
         pils = p.to_pils()
         processed = self.bundle.image_processor(images=pils, return_tensors="pt").pixel_values

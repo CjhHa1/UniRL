@@ -91,39 +91,31 @@ class QwenImageEditPlusDiffusionStep(QwenImageDiffusionStep):
                 )
             groups.setdefault(tuple(latent.shape), []).append(index)
 
-        predictions: List[torch.Tensor] = []
-        grouped_order: List[int] = []
+        result = None
         for indices in groups.values():
-            index = torch.tensor(indices, device=sample.device, dtype=torch.long)
+            batch_indices = torch.tensor(indices, device=sample.device, dtype=torch.long)
             sub_conditions = conditions.select(indices)
             sub_sigma = (
-                sigma.index_select(0, index.to(sigma.device))
+                sigma.index_select(0, batch_indices.to(sigma.device))
                 if sigma.dim() > 0 and int(sigma.shape[0]) == int(sample.shape[0])
                 else sigma
             )
-            if sub_conditions.image_latent is None:
-                raise RuntimeError("shape-group selection dropped the source-image condition")
             sub_image_latents = torch.stack(sub_conditions.image_latent.latents, dim=0)
-            predictions.append(
-                self._predict_noise_uniform(
-                    model,
-                    sample.index_select(0, index),
-                    sub_sigma,
-                    sub_conditions,
-                    sub_image_latents,
-                    guidance_scale=guidance_scale,
-                    latent_h=latent_h,
-                    latent_w=latent_w,
-                    distilled_guidance_scale=distilled_guidance_scale,
-                )
+            prediction = self._predict_noise_uniform(
+                model,
+                sample.index_select(0, batch_indices),
+                sub_sigma,
+                sub_conditions,
+                sub_image_latents,
+                guidance_scale=guidance_scale,
+                latent_h=latent_h,
+                latent_w=latent_w,
+                distilled_guidance_scale=distilled_guidance_scale,
             )
-            grouped_order.extend(indices)
-
-        grouped = torch.cat(predictions, dim=0)
-        order = torch.tensor(grouped_order, device=grouped.device, dtype=torch.long)
-        inverse = torch.empty_like(order)
-        inverse[order] = torch.arange(order.numel(), device=order.device)
-        return grouped.index_select(0, inverse)
+            if result is None:
+                result = prediction.new_empty(sample.shape)
+            result.index_copy_(0, batch_indices, prediction)
+        return result
 
     def _predict_noise_uniform(
         self,
@@ -259,8 +251,6 @@ class QwenImageEditPlusDiffusionStage(QwenImageDiffusionStage):
         unlike the base Qwen-Image implementation, retains every per-sample
         source-image latent without padding its spatial grid.
         """
-        if repeats < 1:
-            raise ValueError(f"repeats must be >= 1, got {repeats}")
         return QwenImageEditPlusConditions.concat([conditions] * repeats)
 
 

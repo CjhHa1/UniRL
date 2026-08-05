@@ -89,7 +89,7 @@ class HunyuanImage3VAEDecodeStage(DecodeStage[LatentSegment, Images]):
         return Images(pixels=pixels)
 
 
-class HunyuanImage3VAEEncodeStage(EncodeStage[NativeImages, ImageLatentCondition]):
+class HunyuanImage3VAEEncodeStage(EncodeStage[NativeImages | Images, ImageLatentCondition]):
     """HunyuanImage3 3D-VAE encode stage (it2i edit conditioning).
 
     Encodes uniform ``NativeImages`` into dense VAE latents
@@ -110,9 +110,7 @@ class HunyuanImage3VAEEncodeStage(EncodeStage[NativeImages, ImageLatentCondition
         ``[B, C_lat, H_lat, W_lat]`` consistent with the rest of the
         unirl image pipeline.
         """
-        if p.pixels is None:
-            raise ValueError("HunyuanImage3VAEEncodeStage.encode: pixels is None")
-        pixels_list = p.pixels if isinstance(p, NativeImages) else list(p.pixels.unbind(0))
+        pixels_list = [image.pixels for image in p.to_list()]
         shapes = {tuple(pixels.shape) for pixels in pixels_list}
         if len(shapes) != 1:
             raise ValueError(

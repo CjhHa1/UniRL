@@ -172,7 +172,7 @@ class QwenImageEditPlusPipeline(Pipeline):
             autocast_precision=config.autocast_precision,
             trajectory_precision=config.trajectory_precision,
             logprob_precision=config.logprob_precision,
-            batch_replay_steps=bool(getattr(config, "batch_replay_steps", False)),
+            batch_replay_steps=config.batch_replay_steps,
         )
         vae_encode = QwenImageEditPlusVAEEncodeStage(bundle)
         vae_decode = QwenImageVAEDecodeStage(bundle)
@@ -232,6 +232,11 @@ class QwenImageEditPlusPipeline(Pipeline):
                 "QwenImageEditPlusPipeline.generate: frontier sampling_params.sigmas is None; "
                 "the hosting engine must pin the schedule before pipeline.generate."
             )
+        if int(params.height) % 16 or int(params.width) % 16:
+            raise ValueError(
+                f"QwenImageEditPlusPipeline.generate: height ({params.height}) and width "
+                f"({params.width}) must be divisible by 16"
+            )
 
         conditioning = sample.conditioning()
         text_inputs = [value for value in conditioning if isinstance(value, Texts)]
@@ -257,11 +262,7 @@ class QwenImageEditPlusPipeline(Pipeline):
             images=images,
             guidance_scale=float(params.guidance_scale),
         )
-        image_latent = self.vae_encode.encode(
-            images,
-            height=int(params.height),
-            width=int(params.width),
-        )
+        image_latent = self.vae_encode.encode(images)
         edit_conds.image_latent = image_latent
 
         schedule = params.sigmas.to(self.bundle.device)

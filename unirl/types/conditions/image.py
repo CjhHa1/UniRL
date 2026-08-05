@@ -26,7 +26,7 @@ class ImageLatentCondition(Condition):
 
     modality: ClassVar[Modality] = Modality.IMAGE
 
-    latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    latents: Optional[torch.Tensor | List[torch.Tensor]] = field(kind=FieldKind.CONCAT, default=None)
 
 
 @dataclass

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from unirl.distributed.tensor.batch import Batch, FieldKind, field
-from unirl.types.conditions import Condition, ImageLatentCondition, RaggedImageLatentCondition, TextEmbedCondition
+from unirl.types.conditions import Condition, RaggedImageLatentCondition, TextEmbedCondition
 
 
 @dataclass
@@ -55,8 +55,6 @@ class QwenImageEditPlusConditions(Batch):
                 f"TextEmbedCondition or absent, got {type(negative_text).__name__}"
             )
         image_latent = d.get("image_latent")
-        if isinstance(image_latent, ImageLatentCondition) and image_latent.latents is not None:
-            image_latent = RaggedImageLatentCondition(latents=list(image_latent.latents.unbind(0)))
         if image_latent is not None and not isinstance(image_latent, RaggedImageLatentCondition):
             raise TypeError(
                 f"QwenImageEditPlusConditions.from_dict: expected d['image_latent'] to be an "

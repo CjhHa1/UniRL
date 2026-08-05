@@ -212,7 +212,7 @@ class BagelPipeline(Pipeline):
                 f"BagelPipeline.generate ({task}): the bundle was built without the und ViT; "
                 "set BagelPipelineConfig.enable_vit=true for image-input tasks."
             )
-        pil_images = [img.to_pil() for img in images_prim.to_list()]
+        pil_images = images_prim.to_pils()
         if n_prompts is not None and len(pil_images) != n_prompts:
             raise ValueError(
                 f"BagelPipeline.generate ({task}): image count {len(pil_images)} != prompt count {n_prompts}"

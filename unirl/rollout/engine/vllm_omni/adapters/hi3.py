@@ -386,15 +386,12 @@ class Hi3InputAdapter:
         if self.image_input:
             pil = pil_images[i]
             entry["multi_modal_data"] = {"image": pil}
-            if diff_params is not None:
-                # Keep the native source PIL for conditioning, but generate on
-                # the request's fixed dense output canvas. This lets mixed-
-                # aspect edit inputs share one ``Images`` output batch.
-                entry["height"] = int(diff_params.height)
-                entry["width"] = int(diff_params.width)
-            else:
+            if diff_params is None:
                 entry["height"] = pil.height
                 entry["width"] = pil.width
+            else:
+                entry["height"] = int(diff_params.height)
+                entry["width"] = int(diff_params.width)
         elif self.carries_target_size:
             entry["height"] = int(diff_params.height)
             entry["width"] = int(diff_params.width)

@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
 import torch
 from torch.utils.data import DataLoader
 
-from unirl.types.primitives import NativeImages, Texts, Videos
+from unirl.types.primitives import Image, NativeImages, Texts, Videos
 from unirl.types.sample import Part, PrimitiveMap, Sample
 
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
@@ -24,25 +24,20 @@ from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_
 logger = logging.getLogger(__name__)
 
 
-def _load_condition_images(media_refs: List[Any]) -> Optional[List[Any]]:
+def _load_condition_images(media_refs: List[Any]) -> Optional[List[Image]]:
     """Load ``(modality="image", role="condition")`` media refs into ``Image``.
 
-    Returns a per-prompt list of ``Image`` (or ``None`` for prompts that
-    carry no condition image), or ``None`` when no prompt in the batch
-    has a condition image — letting the caller omit the ``images`` key
-    from the collated batch entirely.
+    Returns one image per prompt, or ``None`` when the batch has no condition
+    images. Partially populated batches are rejected here.
 
-    Raises ``ValueError`` if any prompt carries more than one condition
-    image (WAN I2V is single-frame conditioned).
+    Raises ``ValueError`` if any prompt carries more than one condition image.
     """
     if not media_refs or not any(media_refs):
         return None
     import PIL.Image
     import torchvision.transforms.functional as TF
 
-    from unirl.types.primitives import Image as PrimImage
-
-    images_per_prompt: List[Any] = []
+    images_per_prompt: List[Optional[Image]] = []
     any_loaded = False
     for refs in media_refs:
         selected = [
@@ -54,15 +49,21 @@ def _load_condition_images(media_refs: List[Any]) -> Optional[List[Any]]:
             images_per_prompt.append(None)
             continue
         if len(selected) > 1:
-            raise ValueError(f"WAN I2V expects <=1 (image, condition) MediaRef per prompt, got {len(selected)}")
+            raise ValueError(f"Expected at most one condition image per prompt, got {len(selected)}")
         pil = PIL.Image.open(selected[0].uri).convert("RGB")
         tensor = TF.to_tensor(pil)
-        images_per_prompt.append(PrimImage(pixels=tensor))
+        images_per_prompt.append(Image(pixels=tensor))
         any_loaded = True
 
     if not any_loaded:
         return None
-    return images_per_prompt
+    missing = [index for index, image in enumerate(images_per_prompt) if image is None]
+    if missing:
+        raise ValueError(
+            f"Condition-image batch is incomplete: {len(missing)}/{len(images_per_prompt)} "
+            f"prompts are missing an image (e.g. prompt index {missing[0]})."
+        )
+    return cast(List[Image], images_per_prompt)
 
 
 def _load_condition_videos(media_refs: List[Any]) -> Optional[List[Any]]:
@@ -153,19 +154,6 @@ def _validate_video_media_roles(media_refs: List[Any]) -> None:
     }
     if "condition" in roles and "prompt" in roles:
         raise ValueError("A batch cannot mix (video, condition) and (video, prompt) MediaRefs.")
-
-
-def _validate_homogeneous_images(images: List[Any]) -> None:
-    """Reject batches where some prompts have condition images and others don't."""
-    populated = [img for img in images if img is not None]
-    if populated and len(populated) != len(images):
-        missing = [i for i, img in enumerate(images) if img is None]
-        raise ValueError(
-            f"Heterogeneous I2V batch — {len(missing)}/{len(images)} prompts "
-            f"are missing a condition image (e.g. prompt index {missing[0]}). "
-            f"Split into separate requests so each batch is either fully T2V or "
-            f"fully I2V; per-sample channel-concat is not supported."
-        )
 
 
 def _validate_homogeneous_videos(videos: List[Any]) -> None:
@@ -421,8 +409,7 @@ class MultimodalRLDataSource:
         primitives: Dict[str, Any] = {"text": Texts(texts=prompts)}
         images = _load_condition_images(media_refs)
         if images is not None:
-            _validate_homogeneous_images(images)
-            primitives["image"] = NativeImages.from_list([img for img in images if img is not None])
+            primitives["image"] = NativeImages.from_list(images)
         videos = _load_videos(media_refs)
         if videos is not None:
             primitives["video"] = videos
@@ -453,8 +440,7 @@ class MultimodalRLDataSource:
         primitives: Dict[str, Any] = {"text": Texts(texts=prompts)}
         images = _load_condition_images(media_refs)
         if images is not None:
-            _validate_homogeneous_images(images)
-            primitives["image"] = NativeImages.from_list([img for img in images if img is not None])
+            primitives["image"] = NativeImages.from_list(images)
         videos = _load_videos(media_refs)
         if videos is not None:
             primitives["video"] = videos

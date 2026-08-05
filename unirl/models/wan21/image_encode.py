@@ -36,7 +36,7 @@ class _VAEBundle(Protocol):
     dtype: torch.dtype
 
 
-class WAN21ImageLatentEncodeStage(EncodeStage[NativeImages, ImageLatentCondition]):
+class WAN21ImageLatentEncodeStage(EncodeStage[NativeImages | Images, ImageLatentCondition]):
     """Encode a reference image into the 20-channel WAN I2V condition payload."""
 
     def __init__(
@@ -65,16 +65,7 @@ class WAN21ImageLatentEncodeStage(EncodeStage[NativeImages, ImageLatentCondition
             raise TypeError(
                 f"WAN21ImageLatentEncodeStage.encode: expected NativeImages or Images, got {type(p).__name__}"
             )
-        if isinstance(p, NativeImages):
-            pixels_list = p.pixels
-        else:
-            pixels = p.pixels
-            if pixels is None or pixels.ndim != 4 or pixels.shape[1] != 3:
-                raise ValueError(
-                    "WAN21ImageLatentEncodeStage.encode: expected dense pixels "
-                    f"[B, 3, H, W], got {None if pixels is None else tuple(pixels.shape)}"
-                )
-            pixels_list = list(pixels.unbind(0))
+        pixels_list = [image.pixels for image in p.to_list()]
         if not pixels_list or any(pixels is None or pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(
                 "WAN21ImageLatentEncodeStage.encode: expected per-sample pixels [3, H, W], "

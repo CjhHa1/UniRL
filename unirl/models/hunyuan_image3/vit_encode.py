@@ -30,7 +30,7 @@ from unirl.types.primitives import Images, NativeImages
 from .bundle import HunyuanImage3Bundle
 
 
-class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages, ImageEmbedCondition]):
+class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages | Images, ImageEmbedCondition]):
     """SigLIP2-based image → ImageEmbedCondition stage."""
 
     def __init__(self, bundle: HunyuanImage3Bundle) -> None:
@@ -44,10 +44,7 @@ class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages, ImageEmbedCondition]
         rescale to match the upstream ``image_processor`` convention
         (``HunyuanImage-3.0/hunyuan_image_3/image_processor.py``).
         """
-        if p.pixels is None:
-            raise ValueError("HunyuanImage3VitEncodeStage.encode: pixels is None")
-
-        pixels_list = p.pixels if isinstance(p, NativeImages) else list(p.pixels.unbind(0))
+        pixels_list = [image.pixels for image in p.to_list()]
         shapes = {tuple(pixels.shape) for pixels in pixels_list}
         if len(shapes) != 1:
             raise ValueError(
@@ -108,10 +105,6 @@ class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages, ImageEmbedCondition]
                                      "attention_mask": list[Tensor [S_b]]}
                                     -- per-sample SigLIP2 sizing info.
         """
-        if p.pixels is None:
-            raise ValueError("HunyuanImage3VitEncodeStage.encode_for_cond_vit: pixels is None")
-        from torchvision.transforms.functional import to_pil_image
-
         transformer = self.bundle.transformer
         image_processor = getattr(transformer, "image_processor", None)
         if image_processor is None:
@@ -120,19 +113,11 @@ class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages, ImageEmbedCondition]
                 "transformer has no .image_processor (unloaded checkpoint?)."
             )
 
-        pixels_list = p.pixels if isinstance(p, NativeImages) else list(p.pixels.unbind(0))
-        if not pixels_list or any(pixels.dim() != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
-            raise ValueError(
-                "HunyuanImage3VitEncodeStage.encode_for_cond_vit: pixels must be "
-                f"per-sample [3, H, W], got {[tuple(pixels.shape) for pixels in pixels_list]}"
-            )
-
         joint_image_info: List[List[Any]] = []
         cond_vit_images: List[torch.Tensor] = []
         spatial_shapes_list: List[torch.Tensor] = []
         attn_mask_list: List[torch.Tensor] = []
-        for pixels in pixels_list:
-            pil_image = to_pil_image(pixels.clamp(0.0, 1.0).float().cpu())
+        for pil_image in p.to_pils():
             if pil_image.mode != "RGB":
                 pil_image = pil_image.convert("RGB")
             if hasattr(image_processor, "preprocess"):

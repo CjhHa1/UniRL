@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from dataclasses import fields as dc_fields
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence
 
 import torch
 
@@ -35,7 +35,7 @@ from unirl.types.advantages import compute_gae_advantages as _compute_gae
 from unirl.types.advantages import scatter_terminal_rewards
 from unirl.types.conditions import Condition
 from unirl.types.media_preview import MediaPreview
-from unirl.types.primitives import Audios, Images, NativeImages, Texts, Videos, primitive_modality_key
+from unirl.types.primitives import Images, NativeImages, PrimitiveValue, Texts, primitive_modality_key
 from unirl.types.sample_id import ancestor_id, child_id, parent_id
 from unirl.types.sampling import BaseSamplingParams
 from unirl.types.segments import Segment, TextSegment
@@ -43,7 +43,7 @@ from unirl.utils.shard_balance import lpt_shard_permutation, shard_token_spread
 
 logger = logging.getLogger(__name__)
 
-Primitive = Union[Texts, NativeImages, Images, Videos, Audios]
+Primitive = PrimitiveValue
 PrimitiveMap = Dict[str, Primitive]
 PrimitiveMetadata = Dict[str, Dict[str, Any]]
 PRIMITIVE_MODALITY_ORDER = ("text", "image", "video", "audio")

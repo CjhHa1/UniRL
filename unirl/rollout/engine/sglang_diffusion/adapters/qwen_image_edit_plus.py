@@ -3,7 +3,7 @@
 Sibling of :mod:`unirl.rollout.engine.sglang_diffusion.adapters.qwen_image`
 (the T2I modality) with two image-edit deltas:
 
-- **Request side.** Edit-Plus **requires** ``NativeImages`` in an aligned
+- **Request side.** Edit-Plus requires a native or dense image batch in an aligned
   image-conditioning Part
   (fail-fast if absent — Edit-Plus is edit-only). The adapter extracts PILs
   via :meth:`NativeImages.to_pils` and injects each into the sampling kwargs under
@@ -39,15 +39,16 @@ subclass is needed — unlike the vllm_omni path which subclasses
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 
+from unirl.rollout.engine.sglang_diffusion import utils
 from unirl.rollout.engine.sglang_diffusion.adapters.base import register_adapter
 from unirl.rollout.engine.sglang_diffusion.adapters.qwen_image import QwenImageAdapter
 from unirl.rollout.engine.sglang_diffusion.backends import RawResult
 from unirl.types.conditions.image import RaggedImageLatentCondition
-from unirl.types.primitives import Images, NativeImages, Texts
+from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import DiffusionSamplingParams
 
@@ -81,43 +82,19 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
         inherited from :meth:`ImageAdapter.build_prompts`; we only add the
         ``condition_image`` key alongside ``prompt``.
         """
-        turns = sample.turns()
+        turns, image_batches = sample.vision_conditioning()
         text_turns = [turn.content for turn in turns if isinstance(turn.content, Texts)]
-        image_batches = [turn.content for turn in turns if isinstance(turn.content, (NativeImages, Images))]
-        unsupported = [
-            type(turn.content).__name__ for turn in turns if not isinstance(turn.content, (Texts, NativeImages, Images))
-        ]
-        if unsupported or len(text_turns) != 1 or len(image_batches) != 1:
+        if len(text_turns) != 1 or len(image_batches) != 1:
             raise ValueError(
                 f"modality={self.model_family!r} requires exactly one text turn and one "
-                f"image turn; got {len(text_turns)} text, {len(image_batches)} image, "
-                f"and unsupported={unsupported}."
+                f"image turn; got {len(text_turns)} text and {len(image_batches)} image."
             )
         gen_part = sample.frontier_gen_part(DiffusionSamplingParams)
         prompts = list(text_turns[0].texts)
-        unique_prompts, k = self._deexpand_prompts(prompts, gen_part.group_ids)
+        unique_prompts, k = utils.deexpand_prompts_from_groups(prompts, list(gen_part.group_ids))
         images_prim = image_batches[0]
-        if not isinstance(images_prim, (NativeImages, Images)):
-            raise TypeError(
-                f"modality={self.model_family!r} requires NativeImages conditioning "
-                f"(Edit-Plus is edit-only); got {type(images_prim).__name__}."
-            )
         pil_images = images_prim.to_pils()
-        if len(pil_images) != len(prompts):
-            raise ValueError(f"build_prompts: image batch {len(pil_images)} != prompt count {len(prompts)}")
-        if len(prompts) != len(gen_part.sample_ids):
-            raise ValueError(
-                f"build_prompts: prompt count {len(prompts)} != diffusion sample count {len(gen_part.sample_ids)}"
-            )
-        if k > 1:
-            unique_pils = self._first_per_group(pil_images, list(gen_part.group_ids))
-            if len(unique_pils) != len(unique_prompts):
-                raise ValueError(
-                    f"build_prompts: collapsed image count {len(unique_pils)} != unique prompt "
-                    f"count {len(unique_prompts)} (group_ids/image misalignment)."
-                )
-        else:
-            unique_pils = pil_images
+        unique_pils = utils.first_per_group(pil_images, list(gen_part.group_ids)) if k > 1 else pil_images
         out: Dict[str, Any] = {
             "prompt": unique_prompts if len(unique_prompts) > 1 else unique_prompts[0],
             "condition_image": unique_pils if len(unique_pils) > 1 else unique_pils[0],
@@ -137,12 +114,10 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
         :class:`RaggedImageLatentCondition`.
         """
         cond_dict = super().build_condition(results)
-        image_latents = self._collect_image_latents(results)
-        if image_latents is not None:
-            cond_dict["image_latent"] = RaggedImageLatentCondition(latents=image_latents)
+        cond_dict["image_latent"] = RaggedImageLatentCondition(latents=self._collect_image_latents(results))
         return cond_dict
 
-    def _collect_image_latents(self, results: List[RawResult]) -> Optional[List[torch.Tensor]]:
+    def _collect_image_latents(self, results: List[RawResult]) -> List[torch.Tensor]:
         """Collect per-result image latents without forcing a shared grid.
 
         Each result's ``image_latent`` is the packed source-image latent
@@ -176,42 +151,8 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
             latent_h = int(vae_height) // _VAE_SCALE_FACTOR
             latent_w = int(vae_width) // _VAE_SCALE_FACTOR
             spatial = _unpack_latents(packed, latent_h=latent_h, latent_w=latent_w)
-            if int(spatial.shape[0]) != 1:
-                raise RuntimeError(
-                    f"build_condition: expected one source-image latent per result, got shape {tuple(spatial.shape)}"
-                )
-            tensors.append(spatial[0])
-        if not tensors:
-            raise RuntimeError("build_condition: Qwen-Image-Edit-Plus rollout produced no source-image latents")
+            tensors.append(spatial.squeeze(0))
         return tensors
-
-    @staticmethod
-    def _first_per_group(items: List[Any], group_ids: List[str]) -> List[Any]:
-        """First item of each group, in first-seen group order.
-
-        Mirrors how :func:`utils.deexpand_prompts_from_groups` collapses prompts,
-        so the source-image collapse aligns with the prompt collapse regardless
-        of the sample layout (contiguous or interleaved ``group_ids``).
-        """
-        seen: set[str] = set()
-        out: List[Any] = []
-        for item, gid in zip(items, group_ids):
-            if gid not in seen:
-                seen.add(gid)
-                out.append(item)
-        return out
-
-    def _deexpand_prompts(self, prompts: List[str], group_ids: List[str]):
-        """Collapse K-expanded prompts back to unique + repeat count.
-
-        Thin wrapper around :func:`utils.deexpand_prompts_from_groups` so the
-        import stays local (the base class imports utils at module level, but
-        keeping the call explicit aids readability of the image-collapse
-        parallel).
-        """
-        from unirl.rollout.engine.sglang_diffusion import utils
-
-        return utils.deexpand_prompts_from_groups(prompts, list(group_ids))
 
 
 __all__ = ["QwenImageEditPlusAdapter"]

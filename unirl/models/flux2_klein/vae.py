@@ -146,16 +146,7 @@ class Flux2KleinVAEEncodeStage:
             raise TypeError(
                 f"Flux2KleinVAEEncodeStage.encode: expected NativeImages or Images, got {type(images).__name__}"
             )
-        if isinstance(images, NativeImages):
-            pixels_list = images.pixels
-        else:
-            pixels = images.pixels
-            if pixels is None or pixels.ndim != 4 or pixels.shape[1] != 3:
-                raise ValueError(
-                    "Flux2KleinVAEEncodeStage.encode: expected dense pixels "
-                    f"[B, 3, H, W] in [0,1], got {None if pixels is None else tuple(pixels.shape)}"
-                )
-            pixels_list = list(pixels.unbind(0))
+        pixels_list = [image.pixels for image in images.to_list()]
         if not pixels_list or any(pixels is None or pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(
                 "Flux2KleinVAEEncodeStage.encode: expected per-sample pixels [3, H, W] in [0,1], "

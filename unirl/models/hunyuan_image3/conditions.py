@@ -240,7 +240,7 @@ class HunyuanImage3DiffusionConditions(Batch):
     fused_uncond: Optional[HunyuanImage3FusedMultimodalCondition] = field(kind=FieldKind.SHARED, default=None)
     cond_vae: Optional[ImageLatentCondition] = field(kind=FieldKind.CONCAT, default=None)
     cond_vit: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
-    cond_timestep: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    cond_timestep: Optional[torch.Tensor | list[torch.Tensor]] = field(kind=FieldKind.CONCAT, default=None)
     tokenizer_output: Optional[Any] = field(kind=FieldKind.SHARED, default=None)
 
     @classmethod
@@ -336,7 +336,7 @@ class HunyuanImage3ARConditions(Batch):
     fused: Optional[HunyuanImage3FusedMultimodalCondition] = field(kind=FieldKind.SHARED, default=None)
     cond_vae: Optional[ImageLatentCondition] = field(kind=FieldKind.CONCAT, default=None)
     cond_vit: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
-    cond_timestep: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    cond_timestep: Optional[torch.Tensor | list[torch.Tensor]] = field(kind=FieldKind.CONCAT, default=None)
     tokenizer_output: Optional[Any] = field(kind=FieldKind.SHARED, default=None)
 
     @classmethod

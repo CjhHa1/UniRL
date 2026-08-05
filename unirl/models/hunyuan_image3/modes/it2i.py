@@ -63,7 +63,7 @@ def _prepare_seeded_sampling(
     return seeded_params, condition_vae_generators, sde_sample_keys
 
 
-def _encode_cond_images_per_sample(
+def _encode_cond_images(
     transformer,
     batch_cond_images,
     generators: Optional[List[torch.Generator]],
@@ -74,28 +74,17 @@ def _encode_cond_images_per_sample(
     dense tensors from uniform local shards with ragged lists from mixed ones.
     """
 
-    def _per_sample(value, batch_size: int, name: str):
-        if isinstance(value, torch.Tensor):
-            if value.ndim == 0 or value.shape[0] != batch_size:
-                raise ValueError(
-                    f"HunyuanImage3 it2i {name} batch {tuple(value.shape)} does not match expected size {batch_size}."
-                )
-            return list(value.split(1, dim=0))
-        if isinstance(value, (list, tuple)) and len(value) == batch_size:
-            return list(value)
-        raise TypeError(
-            f"HunyuanImage3 it2i {name} must be a batch tensor or per-sample list, got {type(value).__name__}."
-        )
+    def _as_sample_batches(value):
+        return list(value.split(1, dim=0)) if isinstance(value, torch.Tensor) else list(value)
 
     if generators is None:
         cond_vae, cond_timestep, cond_vit = transformer._encode_cond_image(
             batch_cond_images, cfg_factor=1, generator=None
         )
-        batch_size = len(batch_cond_images)
         return (
-            _per_sample(cond_vae, batch_size, "cond_vae"),
-            _per_sample(cond_timestep, batch_size, "cond_timestep"),
-            None if cond_vit is None else _per_sample(cond_vit, batch_size, "cond_vit"),
+            _as_sample_batches(cond_vae),
+            _as_sample_batches(cond_timestep),
+            None if cond_vit is None else _as_sample_batches(cond_vit),
         )
     if len(generators) != len(batch_cond_images):
         raise ValueError(
@@ -110,10 +99,10 @@ def _encode_cond_images_per_sample(
             cfg_factor=1,
             generator=[generator],
         )
-        vae_items.extend(_per_sample(cond_vae, 1, "cond_vae"))
-        timestep_items.extend(_per_sample(cond_timestep, 1, "cond_timestep"))
+        vae_items.extend(_as_sample_batches(cond_vae))
+        timestep_items.extend(_as_sample_batches(cond_timestep))
         if cond_vit is not None:
-            vit_items.extend(_per_sample(cond_vit, 1, "cond_vit"))
+            vit_items.extend(_as_sample_batches(cond_vit))
 
     return vae_items, timestep_items, vit_items or None
 
@@ -154,7 +143,7 @@ def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
 
     vit = pipeline.vit_encode.encode_for_cond_vit(images)
 
-    cond_vae_images, cond_timestep, cond_vit_images = _encode_cond_images_per_sample(
+    cond_vae_images, cond_timestep, cond_vit_images = _encode_cond_images(
         pipeline.bundle.transformer,
         vit["joint_image_info"],
         condition_vae_generators,

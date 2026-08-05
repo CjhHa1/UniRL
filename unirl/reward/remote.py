@@ -336,11 +336,11 @@ class RemoteRewardBackend(RewardBackend):
         from unirl.types.primitives import Images, NativeImages
         from unirl.utils.media import tensor_frame_to_pil
 
-        if isinstance(prim_image, NativeImages):
-            return [tensor_frame_to_pil(img) for img in prim_image.pixels]
-        if isinstance(prim_image, Images):
-            return [tensor_frame_to_pil(img) for img in prim_image.pixels.unbind(0)]
-        raise TypeError(f"request.primitives['image'] must be NativeImages or Images, got {type(prim_image).__name__}")
+        if not isinstance(prim_image, (NativeImages, Images)):
+            raise TypeError(
+                f"request.primitives['image'] must be NativeImages or Images, got {type(prim_image).__name__}"
+            )
+        return [tensor_frame_to_pil(image.pixels) for image in prim_image.to_list()]
 
     def _compute_video_rewards(self, request: RewardRequest, start: float) -> RewardResponse:
         """Send video tensors to the remote service and parse the response."""

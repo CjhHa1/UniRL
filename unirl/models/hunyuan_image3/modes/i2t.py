@@ -82,33 +82,17 @@ def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
         vit["joint_image_info"], cfg_factor=1
     )
 
-    def _per_sample(value: Any, name: str) -> Any:
-        batch_size = len(images)
-        if isinstance(value, torch.Tensor):
-            if value.ndim == 0 or value.shape[0] != batch_size:
-                raise ValueError(
-                    f"HunyuanImage3 i2t {name} batch {tuple(value.shape)} does not match expected size {batch_size}."
-                )
-            return list(value.split(1, dim=0))
-        if isinstance(value, (list, tuple)) and len(value) == batch_size:
-            return list(value)
-        raise TypeError(
-            f"HunyuanImage3 i2t {name} must be a batch tensor or per-sample list, got {type(value).__name__}."
-        )
+    def _as_sample_batches(value):
+        return list(value.split(1, dim=0)) if isinstance(value, torch.Tensor) else list(value)
 
-    cond_vae_images = _per_sample(cond_vae_images, "cond_vae")
-    cond_timestep = _per_sample(cond_timestep, "cond_timestep")
+    cond_vae_images = _as_sample_batches(cond_vae_images)
+    cond_timestep = _as_sample_batches(cond_timestep)
     if cond_vit_images is not None:
-        cond_vit_images = _per_sample(cond_vit_images, "cond_vit")
+        cond_vit_images = _as_sample_batches(cond_vit_images)
 
-    def _cast_floats(x: Any) -> Any:
-        if isinstance(x, torch.Tensor):
-            return x.to(dtype=pipeline.bundle.dtype) if x.is_floating_point() else x
-        if isinstance(x, (list, tuple)):
-            return type(x)(_cast_floats(e) for e in x)
-        return x
-
-    cond_vae_images = _cast_floats(cond_vae_images)
+    cond_vae_images = [
+        value.to(dtype=pipeline.bundle.dtype) if value.is_floating_point() else value for value in cond_vae_images
+    ]
 
     mm = pipeline.text_embed.embed_for_ar(
         texts,
