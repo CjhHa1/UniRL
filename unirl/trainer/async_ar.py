@@ -413,10 +413,18 @@ class AsyncARTrainer(ARTrainer):
         num_rollouts: int,
         hard_boundary: int,
     ) -> RolloutBatch:
-        """Launch, reap, and consume one completion-order FIFO train batch."""
+        """Reap, launch, and consume one completion-order FIFO train batch.
+
+        Reaping first is what buys the overlap: admission counts the generation
+        being reaped as still in flight otherwise, so at ``max_inflight=1`` the
+        one slot is never free when slots are computed and no successor is ever
+        launched — the loop degenerates to launch, wait, train with an empty
+        pool no matter how large the staleness budget is.
+        """
 
         engine = self._async_engine
         while True:
+            engine.poll()
             slots = self._control.launch_slots(
                 inflight_count=engine.inflight_count,
                 ready_count=engine.ready_count,
@@ -430,7 +438,6 @@ class AsyncARTrainer(ARTrainer):
                     self._build_async_sample(engine.next_gen_id),
                     behavior_version=self._control.rollout_version,
                 )
-            engine.poll()
             batch = engine.pop_next_batch(
                 train_version=self._control.train_version,
                 staleness_budget=self._control.staleness_budget,
