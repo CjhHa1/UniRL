@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING, Any, Dict, List
 import torch
 
 from unirl.models.types.ar import ARSamplingParams
-from unirl.types.conditions import ImageEmbedCondition, ImageLatentCondition
+from unirl.types.conditions import ImageEmbedCondition
 from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.sample import Sample
 
 from ..ar import HunyuanImage3ARParams
-from ..conditions import HunyuanImage3ARConditions
+from ..conditions import HunyuanImage3ARConditions, HunyuanImage3VAECondition
 from .t2t import _resolve_system_prompt, _stop_tokens_for_bot_task, _tokenizer_bot_task
 
 if TYPE_CHECKING:
@@ -102,7 +102,7 @@ def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
         batch_cond_image_info=vit["joint_image_info"],
     )
 
-    cond_vae = ImageLatentCondition(latents=cond_vae_images)
+    cond_vae = HunyuanImage3VAECondition(latents=cond_vae_images)
     cond_vit = ImageEmbedCondition(
         embeds=cond_vit_images,
         attn_mask=vit["vit_kwargs"]["attention_mask"],

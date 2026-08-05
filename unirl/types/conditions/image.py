@@ -26,7 +26,11 @@ class ImageLatentCondition(Condition):
 
     modality: ClassVar[Modality] = Modality.IMAGE
 
-    latents: Optional[torch.Tensor | List[torch.Tensor]] = field(kind=FieldKind.CONCAT, default=None)
+    latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.latents, (list, tuple)):
+            raise TypeError("ImageLatentCondition.latents must be a dense tensor; use a ragged condition type")
 
 
 @dataclass

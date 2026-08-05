@@ -25,13 +25,13 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import torch
 
 from unirl.config.require import require
-from unirl.types.conditions import ImageEmbedCondition, ImageLatentCondition
+from unirl.types.conditions import ImageEmbedCondition
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Images, NativeImages, Texts
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import DiffusionSamplingParams
 
-from ..conditions import HunyuanImage3DiffusionConditions
+from ..conditions import HunyuanImage3DiffusionConditions, HunyuanImage3VAECondition
 from ..seed import make_cpu_generators
 
 if TYPE_CHECKING:
@@ -178,7 +178,7 @@ def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
         fused_cond = fused_full
         fused_uncond = None
 
-    cond_vae = ImageLatentCondition(latents=cond_vae_images)
+    cond_vae = HunyuanImage3VAECondition(latents=cond_vae_images)
     cond_vit = ImageEmbedCondition(
         embeds=cond_vit_images,
         attn_mask=vit_kwargs["attention_mask"],
