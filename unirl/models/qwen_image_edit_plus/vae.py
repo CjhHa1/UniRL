@@ -1,7 +1,7 @@
 """QwenImageEditPlus VAE stages — source-image encoder + (reused) decoder.
 
 ``QwenImageEditPlusVAEEncodeStage`` is the one genuinely new stage: it
-turns source ``NativeImages`` into a :class:`RaggedImageLatentCondition`
+turns source ``NativeImages`` into a :class:`QwenImageEditPlusLatentCondition`
 carrying one VAE-encoded spatial latent ``[16, H_i/8, W_i/8]`` per sample. The diffusion
 step (:class:`QwenImageEditPlusDiffusionStep`) packs both the noise latent
 and this image latent with the same 2×2 channel-pack before concatenating
@@ -21,10 +21,10 @@ from typing import Dict, List
 import torch
 
 from unirl.models.types.codec import EncodeStage
-from unirl.types.conditions import RaggedImageLatentCondition
 from unirl.types.primitives import Images, NativeImages
 
 from .bundle import QwenImageEditPlusBundle
+from .conditions import QwenImageEditPlusLatentCondition
 
 # Resize source images to the upstream 1024-square grid so rollout latent shapes match.
 _VAE_IMAGE_AREA = 1024 * 1024
@@ -46,7 +46,7 @@ def _vae_size_for_aspect(width: int, height: int) -> tuple[int, int]:
     return int(vae_width), int(vae_height)
 
 
-class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedImageLatentCondition]):
+class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, QwenImageEditPlusLatentCondition]):
     """Encode a source image into a VAE-latent condition for token concat.
 
     Pipeline:
@@ -75,7 +75,7 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedI
        skipping this would put rollout/trainsite image latents on a
        different scale than the transformer was trained on).
     6. Return one spatial latent ``[16, H_i/8, W_i/8]`` per sample wrapped in
-       :class:`RaggedImageLatentCondition`. **Do NOT** ``_pack_latents`` here —
+       :class:`QwenImageEditPlusLatentCondition`. **Do NOT** ``_pack_latents`` here —
        the diffusion step packs both noise and image latents together so
        they share the same 2×2 pack logic; the condition carries the
        spatial latent (mirrors ``Flux2KleinConditions.image_latent``).
@@ -85,7 +85,7 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedI
         self.bundle = bundle
 
     @torch.no_grad()
-    def encode(self, images: NativeImages | Images) -> RaggedImageLatentCondition:
+    def encode(self, images: NativeImages | Images) -> QwenImageEditPlusLatentCondition:
         """Encode source pixels into a ragged latent condition.
 
         Args:
@@ -93,7 +93,7 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedI
                 sample in ``[0, 1]``.
 
         Returns:
-            :class:`RaggedImageLatentCondition` with one
+            :class:`QwenImageEditPlusLatentCondition` with one
             ``[16, H_vae_i/8, W_vae_i/8]`` tensor per sample.
         """
         if self.bundle.vae is None:
@@ -151,7 +151,7 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedI
             for local_index, source_index in enumerate(indices):
                 by_index[source_index] = image_latents[local_index]
 
-        return RaggedImageLatentCondition(latents=[by_index[index] for index in range(len(source_pils))])
+        return QwenImageEditPlusLatentCondition(latents=[by_index[index] for index in range(len(source_pils))])
 
 
 __all__ = ["QwenImageEditPlusVAEEncodeStage"]

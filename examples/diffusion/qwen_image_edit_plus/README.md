@@ -11,7 +11,7 @@ Upstream sglang's Edit-Plus preprocessing resizes each source image to
 ~1024x1024 **area while preserving its aspect ratio**, so images with different
 aspect ratios produce different latent grid shapes (`H_img x W_img`). UniRL
 keeps source images in `NativeImages`, captures the resulting condition
-latents as a per-sample `RaggedImageLatentCondition`, and groups equal latent
+latents as a per-sample `QwenImageEditPlusLatentCondition`, and groups equal latent
 shapes inside `predict_noise`. The grouped predictions are restored to the
 original sample order with a differentiable gather, so rollout and replay
 support mixed portrait/landscape/square batches without padding or warping.

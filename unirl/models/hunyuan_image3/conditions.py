@@ -222,7 +222,7 @@ class HunyuanImage3VAECondition(Condition):
 
     The list is the sample axis. Each item retains the upstream encoder layout
     (normally ``[1, C, H_i, W_i]``), unlike the generic dense
-    ``ImageLatentCondition`` and Qwen's spatial ``RaggedImageLatentCondition``.
+    ``ImageLatentCondition`` and Qwen Edit Plus's model-local latent condition.
     """
 
     modality: ClassVar[Modality] = Modality.IMAGE

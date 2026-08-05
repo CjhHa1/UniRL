@@ -22,7 +22,7 @@ Sibling of :mod:`unirl.rollout.engine.sglang_diffusion.adapters.qwen_image`
   survival machinery built for text embeds to also carry ``image_latent`` +
   ``image_latent_sizes`` off the batch). This adapter unpacks the packed
   latent to spatial ``[16, H_img, W_img]`` per sample and emits a
-  :class:`RaggedImageLatentCondition` alongside the inherited ``text`` /
+  :class:`QwenImageEditPlusLatentCondition` alongside the inherited ``text`` /
   ``negative_text`` conditions.
 
 Everything else (packed-trajectory unpack in ``build_segment``, CFG
@@ -43,11 +43,11 @@ from typing import Any, Dict, List
 
 import torch
 
+from unirl.models.qwen_image_edit_plus.conditions import QwenImageEditPlusLatentCondition
 from unirl.rollout.engine.sglang_diffusion import utils
 from unirl.rollout.engine.sglang_diffusion.adapters.base import register_adapter
 from unirl.rollout.engine.sglang_diffusion.adapters.qwen_image import QwenImageAdapter
 from unirl.rollout.engine.sglang_diffusion.backends import RawResult
-from unirl.types.conditions.image import RaggedImageLatentCondition
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import DiffusionSamplingParams
@@ -111,10 +111,10 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
         ``[1, S_img, C*4]``) + ``image_latent_sizes`` (the ``[(vae_width,
         vae_height)]`` pixel pair), unpacks each to spatial
         ``[1, 16, H_img, W_img]``, and preserves the per-sample tensors as a
-        :class:`RaggedImageLatentCondition`.
+        :class:`QwenImageEditPlusLatentCondition`.
         """
         cond_dict = super().build_condition(results)
-        cond_dict["image_latent"] = RaggedImageLatentCondition(latents=self._collect_image_latents(results))
+        cond_dict["image_latent"] = QwenImageEditPlusLatentCondition(latents=self._collect_image_latents(results))
         return cond_dict
 
     def _collect_image_latents(self, results: List[RawResult]) -> List[torch.Tensor]:

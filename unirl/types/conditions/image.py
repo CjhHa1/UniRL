@@ -1,8 +1,6 @@
 """Image conditioning types.
 
 ``ImageLatentCondition`` carries dense VAE latents (img2img, first-frame, etc.).
-``RaggedImageLatentCondition`` carries per-sample spatial latents whose grids
-may differ (Qwen Image Edit Plus mixed-aspect inputs).
 ``ImageEmbedCondition`` carries ViT-style patch embeddings (SigLIP / CLIP
 vision tower output, AR-emitted-image-token re-embeddings). Other roles
 (``ImageMaskedLatentCondition``, ``ImageTokenCondition``) remain deferred
@@ -16,7 +14,7 @@ from typing import Any, ClassVar, List, Optional
 
 import torch
 
-from unirl.distributed.tensor.batch import FieldKind, concat_field, field
+from unirl.distributed.tensor.batch import FieldKind, field
 from unirl.types.conditions.base import Condition, Modality
 
 
@@ -31,23 +29,6 @@ class ImageLatentCondition(Condition):
     def __post_init__(self) -> None:
         if isinstance(self.latents, (list, tuple)):
             raise TypeError("ImageLatentCondition.latents must be a dense tensor; use a ragged condition type")
-
-
-@dataclass
-class RaggedImageLatentCondition(Condition):
-    """Per-sample VAE latents with heterogeneous spatial grids.
-
-    ``latents[i]`` is one ``[C, H_i, W_i]`` tensor. The list is the sample
-    axis, so Batch concat/select/slice retain alignment without padding or
-    changing image geometry.
-    """
-
-    modality: ClassVar[Modality] = Modality.IMAGE
-
-    latents: List[torch.Tensor] = concat_field(default_factory=list)
-
-    def __len__(self) -> int:
-        return len(self.latents)
 
 
 @dataclass
@@ -72,4 +53,4 @@ class ImageEmbedCondition(Condition):
     spatial_shapes: Optional[List[Any]] = field(kind=FieldKind.CONCAT, default=None)
 
 
-__all__ = ["ImageEmbedCondition", "ImageLatentCondition", "RaggedImageLatentCondition"]
+__all__ = ["ImageEmbedCondition", "ImageLatentCondition"]

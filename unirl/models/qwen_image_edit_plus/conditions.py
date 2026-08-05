@@ -2,7 +2,7 @@
 
 Mirrors :class:`unirl.models.qwen_image.QwenImageConditions` (same ``text`` +
 ``negative_text`` slots) and adds one slot:
-``image_latent: RaggedImageLatentCondition`` carrying each VAE-encoded source
+``image_latent: QwenImageEditPlusLatentCondition`` carrying each VAE-encoded source
 image at its aspect-preserving grid. The diffusion step shape-groups and packs it (2×2
 channel-pack, same as the noise latent) and concatenates along the token
 dimension before the transformer call, then slices the prediction back to the
@@ -19,10 +19,27 @@ edit-only, so both the pipeline (``generate(req)``) and the diffusion step
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import ClassVar, Dict, Optional
 
-from unirl.distributed.tensor.batch import Batch, FieldKind, field
-from unirl.types.conditions import Condition, RaggedImageLatentCondition, TextEmbedCondition
+import torch
+
+from unirl.distributed.tensor.batch import Batch, FieldKind, concat_field, field
+from unirl.types.conditions import Condition, Modality, TextEmbedCondition
+
+
+@dataclass
+class QwenImageEditPlusLatentCondition(Condition):
+    """Per-sample ``[C, H_i, W_i]`` source latents at Qwen's native grids.
+
+    The list is the sample axis, so Batch concat/select/slice preserve mixed
+    spatial grids without padding.
+    """
+
+    modality: ClassVar[Modality] = Modality.IMAGE
+    latents: list[torch.Tensor] = concat_field(default_factory=list)
+
+    def __len__(self) -> int:
+        return len(self.latents)
 
 
 @dataclass
@@ -31,7 +48,7 @@ class QwenImageEditPlusConditions(Batch):
 
     text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
     negative_text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
-    image_latent: Optional[RaggedImageLatentCondition] = field(kind=FieldKind.CONCAT, default=None)
+    image_latent: Optional[QwenImageEditPlusLatentCondition] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Condition]) -> "QwenImageEditPlusConditions":
@@ -55,10 +72,10 @@ class QwenImageEditPlusConditions(Batch):
                 f"TextEmbedCondition or absent, got {type(negative_text).__name__}"
             )
         image_latent = d.get("image_latent")
-        if image_latent is not None and not isinstance(image_latent, RaggedImageLatentCondition):
+        if image_latent is not None and not isinstance(image_latent, QwenImageEditPlusLatentCondition):
             raise TypeError(
                 f"QwenImageEditPlusConditions.from_dict: expected d['image_latent'] to be an "
-                f"RaggedImageLatentCondition or absent, got {type(image_latent).__name__}"
+                f"QwenImageEditPlusLatentCondition or absent, got {type(image_latent).__name__}"
             )
         return cls(text=text, negative_text=negative_text, image_latent=image_latent)
 
@@ -78,4 +95,4 @@ class QwenImageEditPlusConditions(Batch):
         return out
 
 
-__all__ = ["QwenImageEditPlusConditions"]
+__all__ = ["QwenImageEditPlusConditions", "QwenImageEditPlusLatentCondition"]

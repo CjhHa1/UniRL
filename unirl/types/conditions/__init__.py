@@ -19,7 +19,7 @@ from typing import Dict
 
 from unirl.types.conditions.base import Condition, Modality
 from unirl.types.conditions.fused_multimodal import FusedMultimodalCondition
-from unirl.types.conditions.image import ImageEmbedCondition, ImageLatentCondition, RaggedImageLatentCondition
+from unirl.types.conditions.image import ImageEmbedCondition, ImageLatentCondition
 from unirl.types.conditions.text import TextEmbedCondition, TextTokenCondition
 
 Conditions = Dict[str, Condition]
@@ -31,7 +31,6 @@ __all__ = [
     "FusedMultimodalCondition",
     "ImageEmbedCondition",
     "ImageLatentCondition",
-    "RaggedImageLatentCondition",
     "Modality",
     "TextEmbedCondition",
     "TextTokenCondition",
