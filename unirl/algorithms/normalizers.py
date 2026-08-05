@@ -5,6 +5,14 @@ from typing import Any, Dict, List, Optional
 import torch
 
 
+def _finite_stats(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if values.numel() == 0:
+        return values.new_zeros(()), values.new_ones(())
+    mean = values.mean()
+    std = values.std(unbiased=False) if values.numel() > 1 else values.new_ones(())
+    return mean, std
+
+
 def normalize_grouped(
     rewards: torch.Tensor,
     group_indices: List[List[int]],
@@ -15,8 +23,9 @@ def normalize_grouped(
 ) -> torch.Tensor:
     """Unified grouped normalization - single implementation for all group-based strategies.
 
-    Normalizes rewards within specified groups, subtracting the group mean and
-    dividing by the group (or global) standard deviation.
+    Normalizes finite rewards within specified groups, subtracting the group mean
+    and dividing by the group (or global) standard deviation. Non-finite rewards
+    receive zero advantage.
 
     Args:
         rewards: Reward values [N]
@@ -30,28 +39,38 @@ def normalize_grouped(
         Advantages tensor [N] with per-group normalization
     """
     advantages = torch.zeros_like(rewards)
-    batch_std = rewards.std() + epsilon if use_global_std else None
+    finite_rewards = rewards[torch.isfinite(rewards)]
+    _, batch_std = _finite_stats(finite_rewards) if use_global_std else (None, None)
 
     for indices in group_indices:
         if not indices:
             continue
 
         group_rewards = rewards[indices]
+        group_finite = torch.isfinite(group_rewards)
+        finite_group_rewards = group_rewards[group_finite]
+        if finite_group_rewards.numel() == 0:
+            continue
 
-        if trim_outliers_ratio > 0 and len(indices) > 2:
-            sorted_rewards, _ = torch.sort(group_rewards)
+        if trim_outliers_ratio > 0 and finite_group_rewards.numel() > 2:
+            sorted_rewards, _ = torch.sort(finite_group_rewards)
             trim_size = int(len(sorted_rewards) * trim_outliers_ratio)
             if trim_size > 0 and trim_size * 2 < len(sorted_rewards):
                 trimmed = sorted_rewards[trim_size:-trim_size]
             else:
                 trimmed = sorted_rewards
-            group_mean = trimmed.mean()
-            group_std = batch_std if use_global_std else (trimmed.std() + epsilon)
+            group_mean, group_std = _finite_stats(trimmed)
         else:
-            group_mean = group_rewards.mean()
-            group_std = batch_std if use_global_std else (group_rewards.std() + epsilon)
+            group_mean, group_std = _finite_stats(finite_group_rewards)
 
-        advantages[indices] = (group_rewards - group_mean) / group_std
+        if use_global_std:
+            group_std = batch_std
+
+        advantages[indices] = torch.where(
+            group_finite,
+            (group_rewards - group_mean) / (group_std + epsilon),
+            torch.zeros_like(group_rewards),
+        )
 
     if clip_max is not None:
         advantages = torch.clamp(advantages, -clip_max, clip_max)
@@ -64,7 +83,7 @@ def normalize_global(
     epsilon: float = 1e-8,
     clip_max: Optional[float] = None,
 ) -> torch.Tensor:
-    """Global normalization across all samples.
+    """Global normalization across all finite samples.
 
     Args:
         rewards: Reward values [N]
@@ -72,11 +91,16 @@ def normalize_global(
         clip_max: If set, clip advantages to [-clip_max, clip_max]
 
     Returns:
-        Advantages tensor [N] with global normalization
+        Advantages tensor [N] with global normalization; non-finite rewards receive
+        zero advantage.
     """
-    mean = rewards.mean()
-    std = rewards.std() + epsilon
-    advantages = (rewards - mean) / std
+    finite = torch.isfinite(rewards)
+    mean, std = _finite_stats(rewards[finite])
+    advantages = torch.where(
+        finite,
+        (rewards - mean) / (std + epsilon),
+        torch.zeros_like(rewards),
+    )
 
     if clip_max is not None:
         advantages = torch.clamp(advantages, -clip_max, clip_max)

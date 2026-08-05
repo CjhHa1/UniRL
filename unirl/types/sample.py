@@ -332,7 +332,7 @@ class Part(Batch):
         """GRPO per-group advantage ``(reward - group_mean) / (group_std + eps)``.
 
         ``scope`` picks the normalization mode: ``"group"`` (default) normalizes
-        per group; ``"global"`` z-scores the whole batch (unbiased std — the
+        per group; ``"global"`` z-scores the whole batch (population std — the
         historical convention) and ignores the grouping knobs. Under
         ``scope="group"``, ``group_layer`` picks the lineage layer whose ancestor
         id labels the groups (the id's first ``layer + 1`` segments): ``None``
@@ -340,7 +340,8 @@ class Part(Batch):
         degenerates to per-sample groups → advantage 0), ``0`` by the root prompt.
         Labels must be group-by-parent contiguous with uniform branching (``fork``
         guarantees this at every layer), so the reduce is one ``view``.
-        ``use_global_std`` keeps per-group means but one batch-wide std. Population
+        ``use_global_std`` keeps per-group means but one batch-wide std. Non-finite
+        rewards are excluded from statistics and receive zero advantage; population
         std (``unbiased=False``) makes ``branch=1`` degenerate to advantage 0.
         """
         if self.rewards is None:
@@ -353,10 +354,15 @@ class Part(Batch):
 
         if scope == "global":
             rewards_g = rewards_local.to(torch.float32)
+            finite = torch.isfinite(rewards_g)
+            finite_rewards = rewards_g[finite]
+            mean = finite_rewards.mean() if finite_rewards.numel() else rewards_g.new_zeros(())
+            centered = torch.where(finite, rewards_g - mean, torch.zeros_like(rewards_g))
             if normalize:
-                adv_g = (rewards_g - rewards_g.mean()) / (rewards_g.std() + eps)
+                std = finite_rewards.std(unbiased=False) if finite_rewards.numel() > 1 else rewards_g.new_ones(())
+                adv_g = centered / (std + eps)
             else:
-                adv_g = rewards_g - rewards_g.mean()
+                adv_g = centered
             return _part_with_field(self, "advantages", adv_g)
 
         layer = group_layer if group_layer is not None else max(self.sample_ids[0].count("/") - 1, 0)
@@ -379,15 +385,21 @@ class Part(Batch):
 
         rewards = rewards_local.to(torch.float32)
         reshaped = rewards.view(n_groups, branch)
-        mean = reshaped.mean(dim=1, keepdim=True)
+        finite = torch.isfinite(reshaped)
+        counts = finite.sum(dim=1, keepdim=True)
+        finite_values = torch.where(finite, reshaped, torch.zeros_like(reshaped))
+        mean = finite_values.sum(dim=1, keepdim=True) / counts.clamp_min(1)
+        centered = torch.where(finite, reshaped - mean, torch.zeros_like(reshaped))
         if normalize:
             if use_global_std:
-                std = rewards.std() + eps
+                finite_rewards = rewards[torch.isfinite(rewards)]
+                std = finite_rewards.std(unbiased=False) if finite_rewards.numel() > 1 else rewards.new_ones(())
             else:
-                std = (reshaped.var(dim=1, unbiased=False, keepdim=True) + eps).sqrt()
-            adv = (reshaped - mean) / std
+                variance = (centered * centered).sum(dim=1, keepdim=True) / counts.clamp_min(1)
+                std = torch.where(counts > 1, variance.sqrt(), torch.ones_like(variance))
+            adv = centered / (std + eps)
         else:
-            adv = reshaped - mean
+            adv = centered
         return _part_with_field(self, "advantages", adv.flatten())
 
     def compute_gae_advantages(
