@@ -53,7 +53,7 @@ from unirl.distributed.group.remote import Remote
 from unirl.distributed.tensor.batch import _move_value
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack.planner import CountPlanner, MicroPlanner, Plan, UpdatePlan, _positive_int
-from unirl.types.rollout_resp import RolloutTrack
+from unirl.types.sample import Part
 from unirl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
@@ -69,9 +69,6 @@ class TrainStepResult:
     has_backward: bool
     micros: List[AlgorithmStepResult]
     metrics: Mapping[str, object]
-    # Per-optimizer-step metrics when num_updates_per_batch > 1 (one Mapping per
-    # update, in order); empty for the single-update path. Lets the trainer log one
-    # wandb point per optimizer step instead of averaging the updates.
     per_update: Tuple[Mapping[str, object], ...] = ()
 
 
@@ -98,7 +95,7 @@ def _aggregate_update_results(results: List["TrainStepResult"]) -> "TrainStepRes
     )
 
 
-def _align_track_to_model(resp_track: RolloutTrack, *, device: torch.device) -> None:
+def _align_track_to_model(part: Part, *, device: torch.device) -> None:
     """Move a track's training inputs onto the model's device — SGLang returns them
     on CPU via Ray IPC. Uses :meth:`Batch.to_device` (recursive; carries
     framework-managed ``_packed_cu_seqlens`` and tensors nested in tuples/dicts) on
@@ -112,11 +109,11 @@ def _align_track_to_model(resp_track: RolloutTrack, *, device: torch.device) -> 
     per-sample ``FieldKind.CONCAT`` lists of tensors (Qwen2.5-VL's ``pixel_values``
     / ``image_grid_thw``), which have no ``.to_device`` of their own — ``_move_value``
     handles Batch / tensor / list / dict / None uniformly."""
-    if resp_track.segment is not None:
-        resp_track.segment = resp_track.segment.to_device(device)
-    resp_track.conditions = {k: _move_value(v, device) for k, v in resp_track.conditions.items()}
-    if resp_track.advantages is not None:
-        resp_track.advantages = resp_track.advantages.to(device=device)
+    if part.segment is not None:
+        part.segment = part.segment.to_device(device)
+    part.conditions = {k: _move_value(v, device) for k, v in part.conditions.items()}
+    if part.advantages is not None:
+        part.advantages = part.advantages.to(device=device)
 
 
 class TrainStack(Remote):
@@ -162,14 +159,10 @@ class TrainStack(Remote):
         self.algorithm = algorithm
         self.micro_batch_size = int(micro_batch_size)
         self.max_grad_norm = float(max_grad_norm)
-        # Composition: the micro-batch grouping strategy. None → the historical
-        # fixed-count behaviour. The planner also owns the algorithm precondition its
-        # grouping requires (e.g. token-budget packing needs a seq-mean loss),
-        # checked once here at construction.
         self.micro_planner: MicroPlanner = micro_planner if micro_planner is not None else CountPlanner()
         self.micro_planner.validate(algorithm)
 
-    def prepare_segment(self, resp_track: RolloutTrack, *, plans: Plan) -> None:
+    def prepare_segment(self, part: Part, *, plans: Plan) -> None:
         """Freeze the π_old anchor once, before the ``num_updates_per_batch`` loop.
 
         No-op if ``segment`` is None. If the algorithm does NOT replay the anchor
@@ -189,19 +182,19 @@ class TrainStack(Remote):
         the shard in order, the per-micro field chunks reassemble with a plain
         ordered ``cat``.
         """
-        if resp_track.segment is None:
+        if part.segment is None:
             return
         algorithm = self.algorithm
         if not algorithm.recomputes_anchor():
-            algorithm.prepare_segment(conditions=resp_track.conditions, segment=resp_track.segment)
+            algorithm.prepare_segment(conditions=part.conditions, segment=part.segment)
             return
         micro_slices = [r for update in plans for r in update]
         if len(micro_slices) == 1:
-            algorithm.prepare_segment(conditions=resp_track.conditions, segment=resp_track.segment)
+            algorithm.prepare_segment(conditions=part.conditions, segment=part.segment)
             return
         collected: Dict[str, List[torch.Tensor]] = {field: [] for field in algorithm.anchor_fields}
         for start, end in micro_slices:
-            micro = resp_track.slice(start, end)
+            micro = part.slice(start, end)
             algorithm.prepare_segment(conditions=micro.conditions, segment=micro.segment)
             for field in collected:
                 value = getattr(micro.segment, field, None)
@@ -212,11 +205,11 @@ class TrainStack(Remote):
                     )
                 collected[field].append(value)
         for field, parts in collected.items():
-            setattr(resp_track.segment, field, torch.cat(parts, dim=0))
+            setattr(part.segment, field, torch.cat(parts, dim=0))
 
     def _run_update(
         self,
-        resp_track: RolloutTrack,
+        part: Part,
         *,
         micros: UpdatePlan,
         training_progress: float,
@@ -227,60 +220,49 @@ class TrainStack(Remote):
         :meth:`~unirl.train.stack.planner.MicroPlanner.arrange` so the forward
         geometry matches the π_old anchor frozen by :meth:`prepare_segment`.
         """
-        if resp_track.advantages is None and getattr(self.algorithm, "requires_advantages", True):
+        if part.advantages is None and getattr(self.algorithm, "requires_advantages", True):
             raise ValueError(
-                f"{type(self).__name__}._run_update: resp_track.advantages is None; "
+                f"{type(self).__name__}._run_update: part.advantages is None; "
                 "upstream advantage pipeline must populate it before training. "
                 "(Supervised algorithms opt out by declaring requires_advantages=False.)"
             )
         if not micros:
             raise ValueError(f"{type(self).__name__}._run_update: empty micros.")
 
-        bs = int(resp_track.batch_size)
+        bs = int(part.batch_size)
         self.fsdp_backend.zero_grad()
 
-        loss_scales, global_weight = self._resolve_loss_scales(resp_track, micros=micros)
+        loss_scales, global_weight = self._resolve_loss_scales(part, micros=micros)
         micro_results: List[AlgorithmStepResult] = []
-        total_loss = 0.0  # sample-weighted local mean; made FSDP-global below
-        weighted_loss_sum = 0.0  # Σ (micro token count × micro token-mean) — token weighting only
+        total_loss = 0.0
+        weighted_loss_sum = 0.0
         has_backward = False
 
         single_micro = len(micros) == 1 and micros[0] == (0, bs)
         last_micro = len(micros) - 1
         for i, (start, end) in enumerate(micros):
-            # Defer the per-block gradient reduce-scatter to the last micro-batch so
-            # it runs once per optimizer step instead of once per micro-batch (no-op
-            # unless defer_grad_sync + ZeRO-2). Must precede the backward.
+            # Defer gradient reduce-scatter until the final microbatch.
             self.fsdp_backend.set_grad_sync(i == last_micro)
-            micro_track = resp_track if single_micro else resp_track.slice(start, end)
+            micro_part = part if single_micro else part.slice(start, end)
             result = self.algorithm.compute_loss_and_backward(
-                conditions=micro_track.conditions,
-                segment=micro_track.segment,
-                advantages=micro_track.advantages,
+                conditions=micro_part.conditions,
+                segment=micro_part.segment,
+                advantages=micro_part.advantages,
                 training_progress=training_progress,
                 loss_scale=loss_scales[i],
             )
             micro_results.append(result)
             if global_weight is None:
-                # Match the sample-share factors used for backward. Summing raw
-                # micro means would make train/loss scale with the micro count
-                # (FlowMatchSFT with bs=1 micros was the visible case).
                 total_loss += result.loss * loss_scales[i]
             else:
-                weighted_loss_sum += result.loss * self._micro_loss_weight(resp_track, start, end)
+                weighted_loss_sum += result.loss * self._micro_loss_weight(part, start, end)
             has_backward = has_backward or result.has_backward
 
         aggregated_metrics: Mapping[str, object] = aggregate_numeric_metrics(
             [r.metrics for r in micro_results if r.metrics]
         )
 
-        # Under defer_grad_sync the deferred reduce-scatter only runs inside a
-        # backward that executes after set_grad_sync(True) — the last micro's. If
-        # that micro skipped backward while earlier ones ran, the accumulated grads
-        # were never synced: the optimizer would silently step on empty grads now,
-        # and the stale unsharded accumulation (which zero_grad cannot reach) would
-        # leak into the NEXT step's reduce-scatter. Fail fast instead — mirrors
-        # fsdp_wrap's stray-trainable guard.
+        # The last microbatch must run backward when deferred gradient sync is enabled.
         if has_backward and not micro_results[-1].has_backward and self.fsdp_backend.grad_sync_deferred:
             raise RuntimeError(
                 f"{type(self).__name__}._run_update: defer_grad_sync deferred the gradient "
@@ -298,8 +280,7 @@ class TrainStack(Remote):
                 type(self).__name__,
             )
         if torch.cuda.is_available():
-            # CUDA memory footprint per optimizer step (leak diagnosis: tp2 path
-            # showed progressive OOM). Surfaces as train/cuda_alloc_gb|cuda_reserved_gb.
+            # CUDA memory footprint per optimizer step (leak diagnosis: tp2 path showed progressive OOM).
             aggregated_metrics = {
                 **dict(aggregated_metrics),
                 "cuda_alloc_gb": torch.cuda.memory_allocated() / 2**30,
@@ -307,17 +288,9 @@ class TrainStack(Remote):
             }
 
         if global_weight is None:
-            # DP_SCATTER gives every data rank the same sample count, so the
-            # optimized sample objective is the mean of these rank-local means.
-            # Reduce over the backend's actual FSDP mesh, matching its gradient
-            # averaging instead of returning rank 0's local proxy.
             (global_loss_sum,) = self._all_reduce_sums([total_loss])
             total_loss = global_loss_sum / self._loss_weight_world()
         else:
-            # Exact global token-mean of this update's loss: every rank enters
-            # this collective (micro counts are rank-symmetric), so the logged
-            # number equals the optimized objective — not a rank-local proxy
-            # (the class of display bugs verl fixed in its #102).
             (global_loss_sum,) = self._all_reduce_sums([weighted_loss_sum])
             total_loss = global_loss_sum / global_weight
             aggregated_metrics = {**dict(aggregated_metrics), "global_loss_weight": global_weight}
@@ -335,11 +308,7 @@ class TrainStack(Remote):
         """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
         self.fsdp_backend.on_rollout_end()
 
-    # ---- loss weighting (micro × DP normalization) --------------------------
-
-    def _resolve_loss_scales(
-        self, resp_track: RolloutTrack, *, micros: UpdatePlan
-    ) -> Tuple[List[float], Optional[float]]:
+    def _resolve_loss_scales(self, part: Part, *, micros: UpdatePlan) -> Tuple[List[float], Optional[float]]:
         """Per-micro ``loss_scale`` factors for one optimizer step.
 
         ``algorithm.loss_weighting`` selects the convention (see
@@ -359,11 +328,6 @@ class TrainStack(Remote):
         weighting = str(getattr(self.algorithm, "loss_weighting", "sample"))
         if weighting == "sample":
             update_total = sum(end - start for start, end in micros)
-            # Sample-share weighting: the algorithm's micro loss is a MEAN over the
-            # micro's sequences (seq-mean agg modes), so the update gradient equals
-            # the whole-update mean only when each micro is weighted by its share of
-            # samples. With equal count-based micros this reduces to 1/len(micros);
-            # with token-budget packing micros vary in size.
             return [(end - start) / update_total for start, end in micros], None
         if weighting != "token":
             raise ValueError(
@@ -371,15 +335,12 @@ class TrainStack(Remote):
             )
         rank_info = getattr(self, "rank_info", None)
         if rank_info is not None and rank_info.sp_size > 1:
-            # Sequence parallelism shards tokens WITHIN a rank's samples; the
-            # denominator group would have to include the SP dimension too
-            # (the exact undercount verl hit at CP>1 in its #5983). Fail loudly
-            # until that path is built and verified.
+            # Reject sequence parallelism until loss denominators include the SP dimension.
             raise ValueError(
                 f"{type(self).__name__}: loss_weighting='token' is not validated under "
                 f"sequence parallelism (sp_size={rank_info.sp_size}); use sp_size=1."
             )
-        weights = [self._micro_loss_weight(resp_track, start, end) for start, end in micros]
+        weights = [self._micro_loss_weight(part, start, end) for start, end in micros]
         local_total = sum(weights)
         (global_total,) = self._all_reduce_sums([local_total])
         if global_total <= 0.0:
@@ -391,9 +352,9 @@ class TrainStack(Remote):
         dp_world = self._loss_weight_world()
         return [w * dp_world / global_total for w in weights], global_total
 
-    def _micro_loss_weight(self, resp_track: RolloutTrack, start: int, end: int) -> float:
+    def _micro_loss_weight(self, part: Part, start: int, end: int) -> float:
         """Valid-token count of one contiguous micro range (loss_mask-aware)."""
-        segment = resp_track.segment
+        segment = part.segment
         if segment is None:
             raise ValueError(f"{type(self).__name__}: loss_weighting='token' requires a segment.")
         cu = segment.cu_seqlens
@@ -420,10 +381,8 @@ class TrainStack(Remote):
         """
         return self.fsdp_backend.all_reduce_loss_sums(values)
 
-    # ---- forward-only evaluation --------------------------------------------
-
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
-    def eval_track(self, resp_track: RolloutTrack) -> Dict[str, float]:
+    def eval_track(self, part: Part) -> Dict[str, float]:
         """Weighted forward-only loss over this shard; returns GLOBAL metrics.
 
         Drives ``algorithm.evaluate_loss(conditions=..., segment=...) ->
@@ -440,19 +399,19 @@ class TrainStack(Remote):
                 f"{type(self).__name__}.eval_track: {type(self.algorithm).__name__} does not "
                 "expose evaluate_loss(conditions=..., segment=...) -> (loss_sum, weight)."
             )
-        self._align_track_inputs(resp_track)
+        self._align_track_inputs(part)
         model = self.fsdp_backend.trainable_module()
         was_training = model.training
         model.eval()
         try:
             with torch.no_grad():
-                bs = resp_track.batch_size
+                bs = part.batch_size
                 mbs = self.micro_batch_size
                 loss_sum = 0.0
                 weight_sum = 0.0
                 for start in range(0, bs, mbs):
                     end = min(start + mbs, bs)
-                    micro = resp_track.slice(start, end)
+                    micro = part.slice(start, end)
                     s, w = eval_fn(
                         conditions=micro.conditions,
                         segment=micro.segment,
@@ -470,7 +429,7 @@ class TrainStack(Remote):
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def train_track(
         self,
-        resp_track: RolloutTrack,
+        part: Part,
         *,
         training_progress: float,
     ) -> TrainStepResult:
@@ -479,7 +438,7 @@ class TrainStack(Remote):
         Combines the steps so worker-side mutations (``segment.sde_logp`` populated
         by ``prepare_segment``) flow into the subsequent update(s) without
         round-tripping through the driver. Dispatched ``DP_SCATTER`` so each DP
-        worker receives its shard of ``resp_track``; per-shard loss/grad_norm/metrics
+        worker receives its shard of ``part``; per-shard loss/grad_norm/metrics
         merge back via ``pytree_merge``.
 
         ``arrange`` reorders the shard (if packing) and builds the contiguous plan;
@@ -487,28 +446,21 @@ class TrainStack(Remote):
         ``num_updates_per_batch`` optimizer steps run over disjoint updates, and
         ``on_rollout_end`` runs once — see :meth:`_run_updates`.
         """
-        # Freeze the old-policy anchor without train-mode stochasticity (notably
-        # dropout). The gradient-bearing replay below switches back to train mode
-        # so HF gradient checkpointing, which is gated on ``self.training``, engages.
         self.fsdp_backend.model.eval()
-        self._align_track_inputs(resp_track)
-        # Arrange once: reorder the track so packed micros are contiguous (no-op for
-        # CountPlanner) and produce the plan. The SAME (track, plans) feed both the
-        # anchor freeze and the train loop so both run the exact same geometry.
-        resp_track, plans = self.micro_planner.arrange(
-            resp_track,
+        self._align_track_inputs(part)
+        part, plans = self.micro_planner.arrange(
+            part,
             num_updates=self.num_updates_per_batch,
             micro_batch_size=self.micro_batch_size,
         )
-        # Opt-in profiler (UNIRL_PROFILE=train profiles this whole step; one-update is
-        # handled in _run_updates). See unirl/train/readme.md.
         from unirl.utils.profiling import profile_scope
 
         profiler = self._train_step_profiler() if profile_scope() == "train" else None
         with profiler.record("train_track") if profiler is not None else nullcontext():
-            self.prepare_segment(resp_track, plans=plans)
+            self.prepare_segment(part, plans=plans)
+            part = self.algorithm.prepare_part(part)
             self.fsdp_backend.model.train()
-            result = self._run_updates(resp_track, plans=plans, training_progress=float(training_progress))
+            result = self._run_updates(part, plans=plans, training_progress=float(training_progress))
         if profiler is not None:
             profiler.step()
         self.on_rollout_end()
@@ -526,7 +478,7 @@ class TrainStack(Remote):
 
     def _run_updates(
         self,
-        resp_track: RolloutTrack,
+        part: Part,
         *,
         plans: Plan,
         training_progress: float,
@@ -543,9 +495,6 @@ class TrainStack(Remote):
         each update's own metrics are attached on ``per_update`` (see
         :func:`_aggregate_update_results`).
         """
-        # UNIRL_PROFILE=one-update: wrap each optimizer update in a one-shot profiler
-        # (fires once, on rank0, past warmup) so the trace captures ONLY one update
-        # (forward + backward + cross-GPU comm + optimizer) — the compute/comm overlap window.
         from unirl.utils.profiling import maybe_profile_update, profile_scope
 
         scope_update = profile_scope() == "one-update"
@@ -557,25 +506,20 @@ class TrainStack(Remote):
                 else nullcontext()
             )
             with cm:
-                results.append(self._run_update(resp_track, micros=micros, training_progress=training_progress))
+                results.append(self._run_update(part, micros=micros, training_progress=training_progress))
         if len(results) == 1:
             return results[0]
         aggregated = _aggregate_update_results(results)
-        # Attach each optimizer step's own metrics (in order) so the trainer can log
-        # one wandb point per optimizer step — the on-policy update0 and the
-        # off-policy update1 stay distinct series instead of being averaged into one
-        # misleading ``ratio_mean``. Structured data on the result object, which the
-        # DP collect (``pytree_cat``) returns whole, so it rides along.
         per_update = tuple(
             {**dict(r.metrics), "loss": float(r.loss), "grad_norm": float(r.grad_norm), "lr": float(r.lr)}
             for r in results
         )
         return replace(aggregated, per_update=per_update)
 
-    def _align_track_inputs(self, resp_track: RolloutTrack) -> None:
+    def _align_track_inputs(self, part: Part) -> None:
         """Move the track onto the model's device; see :func:`_align_track_to_model`."""
         device = next(self.fsdp_backend.trainable_module().parameters()).device
-        _align_track_to_model(resp_track, device=device)
+        _align_track_to_model(part, device=device)
 
     def _current_lr(self) -> float:
         optimizer = self.fsdp_backend.optimizer

@@ -26,14 +26,7 @@ from unirl.types.primitives import Images, NativeImages
 
 from .bundle import QwenImageEditPlusBundle
 
-# Upstream ``QwenImageEditPlusPipelineConfig`` (sglang/diffusers) resizes the
-# source image to a fixed total pixel area of ``1024 * 1024`` while preserving
-# aspect ratio (see ``VAE_IMAGE_SIZE`` in
-# ``sglang/multimodal_gen/configs/pipeline_configs/qwen_image.py``). The
-# trainsite encoder MUST match this — using the generation grid (e.g. 384²)
-# instead yields a different ``image_latent`` shape than the sglang/vllm_omni
-# rollout engines, breaking the trainsite-vs-separate-engine parity contract
-# the recipe YAMLs promise. Mirrors upstream ``calculate_dimensions``.
+# Resize source images to the upstream 1024-square grid so rollout latent shapes match.
 _VAE_IMAGE_AREA = 1024 * 1024
 _VAE_SIZE_ALIGN = 32  # upstream rounds to 32-pixel multiples
 
@@ -53,7 +46,7 @@ def _vae_size_for_aspect(width: int, height: int) -> tuple[int, int]:
     return int(vae_width), int(vae_height)
 
 
-class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages, RaggedImageLatentCondition]):
+class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, RaggedImageLatentCondition]):
     """Encode a source image into a VAE-latent condition for token concat.
 
     Pipeline:
@@ -140,6 +133,7 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages, RaggedImageLaten
                 f"QwenImageEditPlusVAEEncodeStage.encode: height ({height}) and "
                 f"width ({width}) must be divisible by 16 (8× VAE + 2× patchify)"
             )
+        source_pils = images.to_pils()
 
         vae = self.bundle.vae
         device = self.bundle.device
@@ -160,18 +154,17 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages, RaggedImageLaten
         latents_mean = torch.tensor(vae.config.latents_mean, device=device, dtype=torch.float32).view(1, z_dim, 1, 1)
         latents_std = torch.tensor(vae.config.latents_std, device=device, dtype=torch.float32).view(1, z_dim, 1, 1)
 
+        import PIL.Image
+        from torchvision.transforms.functional import pil_to_tensor
+
         by_index: Dict[int, torch.Tensor] = {}
         for (vae_h, vae_w), indices in groups.items():
             resized_items = []
             for index in indices:
-                pixels = pixels_list[index].to(device=device, dtype=torch.float32).unsqueeze(0)
-                if tuple(pixels.shape[-2:]) != (vae_h, vae_w):
-                    pixels = torch.nn.functional.interpolate(
-                        pixels,
-                        size=(vae_h, vae_w),
-                        mode="bilinear",
-                        align_corners=False,
-                    )
+                pil = source_pils[index]
+                if pil.size != (vae_w, vae_h):
+                    pil = pil.resize((vae_w, vae_h), PIL.Image.Resampling.LANCZOS)
+                pixels = pil_to_tensor(pil).to(device=device, dtype=torch.float32).div_(255.0).unsqueeze(0)
                 resized_items.append(pixels)
             pixels_batch = torch.cat(resized_items, dim=0)
             scaled_5d = (pixels_batch * 2.0 - 1.0).unsqueeze(2)

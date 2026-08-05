@@ -50,16 +50,12 @@ batch boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import PIL.Image
 import torch
 
 from unirl.distributed.tensor.batch import Batch, FieldKind, concat_field, field
-
-# ---------------------------------------------------------------------------
-# Per-sample primitives
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -122,11 +118,6 @@ class TextAndImage:
 class TextAndVideo:
     text: Text
     video: Video
-
-
-# ---------------------------------------------------------------------------
-# Batch (packed) primitives
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -201,12 +192,9 @@ class Images(Batch):
             raise ValueError(f"Images.from_list expects per-sample pixels [C, H, W], got {bad}")
         shapes = [tuple(p.shape) for p in pixels_list]
         if len(set(shapes)) != 1:
-            channels = {int(p.shape[0]) for p in pixels_list}
-            if len(channels) != 1:
-                raise ValueError(f"Images.from_list requires a consistent channel count, got {sorted(channels)}")
             raise ValueError(
-                "Images.from_list requires uniform [C, H, W] shapes for dense outputs, "
-                f"got {sorted(set(shapes))}; use NativeImages.from_list for native-resolution inputs"
+                "Images.from_list requires uniform image shapes for a dense batch; "
+                f"got {shapes}. Use NativeImages for native-resolution condition inputs."
             )
         stacked = torch.stack(pixels_list, dim=0)
         return cls(pixels=stacked)
@@ -242,6 +230,8 @@ class Videos(Batch):
 
     frames: torch.Tensor = field(kind=FieldKind.PACKED, default=None)
 
+    uris: Optional[List[str]] = concat_field(default=None)
+
     @property
     def cu_frames(self) -> Optional[torch.Tensor]:
         """Per-sample cumulative frame offsets — alias for :attr:`cu_seqlens`.
@@ -264,10 +254,6 @@ class Videos(Batch):
         channels = {int(frames.shape[1]) for frames in frames_list}
         if len(channels) != 1:
             raise ValueError(f"Videos.from_list requires a consistent channel count, got {sorted(channels)}")
-        # Packed videos can be ragged in time, but torch.cat still requires the
-        # non-packed C/H/W dimensions to match. Resize (not zero-pad) ragged clips
-        # to the batch-max H/W so mixed-resolution inputs don't get black borders;
-        # model-specific encoders still resize to their requested resolution later.
         if len({tuple(frames.shape[1:]) for frames in frames_list}) != 1:
             max_h = max(int(frames.shape[-2]) for frames in frames_list)
             max_w = max(int(frames.shape[-1]) for frames in frames_list)
@@ -279,10 +265,14 @@ class Videos(Batch):
                     ).to(frames.dtype)
                 resized.append(frames)
             frames_list = resized
-        # Delegate to ``Batch.pack`` so the framework computes and
-        # attaches ``_packed_cu_seqlens``. ``pack`` ``torch.cat``s the
-        # per-sample frames along dim 0 internally.
         return cls.pack(frames=frames_list)
+
+    @classmethod
+    def from_uris(cls, uris: List[str]) -> "Videos":
+        """Build frame-less videos carrying batch-aligned source paths."""
+        if not uris:
+            raise ValueError("Cannot build Videos from an empty uris list")
+        return cls(uris=list(uris))
 
     def to_list(self) -> List[Video]:
         cu = self.cu_seqlens
@@ -292,7 +282,9 @@ class Videos(Batch):
 
     def __len__(self) -> int:
         cu = self.cu_seqlens
-        return int(cu.shape[0]) - 1 if cu is not None else 0
+        if cu is not None:
+            return int(cu.shape[0]) - 1
+        return len(self.uris) if self.uris is not None else 0
 
 
 @dataclass
@@ -320,8 +312,6 @@ class Audios(Batch):
     def from_list(cls, items: List[Audio]) -> "Audios":
         if not items:
             raise ValueError("Cannot build Audios from an empty list")
-        # Delegate to ``Batch.pack`` so the framework computes and
-        # attaches ``_packed_cu_seqlens``.
         return cls.pack(waveform=[a.waveform for a in items])
 
     def to_list(self) -> List[Audio]:
@@ -335,11 +325,6 @@ class Audios(Batch):
         return int(cu.shape[0]) - 1 if cu is not None else 0
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _cumsum(values: List[int]) -> List[int]:
     out: List[int] = []
     total = 0
@@ -347,6 +332,29 @@ def _cumsum(values: List[int]) -> List[int]:
         total += int(v)
         out.append(total)
     return out
+
+
+PrimitiveValue = Union[Texts, NativeImages, Images, Videos, Audios]
+
+
+def primitive_modality_key(prim: Texts | NativeImages | Images | Videos | Audios) -> str:
+    """Map a batched primitive to its modality slot key.
+
+    ``Texts -> "text"``, ``NativeImages`` / ``Images -> "image"``,
+    ``Videos -> "video"``, ``Audios -> "audio"`` — the keying convention shared by
+    ``RewardRequest.primitives`` / ``generated`` and the slots
+    :meth:`Sample.conditioning` surfaces. Inverse of a backend's
+    ``preferred_input_kind``.
+    """
+    if isinstance(prim, Texts):
+        return "text"
+    if isinstance(prim, (NativeImages, Images)):
+        return "image"
+    if isinstance(prim, Videos):
+        return "video"
+    if isinstance(prim, Audios):
+        return "audio"
+    raise TypeError(f"primitive_modality_key: unknown primitive type {type(prim).__name__!r}")
 
 
 __all__ = [
@@ -360,6 +368,8 @@ __all__ = [
     "TextAndImage",
     "TextAndVideo",
     "Texts",
+    "PrimitiveValue",
     "Video",
     "Videos",
+    "primitive_modality_key",
 ]

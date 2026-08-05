@@ -5,8 +5,10 @@ engine-emitted text-encoder embeddings: the response translator
 (``rollout/engine/sglang/response.py:_build_text_conditions``) reads, per
 ``GenerationResult``::
 
-    result.prompt_embeds, result.pooled_prompt_embeds, result.encoder_attention_mask,
-    result.negative_prompt_embeds, result.neg_pooled_prompt_embeds
+    result.prompt_embeds, result.audio_prompt_embeds,
+    result.pooled_prompt_embeds, result.encoder_attention_mask,
+    result.negative_prompt_embeds, result.negative_audio_prompt_embeds,
+    result.neg_pooled_prompt_embeds
 
 Stock upstream ``GenerationResult`` / ``OutputBatch`` do NOT carry these
 (fork-only), and upstream ``SamplingParams`` rejects ``return_prompt_embeds`` --
@@ -23,12 +25,12 @@ delegates the read to ``sampling_params``, so the worker sees them as
 
 WHAT THIS PATCH DOES (all setattr / dataclass-field-injection / AROUND-wrap):
 
-1. **OutputBatch + GenerationResult field injection.** Add the 6 embed fields to
+1. **OutputBatch + GenerationResult field injection.** Add the condition fields to
    each dataclass (mirrors the fork's schedule_batch.py / entrypoints/utils.py
    diffs) so they round-trip through ``dataclasses.fields`` / ``replace`` and the
    scheduler<->driver IPC.
 
-2. **Copy the 6 fields off the ``Req`` onto the OutputBatch, gated on the flags**,
+2. **Copy the fields off the ``Req`` onto the OutputBatch, gated on the flags**,
    at the seam where the OutputBatch is actually built. In the MONOLITHIC path the
    terminal ``DecodingStage.forward(batch) -> OutputBatch`` constructs it directly,
    so ``GPUWorker._req_to_output_batch`` is bypassed (it fires only on the disagg
@@ -37,9 +39,11 @@ WHAT THIS PATCH DOES (all setattr / dataclass-field-injection / AROUND-wrap):
    mapping is the fork's (``gpu_worker.py`` OutputBatch construction diff)::
 
        prompt_embeds          <- result.prompt_embeds
+       audio_prompt_embeds    <- result.audio_prompt_embeds
        pooled_prompt_embeds   <- result.pooled_embeds
        encoder_attention_mask <- result.prompt_embeds_mask
        negative_prompt_embeds <- result.negative_prompt_embeds
+       negative_audio_prompt_embeds <- result.negative_audio_prompt_embeds
        neg_pooled_prompt_embeds <- result.neg_pooled_embeds
        negative_attention_mask  <- result.negative_prompt_embeds_mask
 
@@ -75,67 +79,58 @@ from dataclasses import field
 
 logger = logging.getLogger(__name__)
 
-# The 6 conditions fields, in the fork's order. All default to None and are
-# typed ``list[torch.Tensor] | None`` (one entry per text encoder) on
+# The condition fields default to None and are typed
+# ``list[torch.Tensor] | None`` (one entry per text encoder) on
 # OutputBatch; ``Any``-typed on GenerationResult to match its existing style.
 #
-# ``image_latent`` (7th field, Edit-Plus only) is a packed
+# ``image_latent`` is a packed
 # ``[1, S_img, C*4]`` tensor per output. It is represented as
 # ``list[encoder=1][batch]`` so outputs with different ``S_img`` can coexist
-# without padding or concatenating unlike token grids. Only Edit-Plus sets
-# ``batch.image_latent``; T2I models leave it ``None``.
+# without padding or concatenating unlike token grids. Edit-Plus and other
+# image-conditioned families such as FLUX.2 set ``batch.image_latent``;
+# pure T2I requests leave it ``None``.
 #
-# ``image_latent_sizes`` (8th field, Edit-Plus only) carries each sample's
+# ``image_latent_sizes`` (Edit-Plus only) carries each sample's
 # ``vae_image_sizes`` (a ``list[tuple[int, int]]`` of pixel (W, H) pairs from
 # upstream's ``preprocess_vae_image``). It is represented as
 # ``list[encoder][batch][source_image]`` so grouped outputs and mixed-aspect
 # prompts can be merged and sliced exactly like tensor conditions.
 _COND_FIELDS = (
     "prompt_embeds",
+    "audio_prompt_embeds",
     "pooled_prompt_embeds",
     "encoder_attention_mask",
     "negative_prompt_embeds",
+    "negative_audio_prompt_embeds",
     "neg_pooled_prompt_embeds",
     "negative_attention_mask",
     "image_latent",
     "image_latent_sizes",
+    "condition_image_latent_ids",
 )
 
-# result(Req) source attr -> OutputBatch dest attr (the fork's gpu_worker mapping).
-# Positives gate on return_prompt_embeds; negatives on return_negative_prompt_embeds.
-#
-# NOTE (LIN-365): the emitted ``encoder_attention_mask`` carries the model's
-# EMBEDS-ALIGNED mask (``prompt_embeds_mask`` — the very mask the server's DiT
-# attends under, built by the text-encoding stage over the post-prefix-strip
-# embeds), NOT the raw ``prompt_attention_mask`` (which for prefix-stripped models
-# like Qwen-Image is longer than the embeds). The response translator mounts it
-# only when its fused length matches the fused embeds
-# (``utils.tracks.fuse_text_conditions``): Qwen-Image's single-encoder mask matches
-# and flows through to replay; SD3's per-encoder mask fuses to 410 vs the merged
-# 333-token embeds, so it is dropped there (SD3's ``predict_noise`` ignores the
-# mask anyway — see the historic ~68x LoRA-gradient dilution that motivated this
-# guard). This source-of-truth transmit + shape guard replaces both the old global
-# mask-drop and the adapter-side all-ones backfill.
 _POS_MAP = {
     "prompt_embeds": "prompt_embeds",
+    "audio_prompt_embeds": "audio_prompt_embeds",
     "pooled_prompt_embeds": "pooled_embeds",
     "encoder_attention_mask": "prompt_embeds_mask",
 }
 _NEG_MAP = {
     "negative_prompt_embeds": "negative_prompt_embeds",
+    "negative_audio_prompt_embeds": "negative_audio_prompt_embeds",
     "neg_pooled_prompt_embeds": "neg_pooled_embeds",
     "negative_attention_mask": "negative_prompt_embeds_mask",
 }
 
-# Dest fields whose per-encoder tensor may arrive un-batched ``[seq, hidden]``.
-# Single-encoder token-level models (Z-Image / Qwen3) emit a bare ``[seq, hidden]``
-# caption when a chunk encodes a single prompt (``zimage_postprocess_text`` returns
-# ``hidden_states[0][mask]`` for batch-size 1). Only these dests get a batch dim
-# added at ingestion; pooled (``[B, hidden]``) and masks (``[B, seq]``) are already
-# batched and must be sliced/merged as-is.
-_TOKEN_EMBED_DESTS = frozenset({"prompt_embeds", "negative_prompt_embeds"})
+_TOKEN_EMBED_DESTS = frozenset(
+    {
+        "prompt_embeds",
+        "audio_prompt_embeds",
+        "negative_prompt_embeds",
+        "negative_audio_prompt_embeds",
+    }
+)
 
-# Sentinels.
 _OUTPUT_BATCH_FIELDS_SENTINEL = "_unirl_conditions_output_batch_fields"
 _GEN_RESULT_FIELDS_SENTINEL = "_unirl_conditions_gen_result_fields"
 _REQ_TO_OB_SENTINEL = "_unirl_conditions_req_to_ob"
@@ -157,17 +152,6 @@ def patch_conditions() -> None:
         DecodingStage,
     )
 
-    # (1) Field injection on the two dataclasses that carry the conditions.
-    #
-    # Both are registered in ``__dataclass_fields__`` (so they round-trip through
-    # ``fields`` / ``replace`` / ``asdict`` / pickle) AND have their generated
-    # ``__init__`` wrapped to strip-then-reapply the 6 keys -- because once a field
-    # lives in ``__dataclass_fields__``, ``dataclasses.replace`` passes EVERY field
-    # as a kwarg to ``__init__``, and the frozen generated ``__init__`` would reject
-    # the post-hoc ones. GenerationResult is additionally built directly with these
-    # kwargs (``GenerationResult(**common, ...)`` in DiffGenerator.generate, fed by
-    # our _result_common wrap). Same strip-then-reapply pattern patch_sampling_io
-    # uses for SamplingParams.
     _inject_dataclass_fields(
         sb_mod.OutputBatch,
         _OUTPUT_BATCH_FIELDS_SENTINEL,
@@ -179,24 +163,13 @@ def patch_conditions() -> None:
         type_str="Any",
     )
 
-    # (2a) Monolithic path: copy embeds batch(Req) -> OutputBatch at the terminal
-    #      decoding stage (where the OutputBatch is actually built).
     _wrap_decoding_stage(DecodingStage)
 
-    # (2b) Disagg/raw-Req path: copy embeds Req -> OutputBatch in the per-Req
-    #      conversion (this seam never fires on the monolithic decoding path).
     _wrap_req_to_output_batch(gw_mod.GPUWorker)
 
-    # (3) Carry embeds through the grouped (nopp>1) merge.
     _wrap_merge_expanded_output_batches(gw_mod.GPUWorker)
 
-    # (4) Copy/slice embeds OutputBatch -> GenerationResult per output index.
     _wrap_result_common(dg_mod.DiffGenerator)
-
-
-# ------------------------------------------------------------------ #
-# (1) Dataclass field injection (OutputBatch / GenerationResult)
-# ------------------------------------------------------------------ #
 
 
 def _make_dataclass_field(name: str, default, type_str: str):
@@ -214,7 +187,7 @@ def _make_dataclass_field(name: str, default, type_str: str):
 
 
 def _inject_dataclass_fields(cls, sentinel: str, *, type_str: str) -> None:
-    """Register the 6 conditions fields onto a plain ``@dataclass`` ``cls``.
+    """Register the condition fields onto a plain ``@dataclass`` ``cls``.
 
     Registration (``__dataclass_fields__`` entry + class-level ``None`` default)
     makes the fields visible to ``dataclasses.fields`` / ``replace`` / ``asdict``,
@@ -225,7 +198,7 @@ def _inject_dataclass_fields(cls, sentinel: str, *, type_str: str) -> None:
     not know the post-hoc fields; yet once a field is in ``__dataclass_fields__``,
     ``dataclasses.replace`` passes EVERY field as a kwarg, and
     ``GenerationResult`` is built directly as ``GenerationResult(**common, ...)``
-    with our keys. So we wrap ``__init__`` to strip the 6 keys before the strict
+    with our keys. So we wrap ``__init__`` to strip the injected keys before the strict
     generated ``__init__`` runs, then re-apply via ``object.__setattr__`` -- the
     same strip-then-reapply pattern ``patch_sampling_io`` uses for SamplingParams.
     """
@@ -240,8 +213,6 @@ def _inject_dataclass_fields(cls, sentinel: str, *, type_str: str) -> None:
     for name in _COND_FIELDS:
         if name not in own_fields:
             own_fields[name] = _make_dataclass_field(name, None, type_str)
-        # Class-level default so getattr(obj, name) works even when our write
-        # sites did not set it (flags off).
         if name not in cls.__dict__:
             setattr(cls, name, None)
 
@@ -258,11 +229,6 @@ def _inject_dataclass_fields(cls, sentinel: str, *, type_str: str) -> None:
         cls.__init__ = __init__
 
     setattr(cls, sentinel, True)
-
-
-# ------------------------------------------------------------------ #
-# (2) Req -> OutputBatch copy in _req_to_output_batch
-# ------------------------------------------------------------------ #
 
 
 def _wrap_req_to_output_batch(GPUWorker) -> None:
@@ -303,10 +269,9 @@ def _copy_conditions(src, output_batch) -> None:
         _copy_mapped_conditions(src, output_batch, _POS_MAP)
     if getattr(src, "return_negative_prompt_embeds", False):
         _copy_mapped_conditions(src, output_batch, _NEG_MAP)
-    # Edit-Plus image_latent: a single packed [B, S_img, C*4] tensor set by
-    # upstream's ImageVAEEncodingStage. Not gated on a SamplingParams flag —
-    # presence on the batch IS the gate (only Edit-Plus sets it; T2I leaves
-    # it None). Preserve a ragged batch axis: [encoder=1][batch].
+    # Image-conditioned families expose packed [B, S_img, C] latents. Presence
+    # on the batch is the gate; preserve a ragged batch axis
+    # [encoder=1][batch] so mixed token counts do not require padding.
     image_latent = getattr(src, "image_latent", None)
     image_batch_size = None
     if image_latent is not None:
@@ -333,6 +298,17 @@ def _copy_conditions(src, output_batch) -> None:
         per_sample_sizes = _normalize_vae_image_sizes(vae_image_sizes, image_batch_size)
         output_batch.image_latent_sizes = [per_sample_sizes]
 
+    condition_image_latent_ids = getattr(src, "condition_image_latent_ids", None)
+    if condition_image_latent_ids is not None:
+        import torch
+
+        if torch.is_tensor(condition_image_latent_ids):
+            output_batch.condition_image_latent_ids = [condition_image_latent_ids.detach().cpu()]
+        elif isinstance(condition_image_latent_ids, (list, tuple)):
+            output_batch.condition_image_latent_ids = [
+                t.detach().cpu() if torch.is_tensor(t) else t for t in condition_image_latent_ids
+            ]
+
 
 def _normalize_vae_image_sizes(vae_image_sizes, image_batch_size):
     """Normalize upstream size metadata to ``[batch][source_image]``.
@@ -344,33 +320,38 @@ def _normalize_vae_image_sizes(vae_image_sizes, image_batch_size):
     spatial grid.
     """
 
-    def _is_size(value) -> bool:
-        return isinstance(value, tuple) and len(value) == 2
-
     if image_batch_size is None:
         raise ValueError("vae_image_sizes is present but image_latent is missing")
     if not isinstance(vae_image_sizes, (list, tuple)):
         raise TypeError(f"vae_image_sizes must be a list/tuple, got {type(vae_image_sizes).__name__}")
 
     entries = list(vae_image_sizes)
-    if image_batch_size == 1 and entries and all(_is_size(size) for size in entries):
+    if image_batch_size == 1 and entries and all(_is_image_size(size) for size in entries):
         # One sample with one or more source images.
         return [entries]
     if len(entries) != image_batch_size:
         raise ValueError(
             f"image_latent/vae_image_sizes batch mismatch: latents={image_batch_size}, sizes={len(entries)}"
         )
-    if all(_is_size(size) for size in entries):
+    if all(_is_image_size(size) for size in entries):
         # One source image per batch row.
         return [[size] for size in entries]
     if all(
-        isinstance(sample_sizes, (list, tuple)) and sample_sizes and all(_is_size(size) for size in sample_sizes)
+        isinstance(sample_sizes, (list, tuple)) and sample_sizes and all(_is_image_size(size) for size in sample_sizes)
         for sample_sizes in entries
     ):
         return [list(sample_sizes) for sample_sizes in entries]
     raise ValueError(
         "vae_image_sizes must be [(W, H)] or [batch][source_image], "
         f"got {vae_image_sizes!r} for batch size {image_batch_size}"
+    )
+
+
+def _is_image_size(value) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(not isinstance(component, (list, tuple)) for component in value)
     )
 
 
@@ -424,10 +405,6 @@ def _coalesce_duplicate_single_sample_encodes(value):
         return value
     if any(tuple(t.shape) != first_shape for t in value[1:]):
         return value
-    # Value check: only coalesce when the same-shape entries are actually
-    # byte-identical (the shared-list duplicate signature). Same-shape-but-
-    # differing tensors are a genuine multi-encoder whose outputs must NOT be
-    # collapsed — hardens the shape-only heuristic per the examples/ README note.
     if not all(torch.equal(first, t) for t in value[1:]):
         return value
     return [first]
@@ -484,11 +461,6 @@ def _to_cpu_embed_list(value):
         moved = [t.detach().cpu() if torch.is_tensor(t) else t for t in value]
         return moved if isinstance(value, list) else type(value)(moved)
     return value
-
-
-# ------------------------------------------------------------------ #
-# (3) Grouped-merge carry (nopp>1 path)
-# ------------------------------------------------------------------ #
 
 
 def _wrap_merge_expanded_output_batches(GPUWorker) -> None:
@@ -548,19 +520,39 @@ def _merge_conditions(merged, output_batches) -> None:
                 merged_list.append(None)
             elif name == "image_latent":
                 # Ragged [batch] tensors. Token counts may differ by aspect.
-                merged_list.append([row for batch_rows in tensors for row in batch_rows])
+                merged_list.append(_merge_ragged_tensor_batches(tensors))
             elif name == "image_latent_sizes":
                 # Ragged [batch][source_image] metadata. Extend only the batch
                 # axis; keep each sample's source-image list intact.
-                merged_list.append([entry for batch_entries in tensors for entry in batch_entries])
+                merged_list.append(_merge_image_size_batches(tensors))
             else:
                 merged_list.append(torch.cat(tensors, dim=0))
         setattr(merged, name, merged_list)
 
 
-# ------------------------------------------------------------------ #
-# (4) OutputBatch -> GenerationResult copy/slice in _result_common
-# ------------------------------------------------------------------ #
+def _merge_ragged_tensor_batches(values):
+    """Flatten current ``[batch]`` and legacy dense batch representations."""
+    import torch
+
+    rows = []
+    for value in values:
+        if torch.is_tensor(value):
+            rows.extend(value.split(1, dim=0))
+        else:
+            rows.extend(value)
+    return rows
+
+
+def _merge_image_size_batches(values):
+    """Flatten only the batch axis of VAE image-size metadata."""
+    merged = []
+    for value in values:
+        if value and all(_is_image_size(size) for size in value):
+            # Legacy unbatched [source_image] metadata represents one sample.
+            merged.append(list(value))
+        else:
+            merged.extend(list(sample_sizes) for sample_sizes in value)
+    return merged
 
 
 def _wrap_result_common(DiffGenerator) -> None:
@@ -568,7 +560,7 @@ def _wrap_result_common(DiffGenerator) -> None:
 
     ``_result_common(req, output_batch, generation_time, output_index)`` returns
     the kwargs dict shared by every ``GenerationResult(**common, ...)`` call. We
-    add the 6 conditions fields, slicing each per-encoder tensor ``t[idx:idx+1]``
+    add the condition fields, slicing each per-encoder tensor ``t[idx:idx+1]``
     by ``output_index`` so each result carries its own single-sample embeds.
 
     Single path: ``output_batch`` is the per-Req batch (batch dim 1), idx=0 ->
@@ -626,7 +618,7 @@ def _slice_image_size_list(size_list, idx: int):
         if per_encoder is None:
             sliced.append(None)
             continue
-        if per_encoder and all(isinstance(size, tuple) and len(size) == 2 for size in per_encoder):
+        if per_encoder and all(_is_image_size(size) for size in per_encoder):
             if idx != 0:
                 raise IndexError(
                     "legacy unbatched image_latent_sizes metadata only contains output index 0; "

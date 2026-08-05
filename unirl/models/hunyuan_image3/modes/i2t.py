@@ -24,8 +24,7 @@ import torch
 from unirl.models.types.ar import ARSamplingParams
 from unirl.types.conditions import ImageEmbedCondition, ImageLatentCondition
 from unirl.types.primitives import Images, NativeImages, Texts
-from unirl.types.rollout_req import RolloutReq
-from unirl.types.rollout_resp import RolloutResp, RolloutTrack
+from unirl.types.sample import Sample
 
 from ..ar import HunyuanImage3ARParams
 from ..conditions import HunyuanImage3ARConditions
@@ -35,26 +34,27 @@ if TYPE_CHECKING:
     from ..pipeline import HunyuanImage3Pipeline
 
 
-def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
+def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
     """i2t — AR-stage rollout with image comprehension."""
-    texts = req.primitives.get("text")
+    frontier = sample.frontier_gen_part(ARSamplingParams)
+    ar = frontier.sampling_params
+
+    conditioning = sample.conditioning()
+    texts = conditioning[0] if conditioning else None
     if not isinstance(texts, Texts):
         raise TypeError(
             f"HunyuanImage3Pipeline.generate (i2t): "
-            f"req.primitives['text'] must be Texts, "
+            f"prompt from sample.conditioning()[0] must be Texts, "
             f"got {type(texts).__name__ if texts is not None else 'None'}"
         )
-    images = req.primitives.get("image")
+    images = next((c for c in conditioning[1:] if isinstance(c, (NativeImages, Images))), None)
     if not isinstance(images, (NativeImages, Images)):
         raise TypeError(
-            f"HunyuanImage3Pipeline.generate (i2t): "
-            f"req.primitives['image'] must be NativeImages, "
-            f"got {type(images).__name__ if images is not None else 'None'}"
+            "HunyuanImage3Pipeline.generate (i2t): expected a chained NativeImages "
+            "(or legacy uniform Images) input in sample.conditioning(), found none"
         )
 
-    # Build HunyuanImage3ARParams from typed sampling params + model-specific task_config.
-    ar = req.sampling_params.get("ar")
-    model_cfg: Dict[str, Any] = dict(req.task_config.get("ar") or {})
+    model_cfg: Dict[str, Any] = dict((sample.parts[0].control or {}).get("ar") or {})
     ar_params = HunyuanImage3ARParams(
         max_tokens=ar.max_new_tokens if ar is not None else model_cfg.get("max_tokens", 2048),
         temperature=ar.temperature if ar is not None else model_cfg.get("temperature", 0.6),
@@ -76,27 +76,31 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
     )
     system_prompt_list = [system_prompt] * len(texts.texts) if system_prompt is not None else None
 
-    # vit: {"joint_image_info": [[JointImageInfo]]*B, "cond_vit_images":
-    #       list[Tensor [S_b, D]]*B, "vit_kwargs": {"spatial_shapes",
-    #       "attention_mask"}}
     vit = pipeline.vit_encode.encode_for_cond_vit(images)
 
-    # HI3-Instruct represents a cond image as a DUAL VAE + ViT block (the
-    # chat template splices VAE <img> slots + a cond <timestep> alongside the
-    # ViT <img> slots). ``_encode_cond_image`` VAE-encodes the cond image and
-    # returns the per-sample VAE latents + timestep + the (re-shaped) ViT
-    # features the unified-MM forward scatters — same call it2i uses.
-    # ``cfg_factor=1``: the AR/comprehension forward has no CFG batching.
-    # Without the VAE half, the 4096 VAE <img> slots stay bare <img>
-    # embeddings → the model sees garbage and can't comprehend the image.
     cond_vae_images, cond_timestep, cond_vit_images = pipeline.bundle.transformer._encode_cond_image(
         vit["joint_image_info"], cfg_factor=1
     )
 
-    # ``cond_vae_images`` is the raw VAE-input image (float). The AR forward runs
-    # the bf16 VAE encoder WITHOUT autocast (the diffusion path wraps its forward
-    # in torch.autocast; the autoregress loop does not), so a float input hits
-    # bf16 conv weights → dtype mismatch. Cast float tensors to the model dtype.
+    def _per_sample(value: Any, name: str) -> Any:
+        batch_size = len(images)
+        if isinstance(value, torch.Tensor):
+            if value.ndim == 0 or value.shape[0] != batch_size:
+                raise ValueError(
+                    f"HunyuanImage3 i2t {name} batch {tuple(value.shape)} does not match expected size {batch_size}."
+                )
+            return list(value.split(1, dim=0))
+        if isinstance(value, (list, tuple)) and len(value) == batch_size:
+            return list(value)
+        raise TypeError(
+            f"HunyuanImage3 i2t {name} must be a batch tensor or per-sample list, got {type(value).__name__}."
+        )
+
+    cond_vae_images = _per_sample(cond_vae_images, "cond_vae")
+    cond_timestep = _per_sample(cond_timestep, "cond_timestep")
+    if cond_vit_images is not None:
+        cond_vit_images = _per_sample(cond_vit_images, "cond_vit")
+
     def _cast_floats(x: Any) -> Any:
         if isinstance(x, torch.Tensor):
             return x.to(dtype=pipeline.bundle.dtype) if x.is_floating_point() else x
@@ -106,10 +110,6 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
 
     cond_vae_images = _cast_floats(cond_vae_images)
 
-    # Chat template path: pass batch_cond_image_info so the wrapper splices in
-    # the cond-image markers; the resulting cond_vae_image_mask /
-    # cond_vit_image_mask / cond_timestep_scatter_index (now on ``fused``) pin
-    # which ``input_ids`` positions hold the VAE / ViT / timestep scatter targets.
     mm = pipeline.text_embed.embed_for_ar(
         texts,
         bot_task=tok_bot_task,
@@ -160,14 +160,5 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
 
     decoded_texts = pipeline._detokenize_text_segment(text_seg)
 
-    return RolloutResp(
-        tracks={
-            "ar": RolloutTrack(
-                sample_ids=list(req.sample_ids),
-                parent_ids=list(req.group_ids),
-                conditions=ar_conds.to_dict(),
-                segment=text_seg,
-                decoded=decoded_texts,
-            ),
-        }
-    )
+    filled = frontier.fill(segment=text_seg, primitives={"text": decoded_texts}, conditions=ar_conds.to_dict())
+    return sample.with_parts([*sample.parts[:-1], filled])
