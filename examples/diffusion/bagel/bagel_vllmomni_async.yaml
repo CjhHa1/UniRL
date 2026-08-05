@@ -53,9 +53,10 @@ train_fraction: 0.5            # 4 train GPUs + 4 rollout GPUs on an 8-GPU pool
 # depth > 1, i.e. max_staleness >= 1.
 #
 # max_staleness counts whole rollout batches, so admission depth is
-# max_staleness + 1 = 12 regardless of num_updates_per_batch. Note this is also
-# the weight-sync period: 11 batches (22 optimizer updates) elapse between
-# publications, which is a long way past AReaL's recommended eta <= 8 — and
+# max_staleness + 1 = 12 regardless of num_updates_per_batch. That depth is also
+# the weight-sync period: publication happens every 12 batches (24 optimizer
+# updates), and a batch is at most 11 batches (22 updates) stale when it enters
+# training. 11 is a long way past AReaL's recommended eta <= 8 — and
 # FlowGRPO's rollout-anchored ratio is their "naive PPO" arm, with no decoupled
 # objective to absorb the drift. Lower this first if the ratio starts to swing.
 max_inflight: 1

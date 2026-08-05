@@ -70,8 +70,7 @@ class TrainStepResult:
     has_backward: bool
     micros: List[AlgorithmStepResult]
     metrics: Mapping[str, object]
-    # Number of optimizer steps that actually committed. This is zero when an
-    # update had no backward or the backend rejected a non-finite grad norm.
+    # Steps that committed; a no-backward or non-finite grad norm contributes 0.
     optimizer_updates: int
     per_update: Tuple[Mapping[str, object], ...] = ()
 
