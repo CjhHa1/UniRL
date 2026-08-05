@@ -314,19 +314,11 @@ def patch_dit_lora_loader() -> None:
 def _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer):
     """Split HI3's GQA-interleaved fused qkv ``lora_b`` into ``[q, k, v]`` slices.
 
-    HI3 trains LoRA on a fused ``qkv_proj`` whose checkpoint rows are
-    GQA-interleaved — per KV head, ``q_size // k_size`` query slices followed by
-    one K and one V slice — and training loads it as-is. vLLM's base weight is
-    block ``[q; k; v]`` after ``_split_qkv_weight``, so ``lora_b`` has to mirror
-    that reshape-split or every delta lands on the wrong output rows.
-
-    Returns ``None`` when the layout cannot be recognised, leaving the caller to
-    decide its own fallback.
-
-    Shared by the AR merged-linear ``set_lora`` shim
-    (:func:`patch_ar_merged_lora_fused_tensor`) and the DiT manager-level repack
-    (:func:`patch_dit_hi3_fused_qkv_lora_layout`); the two hook different points
-    of the same layout problem, so the arithmetic lives here once.
+    Checkpoint rows are GQA-interleaved — per KV head, ``q_size // k_size`` query
+    slices then one K and one V — while vLLM's base weight is block ``[q; k; v]``
+    after ``_split_qkv_weight``, so ``lora_b`` must mirror that reshape-split or
+    every delta lands on the wrong output rows. Returns ``None`` when the layout
+    cannot be recognised.
     """
     if len(output_sizes) != 3:
         return None
@@ -351,15 +343,10 @@ def patch_dit_hi3_lora_module_alias() -> None:
     """Resolve HI3 DiT LoRA lookups against the checkpoint's module namespace.
 
     vLLM-Omni registers the HI3 DiT wrappers as ``transformer.layers.*`` while
-    PEFT stores the same projections as ``model.layers.*``. The stock lookup
-    strips the ``transformer.`` prefix and tries ``layers.*``, so on HI3 every
-    qkv/o lookup misses: each rank reports ``active_layers=0``, the adapter
-    buffers stay zero, and the engine samples with the frozen base model while
-    training keeps updating a LoRA nothing consumes. Weight-sync checksums
-    still pass, so the failure is silent.
-
-    Only HI3 is affected — the other diffusion backbones are the top-level
-    model, so their vLLM module names already match PEFT's.
+    PEFT stores the same projections as ``model.layers.*``; the stock lookup
+    strips ``transformer.`` and asks for a bare ``layers.*`` that matches neither.
+    Only HI3 — the other diffusion backbones are the top-level model, so their
+    vLLM module names already match PEFT's.
     """
     original = DiffusionLoRAManager._get_lora_weights
     if getattr(original, "_diffrl_hi3_module_alias", False):
@@ -381,18 +368,10 @@ def patch_dit_hi3_lora_module_alias() -> None:
 def patch_dit_hi3_fused_qkv_lora_layout() -> None:
     """Apply the fused-qkv de-interleave on the DiT manager's weight lookup.
 
-    :func:`patch_ar_merged_lora_fused_tensor` already de-interleaves this layout,
-    but it hooks ``MergedQKVParallelLinearWithLoRA.set_lora`` — a vLLM *layer*
-    entry point. The DiT stage resolves its adapters through
-    ``DiffusionLoRAManager._get_lora_weights`` instead and never reaches that
-    ``set_lora``, so on HI3 the layer-level shim does not fire and the fused
-    ``qkv_proj`` stays interleaved. Both hooks are therefore needed; they share
-    :func:`_deinterleave_fused_qkv_lora_b` so the arithmetic is not duplicated.
-
-    Independent of :func:`patch_dit_hi3_lora_module_alias` — that one makes the
-    lookup find anything at all, this one makes what it finds correct — but it
-    must be installed *after* it, so the alias lookup has already resolved the
-    weights this repack consumes.
+    The AR shim hooks ``MergedQKVParallelLinearWithLoRA.set_lora``, which the DiT
+    stage never reaches, so both hooks are needed. Must be installed *after*
+    :func:`patch_dit_hi3_lora_module_alias` — the alias makes the lookup resolve
+    at all, this makes what it resolves correct.
     """
     original = DiffusionLoRAManager._get_lora_weights
     if getattr(original, "_diffrl_hi3_fused_qkv_layout", False):
@@ -410,9 +389,8 @@ def patch_dit_hi3_fused_qkv_lora_layout() -> None:
     def decline(reason: str, module_name: str) -> None:
         """Report a skipped repack once per distinct reason.
 
-        Returning the interleaved layout is the corruption this patch exists to
-        prevent, so no path may skip quietly. Deduplicating by reason rather
-        than by module keeps a 64-layer model to a handful of lines.
+        Returning the interleaved layout is the corruption this patch prevents,
+        so no path may skip quietly.
         """
         if reason in warned:
             return
