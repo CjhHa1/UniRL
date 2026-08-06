@@ -50,7 +50,7 @@ from unirl.models.qwen3_5.validation import validate_qwen3_5_training_contract
 from unirl.rollout.engine.asynchronous import AsyncBatchRolloutEngine, RolloutBatch
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
-from unirl.trainer.async_policy import (
+from unirl.trainer.async_batch_control import (
     AsyncBatchControl,
     log_admission_notes,
     next_hard_boundary,

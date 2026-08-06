@@ -55,7 +55,7 @@ import torch
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.engine.asynchronous import AsyncBatchRolloutEngine, RolloutBatch
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.async_policy import (
+from unirl.trainer.async_batch_control import (
     AsyncBatchControl,
     log_admission_notes,
     next_hard_boundary,
