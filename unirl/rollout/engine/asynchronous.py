@@ -1,32 +1,11 @@
-"""Driver-side async rollout engines and their mechanisms (LIN-631).
+"""Driver-side async rollout engines.
 
-The async half of the engine design: ``synchronous.py`` records the worker-side sync
-contracts (``BaseRolloutEngine`` / ``SyncRolloutEngine``); this module records
-the driver side — everything is single-threaded, lock-free, and ray-free
-(non-blocking dispatch is ``Handle.launch_nowait``).
+Dispatch is non-blocking through ``Handle.launch_nowait``; trainer loops own
+admission and reap/launch ordering.
 
-Mechanisms (policy-free — launch admission, reap/launch ordering, and step
-loops live in the trainers):
-
-- :class:`VersionedBuffer` — payload-agnostic freshness/staleness buffer.
-- :class:`InflightPool` — non-blocking pool of distributed ``generate`` calls.
-
-Engines share launch/poll/quiesce mechanisms but own different queue semantics:
-
-- :class:`AsyncBatchRolloutEngine` — batch granularity over a single-turn
-  engine slab; one ``submit`` is one non-blocking distributed ``generate``.
-  ``(output_version, gen_id)`` are stamped at LAUNCH and one complete
-  generation is consumed atomically in completion-order FIFO.
-- :class:`AsyncAgenticRolloutEngine` — trajectory granularity over the
-  ``AgenticRolloutEngine`` rank-0 coordinator; ``submit`` fires a task-pool
-  drive and completions stream in via ``poll``. Complete groups are buffered
-  with ``(sync_version, gen_id)``; each gen Part independently carries the
-  train-version provenance of its own output.
-
-Submission is deliberately engine-specific (incompatible signatures and
-stamping semantics); the consumer verbs above are what the async trainers
-program against. The colocate barrier path (``AgenticTrainer``) keeps
-calling ``rollout.generate(sample)[0]`` directly.
+``AsyncBatchRolloutEngine`` consumes atomic FIFO batches tagged with
+``output_version``. ``AsyncAgenticRolloutEngine`` buffers completed groups by
+``sync_version`` while each generated Part carries its own output provenance.
 """
 
 from __future__ import annotations
@@ -57,12 +36,7 @@ T = TypeVar("T")
 
 
 class VersionedBuffer(Generic[T]):
-    """Payload-agnostic freshness buffer of ``(payload, version, gen_id)`` items.
-
-    Unifies the batch path's per-``Sample`` buffering and the agentic path's
-    per-group (``List[Sample]``) buffering; stamping semantics belong to the
-    caller (batch stamps at launch, agentic at completion).
-    """
+    """Freshness buffer of ``(payload, version, gen_id)`` items."""
 
     def __init__(self) -> None:
         self._items: List[Tuple[T, int, int]] = []

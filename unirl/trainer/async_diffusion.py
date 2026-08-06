@@ -1,46 +1,18 @@
-"""Async diffusion RL trainer — disaggregated train/rollout slabs for DiT.
+"""Async diffusion RL over separate train and rollout GPU slabs.
 
-Diffusion sibling of :class:`~unirl.trainer.async_ar.AsyncARTrainer`. It subclasses
-:class:`~unirl.trainer.diffusion.DiffusionTrainer` with ``layout="separate"`` to
-REUSE its two-slab build (train slab + dedicated rollout engine slab), the
-cross-slab weight-sync wiring (``RemoteLoraWeightSync`` for the BAGEL recipe;
-``NCCLWeightSync`` is also supported by ``_connect_separate``) and the diffusion
-plumbing (``_build_request_sample`` / ``_drop_decoded`` / ``evaluate`` /
-checkpoint / FlowGRPO ``stack.train_track``).
+This is the diffusion counterpart of
+:class:`~unirl.trainer.async_ar.AsyncARTrainer`, reusing ``DiffusionTrainer``'s
+separate layout, evaluation, checkpointing, and weight-sync wiring.
 
-The async loop runs over the shared
-:class:`~unirl.rollout.engine.asynchronous.AsyncBatchRolloutEngine` (the same engine
-``AsyncARTrainer`` drives) — one single-threaded driver loop over non-blocking
-Ray dispatch, no producer thread and no locks. This trainer supplies only the
-diffusion hooks:
-
-* ``_build_async_sample`` — one data batch → one request ``Sample``.
-* ``_score_completed`` — reward at reap time, then split into tree-complete
-  groups. Generation overlaps training; reward scoring itself does not.
-* ``_advantage_and_train`` — advantage + FlowGRPO optimizer step over the next
-  FIFO rollout batch; it never calls the reward.
-
-Async control uses the same optimizer-update clock as AsyncARTrainer:
-  * ``max_inflight`` — must be ``1`` so a reap-time transfer never competes with
-    a queued generation on the rollout workers.
-  * ``weight_sync_interval`` — how many rollout batches one published snapshot
-    serves. ``1`` publishes after every batch; interval ``K`` derives maximum
-    batch-entry staleness ``K - 1``. The clock underneath counts committed
-    optimizer updates. ``num_updates_per_batch > 1`` therefore also means the
-    updates after the first in a batch run at up to
-    ``num_updates_per_batch - 1`` more updates of drift than the admitted figure.
+``weight_sync_interval`` controls how many batches each snapshot serves.
+``max_inflight`` must remain ``1`` because generation and reap-time transfer use
+the same rollout workers.
 
 ``_next_rollout_batch`` polls (reaps) BEFORE topping up launches, which is what makes the
 overlap fast here: reaping a generation pulls its trajectory segment off the
 rollout slab (the reward's cross-slab localize, an NCCL send issued on the
-rollout workers), so a generation launched ahead of that send blocks it —
-measured ~150s/rollout on BAGEL instead of ~8s. Reaping first hands the send
-idle workers, and the launch that follows still happens before the step returns,
-so the next generation overlaps this step's training.
-
-Draining all in-flight generations before each weight sync is mandatory: the
-rollout workers must be idle while the cross-slab transfer and weight update
-run. Weight sync and teardown therefore quiesce the engine first.
+rollout workers); launching first can block that transfer. Weight sync and
+teardown quiesce the engine.
 """
 
 from __future__ import annotations

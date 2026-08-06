@@ -159,12 +159,7 @@ class SyncRolloutEngine(BaseRolloutEngine, ABC):
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def set_version(self, train_version: int) -> None:
-        """Assign the optimizer-update version of the currently loaded weights.
-
-        Weight transports may receive one model through several buckets, so
-        receiver-local API-call counters are not valid policy provenance. The
-        trainer calls this only after a full weight publication succeeds.
-        """
+        """Set the committed-update version after a full weight publication."""
 
         if train_version < 0:
             raise ValueError(f"train_version must be >= 0, got {train_version}")

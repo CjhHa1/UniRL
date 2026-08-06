@@ -1,26 +1,12 @@
-"""Optimizer-update policy control shared by async AR and diffusion trainers.
+"""Batch admission and publication control for async AR and diffusion.
 
-Two quantities ride the optimizer-update clock and only one of them is staleness:
+``train_version`` and ``published_version`` count committed optimizer updates.
+Their difference is publication lag; batch staleness instead compares
+``train_version`` with the batch's ``output_version``.
 
-* ``staleness`` — updates between the output version that generated a batch and
-  the train weights that batch starts training against, i.e. the off-policyness
-  of the data.
-* ``publish_lag`` — updates between the current train weights and the snapshot
-  last published to the rollout engine. This records sync debt separately from
-  the batch-counted publication cadence.
-
-Recipes state the publication cadence as ``weight_sync_interval`` rollout
-batches. One published rollout snapshot serves that many batches, and the
-oldest batch admitted under it is ``weight_sync_interval - 1`` batches stale.
-``staleness_budget`` converts that derived maximum into the committed-optimizer-
-update clock used by the version ledger.
-
-Batch entry is also the only point the budget is enforced at, which matters once
-``num_updates_per_batch > 1``: the anchor is frozen for the whole batch while the
-weights keep moving, so update ``i`` trains at ``staleness + i - 1`` and the worst
-case any gradient step sees is ``staleness_budget + num_updates_per_batch - 1``.
-That extra span is the in-batch off-policyness PPO already assumes — the frozen
-anchor and ``clip_range`` cover it — so it is deliberately outside the budget.
+One published snapshot serves ``weight_sync_interval`` batches, so maximum
+batch-entry staleness is ``interval - 1``. The budget excludes the additional
+``num_updates_per_batch - 1`` updates that can occur within the admitted batch.
 """
 
 from __future__ import annotations
@@ -160,11 +146,7 @@ def max_publication_gap_batches(
     eval_interval: int = 0,
     save_interval: int = 0,
 ) -> int:
-    """Maximum batches between publications after hard boundaries are applied.
-
-    Eval and checkpoint boundaries can add publications between the regular
-    cadence, so the actual gaps need not be constant.
-    """
+    """Maximum publication gap after eval/checkpoint boundaries are applied."""
 
     max_gap = control.admission_depth
     for interval in (eval_interval, save_interval):
@@ -180,11 +162,7 @@ def log_admission_notes(
     eval_interval: int = 0,
     save_interval: int = 0,
 ) -> None:
-    """Report admission settings whose effect differs from what the value suggests.
-
-    All of these are legitimate configurations, so none is an error; each is a
-    case where the recipe's number does not buy what its name implies.
-    """
+    """Warn when configured admission capacity cannot be fully used."""
 
     max_gap = max_publication_gap_batches(
         control,

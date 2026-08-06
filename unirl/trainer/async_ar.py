@@ -1,37 +1,15 @@
-"""Async autoregressive RL trainer — disaggregated train/rollout slabs.
+"""Async autoregressive RL over separate train and rollout GPU slabs.
 
-Sibling of :class:`~unirl.trainer.ar.ARTrainer` (synchronous + *colocated*:
-rollout engine and FSDP train shard time-share each GPU via ``sleep()/wake_up()``,
-and every step runs ``generate → reward → train`` in series). ``AsyncARTrainer``
-instead places training and rollout on **disjoint GPU slabs**, keeps the engine
-**resident**, pushes weights cross-slab via ``NCCLWeightSync``, and overlaps
-generation with training.
+The rollout engine stays resident while training runs on a disjoint slab.
+``NCCLWeightSync`` publishes weights across the slab boundary.
 
-ONE single-threaded loop (slime's "one trainer loop; async-depth is a knob"
-principle, implemented with UniRL-native non-blocking Ray dispatch instead of
-slime's thread+asyncio). Async freshness rides a clock of committed optimizer
-updates, but the budget is stated in whole rollout batches:
-
-* ``max_inflight`` — how many generations run concurrently (overlap/parallelism
-  depth). ``1`` ≈ the classic one-step pipeline; higher fans out more.
+* ``max_inflight`` caps concurrent generations.
 * ``weight_sync_interval`` — how many rollout batches one published snapshot
-  serves. ``1`` publishes after every batch; interval ``K`` derives maximum
-  batch-entry staleness ``K - 1``. The rollout-anchored PPO ratio remains the
-  numerical source of truth. With ``num_updates_per_batch > 1`` the updates
-  after the first in a batch additionally drift by up to
-  ``num_updates_per_batch - 1``.
+  serves; maximum batch-entry staleness is ``interval - 1``.
 
-Generation runs through :class:`~unirl.rollout.engine.asynchronous.AsyncBatchRolloutEngine`
-(non-blocking Ray futures over the rollout Handle) on the single driver thread —
-no producer thread, no locks; the trainer's ``_next_rollout_batch`` loop owns the policy
-(optimizer-update launch admission, reap-before-launch order). Draining all in-flight generations
-before each weight sync is **mandatory** (the engine corrupts an in-flight
-generation when weights + KV cache update mid-flight); weight sync and teardown
-therefore quiesce the engine first.
-
-Subclasses ``ARTrainer`` to reuse ``_build_request_sample``/``evaluate`` and ``BaseTrainer``
-plumbing, but ``__init__`` calls ``BaseTrainer.__init__`` **directly** (the parent
-opens the colocate ``placement(fraction=1.0)`` block we replace with two slabs).
+The single-threaded driver reaps before launching and quiesces before every
+weight update. It calls ``BaseTrainer.__init__`` directly because ``ARTrainer``
+constructs a colocated layout.
 """
 
 import inspect
