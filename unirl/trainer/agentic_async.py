@@ -115,7 +115,6 @@ class AsyncAgenticTrainer(AgenticTrainer):
         self._dropped_tail_trajectories = 0
         self._dropped_tail_roots = 0
         self._discarded_completed_trajectories = 0
-        self._gt_by_root: Dict[str, Optional[str]] = {}
         self._n = int(samples_per_prompt)
         self._oversample = int(oversample_batch_size) if oversample_batch_size else self.batch_size
         if self._oversample < self.batch_size:
@@ -184,10 +183,6 @@ class AsyncAgenticTrainer(AgenticTrainer):
         self._drive_seq += 1
         fresh = self._build_request_sample(self.data_source.get_samples(self._oversample), rollout_id)
         fresh = fresh.map_sample_ids(lambda sample_id: f"d{self._drive_seq}:{sample_id}")
-        root = fresh.parts[0]
-        root_meta = root.metadata or [None] * len(root.sample_ids)
-        for sid, md in zip(root.sample_ids, root_meta):
-            self._gt_by_root[sid] = (md or {}).get("answer")
         tasks = [prompt for prompt in fresh.split() for _ in range(self._n)]
         tasks.extend(carried)
         return tasks
@@ -206,8 +201,6 @@ class AsyncAgenticTrainer(AgenticTrainer):
 
         roots = {root_of(sample) for sample in carried}
         discarded_completed = self._engine.discard_roots(roots)
-        for root in roots:
-            self._gt_by_root.pop(root, None)
         self._dropped_tail_trajectories += len(carried)
         self._dropped_tail_roots += len(roots)
         self._discarded_completed_trajectories += discarded_completed
@@ -234,11 +227,9 @@ class AsyncAgenticTrainer(AgenticTrainer):
         )
 
     def _drain_buffer(self, n: int, *, max_staleness: int) -> Optional[List[List[Sample]]]:
-        """Drain fresh groups and forget ground truth for stale evictions."""
+        """Drain fresh groups and forget stale evictions."""
         picked = self._engine.drain_freshest(n, max_staleness=max_staleness)
-        for group in self._engine.pop_evicted():
-            if group:
-                self._gt_by_root.pop(root_of(group[0]), None)
+        self._engine.pop_evicted()
         return picked
 
     def _next_batch(self, rollout_id: int) -> List[List[Sample]]:
@@ -276,11 +267,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
         groups. Reuses :class:`AgenticTrainer`'s reward/GRPO/log helpers; the train-part
         assembly mirrors :meth:`AgenticTrainer.train_step` (steps 5-6)."""
         trajs: List[Sample] = [t for group in groups for t in group]
-        roots = [tr.parts[0].sample_ids[0] for tr in trajs]
-        request = Sample.request(Part.input(roots, metadata=[{"answer": self._gt_by_root.get(r)} for r in roots]))
-        rewards, group_ids = self._rewards_and_groups(request, trajs, rollout_id)
-        for root in set(roots):
-            self._gt_by_root.pop(root, None)
+        rewards, group_ids = self._rewards_and_groups(trajs, rollout_id)
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
         advantages = self._group_advantages(rewards, group_ids)

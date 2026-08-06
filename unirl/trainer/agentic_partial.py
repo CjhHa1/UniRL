@@ -33,12 +33,12 @@ import logging
 import sys
 import time
 from collections import Counter
-from typing import Dict, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from unirl.rollout.engine.asynchronous import AsyncAgenticRolloutEngine, root_of
 from unirl.trainer.agentic import AgenticTrainer
 from unirl.trainer.agentic_env import _EnvRewardSource
-from unirl.types.sample import Part, Sample
+from unirl.types.sample import Sample
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,6 @@ class AgenticPartialTrainer(AgenticTrainer):
         self._last_dropped_trajectories = 0
         self._last_dropped_roots = 0
         self._last_discarded_completed_trajectories = 0
-        self._gt_by_root: Dict[str, Optional[str]] = {}
         self._carried: List[Sample] = []
 
     def _build_tasks(self, carried: List[Sample], rollout_id: int) -> List[Sample]:
@@ -79,20 +78,9 @@ class AgenticPartialTrainer(AgenticTrainer):
         self._drive_seq += 1
         fresh = self._build_request_sample(self.data_source.get_samples(self._oversample), rollout_id)
         fresh = fresh.map_sample_ids(lambda sample_id: f"d{self._drive_seq}:{sample_id}")
-        root = fresh.parts[0]
-        root_meta = root.metadata or [None] * len(root.sample_ids)
-        for sid, md in zip(root.sample_ids, root_meta):
-            self._gt_by_root[sid] = (md or {}).get("answer")
         tasks = [prompt for prompt in fresh.split() for _ in range(self._n)]
         tasks.extend(carried)
         return tasks
-
-    def _reconstruct_request(self, trajs: List[Sample]) -> Sample:
-        """A request whose root Part carries every trajectory's root id + ground-truth answer,
-        so the inherited answer-grader (`_rewards_and_groups`) works unchanged. The env-reward
-        subclass ignores it."""
-        roots = [tr.parts[0].sample_ids[0] for tr in trajs]
-        return Sample.request(Part.input(roots, metadata=[{"answer": self._gt_by_root.get(r)} for r in roots]))
 
     def _apply_tail_policy(self, carried: List[Sample], rollout_id: int) -> None:
         """Store safe carried tails or purge abandoned roots and their siblings."""
@@ -107,8 +95,6 @@ class AgenticPartialTrainer(AgenticTrainer):
         self._last_dropped_trajectories = len(carried)
         self._last_dropped_roots = len(roots)
         self._last_discarded_completed_trajectories = self._engine.discard_roots(roots)
-        for root in roots:
-            self._gt_by_root.pop(root, None)
         self._carried = []
         logger.info(
             "rollout %d partial: dropped %d tail trajectories across %d roots; discarded %d completed siblings",
@@ -119,11 +105,9 @@ class AgenticPartialTrainer(AgenticTrainer):
         )
 
     def _drain_buffer(self, n: int, *, max_staleness: int) -> Optional[List[List[Sample]]]:
-        """Drain fresh groups and forget ground truth for stale evictions."""
+        """Drain fresh groups and forget stale evictions."""
         picked = self._engine.drain_freshest(n, max_staleness=max_staleness)
-        for group in self._engine.pop_evicted():
-            if group:
-                self._gt_by_root.pop(root_of(group[0]), None)
+        self._engine.pop_evicted()
         return picked
 
     def _collect_until(self, batch_size: int, rollout_id: int, stale: int) -> List[List[Sample]]:
@@ -219,9 +203,7 @@ class AgenticPartialTrainer(AgenticTrainer):
 
                 groups = self._drive_partial(rollout_id, sync_weights, stale)
                 trajs: List[Sample] = [t for group in groups for t in group]
-                rewards, group_ids = self._rewards_and_groups(self._reconstruct_request(trajs), trajs, rollout_id)
-                for root in {root_of(traj) for traj in trajs}:
-                    self._gt_by_root.pop(root, None)
+                rewards, group_ids = self._rewards_and_groups(trajs, rollout_id)
                 result, mean_reward = self._advantage_train_and_log(
                     trajs,
                     rewards,

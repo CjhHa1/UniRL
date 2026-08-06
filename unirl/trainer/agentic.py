@@ -165,7 +165,7 @@ class AgenticTrainer(ARTrainer):
         trajs: List[Sample] = self.rollout.generate(sample)[0]
         self.rollout.sleep()
 
-        rewards, group_ids = self._rewards_and_groups(sample, trajs, rollout_id)
+        rewards, group_ids = self._rewards_and_groups(trajs, rollout_id)
 
         return self._advantage_train_and_log(
             trajs, rewards, group_ids, rollout_id=rollout_id, training_progress=training_progress, t0=t0
@@ -240,9 +240,7 @@ class AgenticTrainer(ARTrainer):
         )
         return result, mean_reward
 
-    def _rewards_and_groups(
-        self, sample: Sample, trajs: List[Sample], rollout_id: int
-    ) -> Tuple[torch.Tensor, List[str]]:
+    def _rewards_and_groups(self, trajs: List[Sample], rollout_id: int) -> Tuple[torch.Tensor, List[str]]:
         """Per-trajectory scalar reward + GRPO group id (root id) — the overridable
         reward step. Base path grades each trajectory's ``<answer>`` against the
         ground truth via the reward backend (MathVerify / LLM judge); the ``n``
@@ -254,16 +252,15 @@ class AgenticTrainer(ARTrainer):
         precomputed frontier rewards; its frontier carries no ``segment`` so the
         truncation-shaping branch is skipped.
         """
-        root = sample.parts[0]
-        root_meta = root.metadata or [None] * len(root.sample_ids)
-        gt_by_root = {sid: (md or {}).get("answer") for sid, md in zip(root.sample_ids, root_meta)}
         questions: List[str] = []
         predictions: List[str] = []
         answers: List[Optional[str]] = []
         group_ids: List[str] = []
         for tr in trajs:
-            root_id = tr.parts[0].sample_ids[0]
-            q_prim = tr.parts[0].primitives.get("text")
+            root = tr.parts[0]
+            root_id = root.sample_ids[0]
+            metadata = root.metadata[0] if root.metadata else {}
+            q_prim = root.primitives.get("text")
             questions.append(q_prim.texts[0] if (q_prim is not None and q_prim.texts) else "")
             gens = tr.gen_parts()
             term = ""
@@ -271,7 +268,7 @@ class AgenticTrainer(ARTrainer):
             if isinstance(terminal_text, Texts) and terminal_text.texts:
                 term = terminal_text.texts[0]
             predictions.append(_extract_answer(term))
-            answers.append(gt_by_root.get(root_id))
+            answers.append((metadata or {}).get("answer"))
             group_ids.append(root_id)
 
         m = len(trajs)

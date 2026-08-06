@@ -44,13 +44,11 @@ class _EnvRewardSource:
     miss others (it did: LIN-531's variants kept a pre-``7ad5b349`` ``0.0``).
     """
 
-    def _rewards_and_groups(
-        self, sample: Sample, trajs: List[Sample], rollout_id: int
-    ) -> Tuple[torch.Tensor, List[str]]:
+    def _rewards_and_groups(self, trajs: List[Sample], rollout_id: int) -> Tuple[torch.Tensor, List[str]]:
         """Read the env-sourced scalar reward the engine attached to each
         trajectory's last generated Part; group by the shared root id. No reward
         backend, no scoring Sample."""
-        del sample, rollout_id
+        del rollout_id
         values: List[float] = []
         group_ids: List[str] = []
         missing = 0
