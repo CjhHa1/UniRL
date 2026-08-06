@@ -168,7 +168,7 @@ class AgenticTrainer(ARTrainer):
                 manager.sync_weights(self.weight_sync)
             tasks = [prompt for prompt in sample.split() for _ in range(self._n)]
             manager.submit(tasks)
-            groups = manager.collect(int(sample.batch_size))
+            trajs = manager.collect(int(sample.batch_size))
         except BaseException as exc:
             original_error = exc
             try:
@@ -183,8 +183,6 @@ class AgenticTrainer(ARTrainer):
                 if original_error is None:
                     raise
                 logger.exception("AgenticTrainer rollout sleep failed")
-        trajs = [trajectory for group in groups for trajectory in group]
-
         rewards, group_ids = self._rewards_and_groups(trajs, rollout_id)
 
         return self._advantage_train_and_log(

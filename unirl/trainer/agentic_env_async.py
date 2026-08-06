@@ -30,7 +30,7 @@ class AsyncAgenticEnvTrainer(_EnvRewardSource, AsyncAgenticTrainer):
 
     The recipe still carries a (built-but-unused) ``reward`` backend so the shared
     construction path is happy; this trainer never calls it. The reconstructed
-    answer-request that ``AsyncAgenticTrainer._train_on_groups`` passes to
+    answer-request that ``AsyncAgenticTrainer._train_on_trajectories`` passes to
     ``_rewards_and_groups`` is ignored (env reward rides the trajectories).
     """
 

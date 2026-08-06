@@ -3,53 +3,67 @@ from __future__ import annotations
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Deque, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Deque, List, Optional, Sequence
 
 if TYPE_CHECKING:
-    from unirl.distributed.group.handle import Slot
     from unirl.types.sample import Sample
 
 
+Launch = Callable[["Sample"], Any]
+
+
 @dataclass(frozen=True)
-class _Running:
-    slot: int
+class _PendingUnit:
+    sequence: int
+    launcher: int
+    task: "Sample"
     pending: Any
 
 
-class TrajectoryPool:
+class RolloutPool:
     _PROBE_INTERVAL_S = 0.01
 
     def __init__(
         self,
-        slots: List["Slot"],
+        launchers: Sequence[Launch],
+        capacities: Sequence[int],
         *,
-        per_slot_inflight: int,
         worker_max_concurrency: int = 0,
     ) -> None:
-        self._slots = list(slots)
-        self._cap = int(per_slot_inflight)
-        if not self._slots:
-            raise ValueError("TrajectoryPool requires at least one engine slot")
-        if self._cap <= 0:
-            raise ValueError(f"per_slot_inflight must be positive; got {self._cap}")
-        if worker_max_concurrency and worker_max_concurrency < self._cap + 2:
+        self._launchers = list(launchers)
+        self._capacities = [int(capacity) for capacity in capacities]
+        if not self._launchers:
+            raise ValueError("RolloutPool requires at least one launcher")
+        if len(self._launchers) != len(self._capacities):
             raise ValueError(
-                f"worker_max_concurrency ({worker_max_concurrency}) must be >= per_slot_inflight + 2 ({self._cap + 2})"
+                f"RolloutPool launcher/capacity count mismatch: {len(self._launchers)} != {len(self._capacities)}"
             )
-        self._queue: Deque["Sample"] = deque()
-        self._running: List[_Running] = []
-        self._completed: Deque["Sample"] = deque()
+        if any(capacity <= 0 for capacity in self._capacities):
+            raise ValueError(f"RolloutPool capacities must be positive; got {self._capacities}")
+        if worker_max_concurrency:
+            required = max(self._capacities) + 2
+            if worker_max_concurrency < required:
+                raise ValueError(
+                    f"worker_max_concurrency ({worker_max_concurrency}) must be >= launcher capacity + 2 ({required})"
+                )
+
+        self._queue: Deque[tuple[int, "Sample"]] = deque()
+        self._running: List[_PendingUnit] = []
+        self._completed: Deque[_PendingUnit] = deque()
+        self._next_sequence = 0
         self._paused = True
         self._closed = False
         self._failure: Optional[BaseException] = None
         self._condition = threading.Condition()
-        self._thread = threading.Thread(target=self._progress, name="trajectory-pool", daemon=True)
+        self._thread = threading.Thread(target=self._progress, name="rollout-pool", daemon=True)
         self._thread.start()
 
     def add(self, tasks: List["Sample"]) -> None:
         with self._condition:
             self._raise_if_unavailable()
-            self._queue.extend(tasks)
+            for task in tasks:
+                self._queue.append((self._next_sequence, task))
+                self._next_sequence += 1
             self._paused = False
             self._condition.notify_all()
 
@@ -57,12 +71,12 @@ class TrajectoryPool:
         with self._condition:
             self._raise_if_failed()
             self._paused = True
-            tasks = list(self._queue)
+            tasks = [task for _, task in self._queue]
             self._queue.clear()
             self._condition.notify_all()
             return tasks
 
-    def take_completed(self, *, block: bool) -> List["Sample"]:
+    def take_completed(self, *, block: bool) -> List[_PendingUnit]:
         with self._condition:
             while block and not self._completed and self._has_remote_work() and self._failure is None:
                 self._condition.wait()
@@ -71,7 +85,7 @@ class TrajectoryPool:
             self._completed.clear()
             return completed
 
-    def drain(self) -> List["Sample"]:
+    def drain(self) -> List[_PendingUnit]:
         with self._condition:
             while self._running and self._failure is None:
                 self._condition.wait()
@@ -79,6 +93,13 @@ class TrajectoryPool:
             completed = list(self._completed)
             self._completed.clear()
             return completed
+
+    def fail(self, exc: BaseException) -> None:
+        with self._condition:
+            if self._failure is None:
+                self._failure = exc
+            self._paused = True
+            self._condition.notify_all()
 
     @property
     def live(self) -> bool:
@@ -102,7 +123,7 @@ class TrajectoryPool:
     def _raise_if_unavailable(self) -> None:
         self._raise_if_failed()
         if self._closed:
-            raise RuntimeError("TrajectoryPool is closed")
+            raise RuntimeError("RolloutPool is closed")
 
     def _raise_if_failed(self) -> None:
         if self._failure is not None:
@@ -118,8 +139,7 @@ class TrajectoryPool:
                 try:
                     self._launch_to_capacity()
                 except BaseException as exc:
-                    self._failure = exc
-                    self._condition.notify_all()
+                    self._record_failure(exc)
                     return
                 running = list(self._running)
                 if not running:
@@ -127,7 +147,7 @@ class TrajectoryPool:
                     continue
 
             try:
-                ready = [item for item in running if item.pending.ready()]
+                ready = [unit for unit in running if unit.pending.ready()]
             except BaseException as exc:
                 self._record_failure(exc)
                 return
@@ -136,36 +156,33 @@ class TrajectoryPool:
                     self._condition.wait(timeout=self._PROBE_INTERVAL_S)
                 continue
 
-            for item in ready:
-                try:
-                    result = item.pending.result()
-                except BaseException as exc:
-                    self._record_failure(exc)
-                    return
-                with self._condition:
-                    if item not in self._running:
+            with self._condition:
+                for unit in ready:
+                    if unit not in self._running:
                         continue
-                    self._running.remove(item)
-                    self._completed.append(result)
-                    self._condition.notify_all()
+                    self._running.remove(unit)
+                    self._completed.append(unit)
+                self._condition.notify_all()
 
     def _launch_to_capacity(self) -> None:
         if self._paused or self._closed:
             return
-        load = [0] * len(self._slots)
-        for item in self._running:
-            load[item.slot] += 1
-        for index, slot in enumerate(self._slots):
-            while self._queue and load[index] < self._cap:
-                pending = slot.launch("generate", self._queue.popleft())
-                self._running.append(_Running(index, pending))
+        load = [0] * len(self._launchers)
+        for unit in self._running:
+            load[unit.launcher] += 1
+        for index, launch in enumerate(self._launchers):
+            while self._queue and load[index] < self._capacities[index]:
+                sequence, task = self._queue.popleft()
+                pending = launch(task)
+                self._running.append(_PendingUnit(sequence, index, task, pending))
                 load[index] += 1
 
     def _record_failure(self, exc: BaseException) -> None:
         with self._condition:
-            self._failure = exc
+            if self._failure is None:
+                self._failure = exc
             self._paused = True
             self._condition.notify_all()
 
 
-__all__ = ["TrajectoryPool"]
+__all__ = ["RolloutPool"]

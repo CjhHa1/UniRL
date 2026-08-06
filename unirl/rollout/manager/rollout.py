@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from unirl.rollout.manager.buffers import CompletedGroups, PendingGroups, root_of
-from unirl.rollout.manager.dispatch import TrajectoryPool
+from unirl.rollout.manager.dispatch import RolloutPool
 from unirl.rollout.manager.filters import RolloutFilter, identity
 
 if TYPE_CHECKING:
@@ -35,9 +35,11 @@ class RolloutManager:
             if rank_info.tp_rank == 0 and rank_info.pp_rank == 0
         ]
         self._rollout = rollout
-        self._pool = TrajectoryPool(
-            [rollout.slot(index) for index in indices],
-            per_slot_inflight=per_worker_inflight,
+        slots = [rollout.slot(index) for index in indices]
+        launchers = [lambda sample, slot=slot: slot.launch("generate", sample) for slot in slots]
+        self._pool = RolloutPool(
+            launchers,
+            [per_worker_inflight] * len(launchers),
             worker_max_concurrency=worker_max_concurrency,
         )
         self._pending = PendingGroups(group_size)
@@ -50,7 +52,7 @@ class RolloutManager:
         self._ensure_open()
         self._pool.add(list(tasks))
 
-    def collect(self, n: int) -> List[List["Sample"]]:
+    def collect(self, n: int) -> List["Sample"]:
         self._ensure_open()
         n = int(n)
         if n <= 0:
@@ -58,16 +60,16 @@ class RolloutManager:
         selected = []
         try:
             while len(selected) < n:
-                self._route(self._pool.take_completed(block=False), allow_suspended=False)
+                self._route(self._resolve(self._pool.take_completed(block=False)), allow_suspended=False)
                 while len(self._buffer) and len(selected) < n:
                     kept = self._apply_filter(self._buffer.popleft())
                     if kept:
                         selected.append(kept)
                 if len(selected) == n:
-                    return selected
+                    return [sample for group in selected for sample in group]
                 if not self._pool.live:
                     raise RolloutUnderflow(f"needed {n} rollout groups, collected {len(selected)}")
-                self._route(self._pool.take_completed(block=True), allow_suspended=False)
+                self._route(self._resolve(self._pool.take_completed(block=True)), allow_suspended=False)
         except BaseException:
             self._buffer.prepend(selected)
             raise
@@ -78,7 +80,7 @@ class RolloutManager:
         undispatched = self._pool.pause()
         self._rollout.set_stopping(True)
         try:
-            completed = self._pool.drain()
+            completed = self._resolve(self._pool.drain())
         finally:
             self._rollout.set_stopping(False)
 
@@ -104,7 +106,7 @@ class RolloutManager:
 
     def sync_weights(self, weight_sync: object) -> int:
         self._ensure_open()
-        self._route(self._pool.take_completed(block=False), allow_suspended=False)
+        self._route(self._resolve(self._pool.take_completed(block=False)), allow_suspended=False)
         if self._pool.live:
             raise RuntimeError("sync_weights requires no queued or in-flight trajectories")
         weight_sync.sync()
@@ -136,6 +138,16 @@ class RolloutManager:
                 terminal.append(sample)
         self._buffer.extend(self._pending.add(terminal))
         return suspended
+
+    def _resolve(self, units: List[Any]) -> List["Sample"]:
+        samples = []
+        try:
+            for unit in units:
+                samples.append(unit.pending.result())
+        except BaseException as exc:
+            self._pool.fail(exc)
+            raise
+        return samples
 
     def _apply_filter(self, samples: List["Sample"]) -> List["Sample"]:
         candidates = list(samples)

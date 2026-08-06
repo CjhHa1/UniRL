@@ -58,7 +58,7 @@ class AgenticPartialTrainer(AgenticTrainer):
         tasks.extend(carried)
         return tasks
 
-    def _collect_until(self, batch_size: int, rollout_id: int) -> List[List[Sample]]:
+    def _collect_until(self, batch_size: int, rollout_id: int) -> List[Sample]:
         refills = 0
         while True:
             try:
@@ -72,7 +72,7 @@ class AgenticPartialTrainer(AgenticTrainer):
                     ) from None
                 self._rollout_manager.submit(self._build_tasks([], rollout_id))
 
-    def _drive_partial(self, rollout_id: int, sync_weights: bool) -> List[List[Sample]]:
+    def _drive_partial(self, rollout_id: int, sync_weights: bool) -> List[Sample]:
         self.rollout.wake_up()
         active_error: Optional[BaseException] = None
         try:
@@ -81,7 +81,7 @@ class AgenticPartialTrainer(AgenticTrainer):
             tasks = self._build_tasks(self._carried, rollout_id)
             self._carried = []
             self._rollout_manager.submit(tasks)
-            groups = self._collect_until(self.batch_size, rollout_id)
+            trajs = self._collect_until(self.batch_size, rollout_id)
             self._carried = self._rollout_manager.quiesce()
         except BaseException as exc:
             active_error = exc
@@ -102,12 +102,12 @@ class AgenticPartialTrainer(AgenticTrainer):
         logger.info(
             "rollout %d partial: committed %d groups; %s tail=%d trajectories, turns=%s",
             rollout_id,
-            len(groups),
+            self.batch_size,
             self._tail_policy,
             len(carried),
             dict(sorted(Counter(tail_depths).items())),
         )
-        return groups
+        return trajs
 
     # Train loop — override ARTrainer.train (the tail must carry across rollouts)
 
@@ -149,8 +149,7 @@ class AgenticPartialTrainer(AgenticTrainer):
                     resumed and rollout_id == start_rollout
                 )
 
-                groups = self._drive_partial(rollout_id, sync_weights)
-                trajs: List[Sample] = [t for group in groups for t in group]
+                trajs = self._drive_partial(rollout_id, sync_weights)
                 rewards, group_ids = self._rewards_and_groups(trajs, rollout_id)
                 result, mean_reward = self._advantage_train_and_log(
                     trajs,
@@ -160,7 +159,7 @@ class AgenticPartialTrainer(AgenticTrainer):
                     training_progress=training_progress,
                     t0=t0,
                     extra_metrics={
-                        "partial/committed_groups": len(groups),
+                        "partial/committed_groups": self.batch_size,
                         "partial/carried_trajectories": len(self._carried),
                         "partial/weight_version": self._rollout_weight_version,
                     },

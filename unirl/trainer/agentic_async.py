@@ -165,7 +165,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
             },
         )
 
-    def _next_batch(self, rollout_id: int) -> List[List[Sample]]:
+    def _next_batch(self, rollout_id: int) -> List[Sample]:
         refills = 0
         while True:
             try:
@@ -179,13 +179,12 @@ class AsyncAgenticTrainer(AgenticTrainer):
                     ) from None
                 self._submit_drive([], rollout_id)
 
-    def _train_on_groups(
-        self, groups: List[List[Sample]], *, training_progress: float, rollout_id: int, t0: float
+    def _train_on_trajectories(
+        self, trajs: List[Sample], *, training_progress: float, rollout_id: int, t0: float
     ) -> Tuple[TrainStepResult, float]:
         """Reward + GROUP-relative advantage + one step over ``batch_size`` complete
         groups. Reuses :class:`AgenticTrainer`'s reward/GRPO/log helpers; the train-part
         assembly mirrors :meth:`AgenticTrainer.train_step` (steps 5-6)."""
-        trajs: List[Sample] = [t for group in groups for t in group]
         rewards, group_ids = self._rewards_and_groups(trajs, rollout_id)
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
@@ -261,10 +260,10 @@ class AsyncAgenticTrainer(AgenticTrainer):
         try:
             for rollout_id in range(start_rollout, num_rollouts):
                 t0 = time.perf_counter()
-                groups = self._next_batch(rollout_id)
+                trajs = self._next_batch(rollout_id)
                 training_progress = rollout_id / max(1, num_rollouts - 1)
-                result, mean_reward = self._train_on_groups(
-                    groups, training_progress=training_progress, rollout_id=rollout_id, t0=t0
+                result, mean_reward = self._train_on_trajectories(
+                    trajs, training_progress=training_progress, rollout_id=rollout_id, t0=t0
                 )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
 
