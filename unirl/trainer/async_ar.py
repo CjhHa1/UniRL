@@ -7,25 +7,21 @@ instead places training and rollout on **disjoint GPU slabs**, keeps the engine
 **resident**, pushes weights cross-slab via ``NCCLWeightSync``, and overlaps
 generation with training.
 
-ONE single-threaded loop (slime's "one trainer loop; async-depth is a knob"
-principle, implemented with UniRL-native non-blocking Ray dispatch instead of
-slime's thread+asyncio). The async behavior is set by **two numeric knobs**:
+One trainer thread owns result resolution, reward, and optimization. A manager
+progress thread only observes readiness and refills bounded dispatch slots. The
+async behavior is set by **two numeric knobs**:
 
 * ``max_inflight`` — how many generations run concurrently (overlap/parallelism
   depth). ``1`` ≈ the classic one-step pipeline; higher fans out more.
 * ``buffer_max_staleness`` — how many weight-syncs a buffered group may cross
-  before it is evicted. ``0`` (default) = **on-policy**: the launch clamp never
+  before it is filtered. ``0`` (default) = **on-policy**: the launch clamp never
   lets a generation cross a weight sync, so ``ratio≈1`` (the colocate-parity
   regime). ``>0`` = **off-policy continuous buffer**: generations may run ahead
   across syncs, bounded by eviction; the rollout-anchored DRPO ratio absorbs it.
 
-Generation runs through :class:`~unirl.rollout.engine.asynchronous.AsyncBatchRolloutEngine`
-(non-blocking Ray futures over the rollout Handle) on the single driver thread —
-no producer thread, no locks; the trainer's ``_next_step`` loop owns the policy
-(launch ceiling, launch-then-reap order). Draining all in-flight generations
-before each weight sync is **mandatory** (the engine corrupts an in-flight
-generation when weights + KV cache update mid-flight); this is the
-single-threaded ``_drain_all`` quiesce.
+Generation runs through the driver-side :class:`~unirl.rollout.manager.RolloutManager`.
+The trainer owns launch ceilings and launch-before-collect ordering; the manager
+owns bounded dispatch, completion observation, filtering, and quiescence.
 
 Subclasses ``ARTrainer`` to reuse ``_build_request_sample``/``evaluate`` and ``BaseTrainer``
 plumbing, but ``__init__`` calls ``BaseTrainer.__init__`` **directly** (the parent
@@ -36,7 +32,7 @@ import inspect
 import logging
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 from hydra.utils import instantiate
@@ -45,9 +41,10 @@ from omegaconf import DictConfig
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.models.qwen3_5.validation import validate_qwen3_5_training_contract
-from unirl.rollout.engine.asynchronous import AsyncBatchRolloutEngine, launch_ceiling
+from unirl.rollout.manager import RolloutManager, RolloutUnderflow, chain, keep_within_lag, prefer_newer
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
+from unirl.trainer.async_rollout import combine_rollout_chunks, launch_ceiling
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
@@ -181,9 +178,8 @@ class AsyncARTrainer(ARTrainer):
             self._connect_separate(sync_cfg)
 
     def _prepare_rollout(self, *, sync_weights: bool) -> bool:
-        """Sync a resident separate-slab engine without colocate handoffs."""
-        if sync_weights and self.weight_sync is not None:
-            self.weight_sync.sync()
+        """Keep evaluation on the policy version synchronized by the manager."""
+        del sync_weights
         return False
 
     def _finish_rollout(self, *, train_state_offloaded: bool) -> None:
@@ -223,26 +219,10 @@ class AsyncARTrainer(ARTrainer):
         """Consume one data batch and build the request Sample for ``gen_id``."""
         return self._build_request_sample(self.data_source.get_samples(self.batch_size), gen_id)
 
-    def _score_completed(self, gen_id: int, completed: Sample) -> List[Sample]:
-        """Score a completed Sample and split it into tree-complete groups.
-
-        Runs at reap time inside the engine. Scoring must precede
-        ``_drop_decoded`` (the reward reads the decoded primitive). Keyed by
-        ``gen_id`` so media panels behave like the old path. The filled
-        ``Sample`` is self-contained (it carries its input Parts).
-        """
+    def _score_completed(self, gen_id: int, completed: Sample) -> Sample:
         scored = self.reward.score_and_attach(completed)
         self._drop_decoded(scored, rollout_id=gen_id)
-        return scored.split()
-
-    def _drain_all(self) -> None:
-        """Finish + buffer EVERY in-flight generation (the single-threaded quiesce).
-
-        Mandatory before a weight sync (the engine corrupts an in-flight generate
-        when weights + KV cache update mid-flight), before eval/checkpoint (shared
-        engine), and in ``finally`` (no leaked ObjectRefs).
-        """
-        self._async_engine.quiesce()
+        return scored
 
     def _advantage_and_train(
         self,
@@ -308,22 +288,25 @@ class AsyncARTrainer(ARTrainer):
             },
         )
 
-        self._async_engine = AsyncBatchRolloutEngine(
+        self._rollout_manager = RolloutManager(
             self.rollout,
-            complete=self._score_completed,
-            start_gen_id=start_rollout,
+            launchers=[lambda sample: self.rollout.launch_nowait("generate", sample)],
+            capacities=[M],
+            group_size=total_samples_per_prompt(self.sampling_params),
+            filter_fn=chain(keep_within_lag(stale * interval), prefer_newer),
         )
+        self._next_generation_id = start_rollout
+        self._admitted_generations = 0
 
-        if resumed and self.weight_sync is not None:
-            self.weight_sync.sync()
+        if (resumed or self.eval_interval > 0) and self.weight_sync is not None:
+            self._rollout_manager.sync_weights(self.weight_sync, policy_version=start_rollout)
         if self.eval_interval > 0:
             self.evaluate(rollout_id=-1)
 
         try:
             for rollout_id in range(start_rollout, num_rollouts):
                 t0 = time.perf_counter()
-                picked = self._next_step(rollout_id, interval, M, stale, num_rollouts)
-                sample = Sample.concat(picked)
+                sample = self._next_step(rollout_id, interval, M, stale, num_rollouts)
                 training_progress = rollout_id / max(1, num_rollouts - 1)
                 result, mean_reward = self._advantage_and_train(
                     sample, training_progress=training_progress, rollout_id=rollout_id, t0=t0
@@ -331,28 +314,42 @@ class AsyncARTrainer(ARTrainer):
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
 
                 step = rollout_id + 1
-                if self.eval_interval > 0 and step % self.eval_interval == 0:
-                    self._drain_all()
-                    self.evaluate(rollout_id=rollout_id)
-                if save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts):
-                    self._drain_all()
-                    self.maybe_save_checkpoint(
-                        rollout_id, num_rollouts, save_interval=save_interval, save_dir=save_dir, save_mode=save_mode
-                    )
-                if step % interval == 0 and self.weight_sync is not None:
-                    self._drain_all()
-                    self.weight_sync.sync()
-                    self._async_engine.bump_weight_version()
+                need_eval = self.eval_interval > 0 and step % self.eval_interval == 0
+                need_save = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
+                need_sync = step % interval == 0 and self.weight_sync is not None
+                if need_eval or need_save or need_sync:
+                    carried = self._rollout_manager.quiesce()
+                    synced = False
+                    if need_eval and self.weight_sync is not None:
+                        self._rollout_manager.sync_weights(self.weight_sync, policy_version=step)
+                        synced = True
+                    if need_eval:
+                        self.evaluate(rollout_id=rollout_id)
+                    if need_save:
+                        self.maybe_save_checkpoint(
+                            rollout_id,
+                            num_rollouts,
+                            save_interval=save_interval,
+                            save_dir=save_dir,
+                            save_mode=save_mode,
+                        )
+                    if need_sync and not synced:
+                        self._rollout_manager.sync_weights(self.weight_sync, policy_version=step)
+                    if carried:
+                        self._rollout_manager.submit(carried)
         finally:
             active_exception = sys.exc_info()[0] is not None
             try:
-                self._drain_all()
+                self._rollout_manager.quiesce()
             except Exception:
                 if not active_exception:
                     raise
                 logger.exception("Failed to drain in-flight generations during trainer teardown")
             finally:
-                self._finish_wandb()
+                try:
+                    self._rollout_manager.close()
+                finally:
+                    self._finish_wandb()
 
     def _next_step(
         self,
@@ -361,27 +358,24 @@ class AsyncARTrainer(ARTrainer):
         M: int,
         stale: int,
         num_rollouts: int,
-    ) -> List[Sample]:
-        """Top up launches, reap completed generations, and return the freshest
-        ``batch_size`` scored group Samples for ``rollout_id`` (blocking on the
-        oldest in-flight generation if the buffer is short).
-
-        The launch clamp is the load-bearing on-policy guarantee: a generation
-        launched now is consumed later, so bound how far ahead we launch to
-        ``stale`` weight-syncs. ``stale=0`` ⇒ never launch into a future
-        sync-window ⇒ no generation crosses a sync ⇒ ``ratio≈1`` (on-policy).
-        """
-        engine = self._async_engine
+    ) -> Sample:
         while True:
             ceiling = launch_ceiling(rollout_id, sync_interval=interval, max_staleness=stale, num_rollouts=num_rollouts)
-            while engine.next_gen_id < ceiling and engine.inflight < M:
-                engine.submit(self._build_async_sample(engine.next_gen_id))
-            engine.poll()
-            picked = engine.drain_freshest(self.batch_size, max_staleness=stale)
-            engine.pop_evicted()
-            if picked is not None:
-                return picked
-            if engine.inflight:
-                engine.wait_oldest()
-            else:
-                raise RuntimeError("async rollout buffer underflow with no in-flight generations")
+            self._top_up(ceiling, M)
+            try:
+                chunks = self._rollout_manager.collect(self.batch_size)
+            except RolloutUnderflow:
+                self._admitted_generations = 0
+                if self._next_generation_id >= ceiling:
+                    raise RuntimeError("async rollout buffer underflow with no admissible generations") from None
+                continue
+            self._admitted_generations -= 1
+            completed, gen_id = combine_rollout_chunks(chunks)
+            return self._score_completed(gen_id, completed)
+
+    def _top_up(self, ceiling: int, capacity: int) -> None:
+        while self._admitted_generations < capacity and self._next_generation_id < ceiling:
+            gen_id = self._next_generation_id
+            self._rollout_manager.submit([self._build_async_sample(gen_id)])
+            self._next_generation_id += 1
+            self._admitted_generations += 1
