@@ -60,12 +60,12 @@ class AgenticPartialTrainer(AgenticTrainer):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self._n = int(samples_per_prompt)
-        self._oversample = int(oversample_batch_size) if oversample_batch_size else int(self.batch_size)
+        self._n = samples_per_prompt
+        self._oversample = oversample_batch_size or self.batch_size
         if self._oversample < self.batch_size:
             raise ValueError(f"oversample_batch_size={self._oversample} must be >= batch_size={self.batch_size}")
         self._buffer_max_staleness = buffer_max_staleness
-        self._tail_policy = str(tail_policy)
+        self._tail_policy = tail_policy
         if self._tail_policy not in ("carry", "drop"):
             raise ValueError(f"tail_policy must be 'carry' or 'drop'; got {self._tail_policy!r}")
         self._drive_seq = 0

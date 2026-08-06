@@ -164,7 +164,7 @@ class VLLMOmniRolloutEngine(SyncRolloutEngine):
 
     @property
     def is_offloaded(self) -> bool:
-        return bool(self._is_offloaded)
+        return self._is_offloaded
 
     def health_check(self) -> bool:
         return self._backend.ping()

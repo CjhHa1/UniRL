@@ -51,11 +51,11 @@ def _rollout_dp_size_from_parsed_config(rollout_parsed: dict, *, world_size: int
     init_kwargs = {key: value for key, value in rollout_parsed.items() if key != "role_cls"}
     sp_size, tp_size, pp_size, _ = _parallel_shape_from_init_kwargs(
         init_kwargs,
-        int(world_size),
+        world_size,
         role_cls,
     )
     non_dp_width = sp_size if sp_size > 1 else tp_size * pp_size
-    return int(world_size) // int(non_dp_width)
+    return world_size // non_dp_width
 
 
 class AsyncARTrainer(ARTrainer):
@@ -137,7 +137,7 @@ class AsyncARTrainer(ARTrainer):
             )
         # Require rollout batches to divide evenly across train and rollout slabs.
         self._rollout_devices = self.num_devices - self._train_devices
-        prompts = int(self.batch_size)
+        prompts = self.batch_size
         total = prompts * total_samples_per_prompt(self.sampling_params)
         if total % self._train_devices != 0:
             raise ValueError(

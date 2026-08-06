@@ -99,7 +99,7 @@ class CheckpointWeightSync(FullWeightSync):
         """
         import torch
 
-        version = int(self.version)
+        version = self.version
         path = os.path.join(self._dir, f"weights_v{version}.pt")
         marker = path + ".ready"
 

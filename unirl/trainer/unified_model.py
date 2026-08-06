@@ -372,9 +372,9 @@ class UnifiedModelTrainer(BaseTrainer):
         prompts = input_part.primitives.get("text")
         if not isinstance(prompts, Texts):
             raise TypeError("UnifiedModelTrainer.run_rollout: input Part must contain a 'text' Texts primitive.")
-        n_rec = int(ar_shell.sampling_params.samples_per_prompt)
-        n_img = int(image_shell.sampling_params.samples_per_prompt)
-        rid = int(self._dump_rollout_id)
+        n_rec = ar_shell.sampling_params.samples_per_prompt
+        n_img = image_shell.sampling_params.samples_per_prompt
+        rid = self._dump_rollout_id
 
         ar_texts = Texts(texts=[t for t in prompts.texts for _ in range(n_rec)])
         n_ar = len(ar_texts.texts)

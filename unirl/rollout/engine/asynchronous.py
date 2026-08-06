@@ -43,7 +43,7 @@ class VersionedBuffer(Generic[T]):
         self._evicted: List[T] = []
 
     def put(self, payload: T, *, version: int, gen_id: int) -> None:
-        self._items.append((payload, int(version), int(gen_id)))
+        self._items.append((payload, version, gen_id))
 
     def size(self) -> int:
         return len(self._items)
@@ -148,7 +148,7 @@ class InflightPool:
 
     def __init__(self, rollout: Any, *, start_gen_id: int = 0) -> None:
         self._rollout = rollout
-        self._next_gen_id = int(start_gen_id)
+        self._next_gen_id = start_gen_id
         self._jobs: List[_InflightJob] = []
 
     @property
@@ -318,7 +318,7 @@ class PendingGroups:
     """
 
     def __init__(self, n: int) -> None:
-        self._n = int(n)
+        self._n = n
         self._by_root: Dict[str, List["Sample"]] = {}
 
     def add_completed(self, trajs: List["Sample"]) -> None:
@@ -361,7 +361,7 @@ class AsyncAgenticRolloutEngine:
         self._rollout = rollout
         self._pending = PendingGroups(group_size)
         self._buffer: VersionedBuffer[List["Sample"]] = VersionedBuffer()
-        self._gen_id = int(start_gen_id)
+        self._gen_id = start_gen_id
         self._sync_version = 0
         self._drive_live = False
 
