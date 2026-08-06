@@ -1,4 +1,4 @@
-from unirl.rollout.manager.filters import RolloutFilter, chain, drop_incomplete, identity, keep_within_lag
+from unirl.rollout.manager.filters import RolloutFilter, chain, drop_incomplete, identity, keep_within_lag, prefer_newer
 from unirl.rollout.manager.rollout import RolloutManager, RolloutUnderflow
 
 __all__ = [
@@ -9,4 +9,5 @@ __all__ = [
     "drop_incomplete",
     "identity",
     "keep_within_lag",
+    "prefer_newer",
 ]

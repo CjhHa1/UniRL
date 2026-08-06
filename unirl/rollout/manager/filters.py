@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, List
+from typing import TYPE_CHECKING, Callable, List, Set
 
 if TYPE_CHECKING:
     from unirl.types.sample import Sample
@@ -9,9 +9,16 @@ RolloutFilter = Callable[[List["Sample"], int], List["Sample"]]
 
 
 def _is_incomplete(sample: "Sample") -> bool:
-    if not sample.parts:
+    generated = sample.gen_parts()
+    if not generated:
         return True
-    return sample.parts[-1].harness_status not in ("completed", "failed")
+    return sample.parts[-1].harness_status == "suspended"
+
+
+def _roots_of(sample: "Sample") -> Set[str]:
+    if not sample.parts:
+        return set()
+    return set(sample.root_group_ids(0))
 
 
 def identity(samples: List["Sample"], current_version: int) -> List["Sample"]:
@@ -33,7 +40,8 @@ def chain(*filters: RolloutFilter) -> RolloutFilter:
 
 def drop_incomplete(samples: List["Sample"], current_version: int) -> List["Sample"]:
     del current_version
-    return [] if any(_is_incomplete(sample) for sample in samples) else samples
+    rejected = set().union(*(_roots_of(sample) for sample in samples if _is_incomplete(sample)))
+    return [sample for sample in samples if not (_roots_of(sample) & rejected)]
 
 
 def keep_within_lag(max_lag: int) -> RolloutFilter:
@@ -42,19 +50,34 @@ def keep_within_lag(max_lag: int) -> RolloutFilter:
         raise ValueError(f"max_lag must be non-negative; got {max_lag}")
 
     def apply(samples: List["Sample"], current_version: int) -> List["Sample"]:
-        versions = []
+        rejected = set()
         for sample in samples:
+            versions = []
             for part in sample.gen_parts():
                 if part.weight_version is None:
                     raise RuntimeError("generated rollout has no weight version")
                 versions.append(int(part.weight_version))
-        if versions and max(versions) > current_version:
-            raise RuntimeError("rollout has a future weight version")
-        if versions and current_version - min(versions) > max_lag:
-            return []
-        return samples
+            if versions and max(versions) > current_version:
+                raise RuntimeError("rollout has a future weight version")
+            if versions and current_version - min(versions) > max_lag:
+                rejected.update(_roots_of(sample))
+        return [sample for sample in samples if not (_roots_of(sample) & rejected)]
 
     return apply
 
 
-__all__ = ["RolloutFilter", "chain", "drop_incomplete", "identity", "keep_within_lag"]
+def prefer_newer(samples: List["Sample"], current_version: int) -> List["Sample"]:
+    del current_version
+
+    def rollout_id(sample: "Sample") -> int:
+        if not sample.parts or not sample.parts[0].metadata:
+            raise RuntimeError("rollout Sample has no root rollout_id metadata")
+        values = {row.get("rollout_id") for row in sample.parts[0].metadata}
+        if None in values or len(values) != 1:
+            raise RuntimeError(f"rollout Sample must carry one root rollout_id; got {values}")
+        return int(next(iter(values)))
+
+    return sorted(samples, key=rollout_id, reverse=True)
+
+
+__all__ = ["RolloutFilter", "chain", "drop_incomplete", "identity", "keep_within_lag", "prefer_newer"]

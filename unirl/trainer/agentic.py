@@ -118,10 +118,18 @@ class AgenticTrainer(ARTrainer):
         self._rollout_manager: Optional[RolloutManager] = None
 
     def _create_rollout_manager(self, filter_fn: RolloutFilter = identity) -> RolloutManager:
+        indices = [
+            index
+            for index, rank_info in enumerate(self.rollout.rank_infos)
+            if rank_info.tp_rank == 0 and rank_info.pp_rank == 0
+        ]
+        slots = [self.rollout.slot(index) for index in indices]
+        launchers = [lambda sample, slot=slot: slot.launch("generate", sample) for slot in slots]
         return RolloutManager(
             self.rollout,
+            launchers=launchers,
+            capacities=[self._per_worker_inflight] * len(launchers),
             group_size=self._n,
-            per_worker_inflight=self._per_worker_inflight,
             worker_max_concurrency=self._worker_max_concurrency,
             filter_fn=filter_fn,
         )
@@ -165,7 +173,7 @@ class AgenticTrainer(ARTrainer):
         original_error: Optional[BaseException] = None
         try:
             if sync_weights and self.weight_sync is not None:
-                manager.sync_weights(self.weight_sync)
+                manager.sync_weights(self.weight_sync, policy_version=rollout_id)
             tasks = [prompt for prompt in sample.split() for _ in range(self._n)]
             manager.submit(tasks)
             trajs = manager.collect(int(sample.batch_size))

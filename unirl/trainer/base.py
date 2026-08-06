@@ -61,10 +61,13 @@ def prepare_input_sample(
         raise ValueError(f"{caller}: unsupported input primitive keys: {sorted(unsupported)}")
 
     namespaced = inputs.map_sample_ids(lambda sample_id: f"r{rollout_id}:{sample_id}")
-    if root_control is None:
-        return namespaced
     root = namespaced.parts[0]
-    root = replace(root, control={**root.control, **root_control})
+    metadata = root.metadata or [{} for _ in root.sample_ids]
+    if len(metadata) != len(root.sample_ids):
+        raise ValueError(f"{caller}: root metadata has {len(metadata)} rows for {len(root.sample_ids)} root samples.")
+    root = replace(root, metadata=[{**(row or {}), "rollout_id": int(rollout_id)} for row in metadata])
+    if root_control is not None:
+        root = replace(root, control={**root.control, **root_control})
     return namespaced.with_parts([root, *namespaced.parts[1:]])
 
 

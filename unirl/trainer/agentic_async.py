@@ -253,7 +253,10 @@ class AsyncAgenticTrainer(AgenticTrainer):
         )
 
         if start_rollout < num_rollouts and start_rollout and self.weight_sync is not None:
-            self._rollout_weight_version = self._rollout_manager.sync_weights(self.weight_sync)
+            self._rollout_weight_version = self._rollout_manager.sync_weights(
+                self.weight_sync,
+                policy_version=start_rollout,
+            )
         if start_rollout < num_rollouts:
             self._submit_drive(carried=[], rollout_id=start_rollout)
 
@@ -284,7 +287,10 @@ class AsyncAgenticTrainer(AgenticTrainer):
                             save_mode=save_mode,
                         )
                     if need_sync:
-                        self._rollout_weight_version = self._rollout_manager.sync_weights(self.weight_sync)
+                        self._rollout_weight_version = self._rollout_manager.sync_weights(
+                            self.weight_sync,
+                            policy_version=step,
+                        )
                     if step < num_rollouts:
                         self._submit_drive(carried=carried, rollout_id=step)
         finally:

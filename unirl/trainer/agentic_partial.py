@@ -77,7 +77,10 @@ class AgenticPartialTrainer(AgenticTrainer):
         active_error: Optional[BaseException] = None
         try:
             if sync_weights and self.weight_sync is not None:
-                self._rollout_weight_version = self._rollout_manager.sync_weights(self.weight_sync)
+                self._rollout_weight_version = self._rollout_manager.sync_weights(
+                    self.weight_sync,
+                    policy_version=rollout_id,
+                )
             tasks = self._build_tasks(self._carried, rollout_id)
             self._carried = []
             self._rollout_manager.submit(tasks)

@@ -36,6 +36,18 @@ class BaseRolloutEngine(Remote, ABC):
     def wake_up(self) -> None:
         """Restore runtime resources after ``sleep``. Default no-op."""
 
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def set_stopping(self, stopping: bool = True) -> None:
+        """Arm cooperative rollout suspension. Default no-op."""
+        del stopping
+
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def set_policy_version(self, policy_version: int) -> None:
+        """Set the explicit trainer policy version stamped onto new generation."""
+        if policy_version < 0:
+            raise ValueError(f"policy_version must be non-negative; got {policy_version}")
+        self._weight_version = int(policy_version)
+
     def onload_weights(self, *, track_prefix: str = "") -> None:
         """Restore the resources needed to receive a weight update."""
         del track_prefix

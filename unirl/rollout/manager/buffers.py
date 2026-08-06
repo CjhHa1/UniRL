@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections import deque
-from typing import TYPE_CHECKING, Deque, Dict, List
+from typing import TYPE_CHECKING, Dict, List
 
 if TYPE_CHECKING:
     from unirl.types.sample import Sample
@@ -42,21 +41,4 @@ class PendingGroups:
         return len(self._by_root)
 
 
-class CompletedGroups:
-    def __init__(self) -> None:
-        self._groups: Deque[List["Sample"]] = deque()
-
-    def extend(self, groups: List[List["Sample"]]) -> None:
-        self._groups.extend(groups)
-
-    def prepend(self, groups: List[List["Sample"]]) -> None:
-        self._groups.extendleft(reversed(groups))
-
-    def popleft(self) -> List["Sample"]:
-        return self._groups.popleft()
-
-    def __len__(self) -> int:
-        return len(self._groups)
-
-
-__all__ = ["CompletedGroups", "PendingGroups", "root_of"]
+__all__ = ["PendingGroups", "root_of"]
