@@ -1,4 +1,4 @@
-"""Rollout engine base classes. Engines complete construction in ``__init__``; no separate initialize step."""
+"""Rollout engine contracts. Engines complete construction in ``__init__``; no separate initialize step."""
 
 from __future__ import annotations
 

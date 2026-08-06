@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from unirl.rollout.engine.synchronous import BaseEngineConfig
+from unirl.rollout.engine.base import BaseEngineConfig
 
 
 @dataclass

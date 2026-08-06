@@ -35,8 +35,8 @@ import torch
 
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
+from unirl.rollout.engine.base import SyncRolloutEngine
 from unirl.rollout.engine.fastvideo.config import FastVideoEngineConfig, FastVideoPorts
-from unirl.rollout.engine.synchronous import SyncRolloutEngine
 from unirl.sde.noise import _derive_group_seed
 from unirl.sde.runtime import FlowMatchSchedulePolicy, ensure_sample_sigmas
 from unirl.types.conditions import TextEmbedCondition

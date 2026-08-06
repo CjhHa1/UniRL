@@ -32,7 +32,7 @@ wrong objective.
 
 ## How it works
 
-- **One synchronous generation interface.** `BaseRolloutEngine` (`engine/synchronous.py`)
+- **One generation interface.** `BaseRolloutEngine` (`engine/base.py`)
   is a `Remote` whose concrete engines implement synchronous `generate(sample)`;
   each returns one `Sample`. Batch engines dispatch `generate` with `DP_SCATTER`.
   Agentic `generate` is undecorated because the driver manager addresses one
@@ -56,11 +56,10 @@ wrong objective.
   ratio is 1 on the first update; *separate* — a dedicated engine on its own GPUs
   plus a `sync:` block; *colocate* — a dedicated engine sharing GPUs with train,
   plus offload/onload and `sync:`.
-- **Driver-side scheduling.** `engine/asynchronous.py` retains the batch-granular
-  `AsyncBatchRolloutEngine` used by `AsyncARTrainer` and `AsyncDiffusionTrainer`.
-  Agentic trainers use `manager.RolloutManager`, whose progress thread dispatches
-  one trajectory per slot, assembles sibling groups, applies the configured root
-  filter, and exposes blocking `collect` plus turn-boundary `quiesce`.
+- **Driver-side scheduling.** One `manager.RolloutManager` serves batch and
+  agentic trainers. Its progress thread dispatches bounded work and observes
+  readiness; trainer-thread collection resolves results, assembles agentic
+  siblings, and applies the configured filter.
 
 **Extending it:** a new single-turn engine adds `engine/<name>/config.py` (a
 `BaseEngineConfig` whose `make_engine(**deps)` lazily imports and builds it) and
@@ -80,12 +79,11 @@ implements its weight-receive method and a matching `sync:` handler in
   exception: its undecorated method is reached through one `Handle.slot(...)`.
 - **Direct sampling forbids a `sync:` block; dedicated requires one.** The trainside
   engine also can't live on a `layout: separate` slab — `_build_rollout` raises.
-- **Quiesce before weight sync / eval / checkpoint on the batch async path** —
-  `AsyncBatchRolloutEngine.quiesce()` drains every in-flight generation; a
-  weight + KV update corrupts one mid-flight. `RolloutManager.quiesce()` pauses
-  dispatch and cooperatively suspends agentic trajectories at turn boundaries;
-  `sync_weights()` rejects live work and pairs the push with the version bump.
-  Reap-vs-launch ordering on the batch path remains trainer statement order.
+- **Quiesce before weight sync / eval / checkpoint on async paths** —
+  `RolloutManager.quiesce()` pauses dispatch, drains batch work, and cooperatively
+  suspends agentic trajectories at turn boundaries. `sync_weights()` rejects
+  live work and pairs the push with an explicit policy version. Batch launch
+  ordering remains trainer policy.
 - **Reward/advantage methods are not engine code** — `Part.compute_advantages` and
   `Sample.propagate_rewards` are called by the trainer after scoring. An engine
   fills generation fields such as `segment`, `conditions`, `primitive`, and

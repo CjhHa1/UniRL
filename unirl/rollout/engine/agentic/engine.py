@@ -10,7 +10,7 @@ import torch
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.agentic.config import AgenticRolloutEngineConfig
-from unirl.rollout.engine.synchronous import SyncRolloutEngine
+from unirl.rollout.engine.base import SyncRolloutEngine
 from unirl.rollout.harness.protocol import HarnessContext, RolloutHarness
 from unirl.rollout.harness.tool_agent import ToolAgentHarness
 from unirl.types.sample import Sample, _part_with_field

@@ -59,19 +59,18 @@ The current trainer surface is:
 | `DiffusionTrainer` | one diffusion `Part` → one `TrainStack` | Reference diffusion loop; supports trainside or dedicated rollout, optional separate reward GPUs, FSDP offload, and DiffusionNFT's EMA-adapter rollout. |
 | `ARTrainer` | one AR `Part` → one `TrainStack` | Text or multimodal AR rollout with group/global advantage normalization and optional token-balanced DP shards. |
 | `SFTTrainer` | dataset records → one standalone training `Part` | Reuses the RL TrainStack without rollout, reward, or advantages; owns exact epoch/cursor resume and full-set evaluation. |
-| `AsyncARTrainer` | buffered AR `Sample` groups → one `TrainStack` | Separate train/rollout slabs with resident generation, bounded staleness, and quiescence before sync, eval, or checkpoint. |
-| `AsyncDiffusionTrainer` | buffered diffusion `Sample` groups → one `TrainStack` | The same separate-slab async loop for DiT. Requires `max_inflight=1` and reaps each generation before launching the next, so the cross-slab trajectory transfer never queues behind a fresh generation. |
+| `AsyncARTrainer` | buffered AR batch `Sample` → one `TrainStack` | Separate train/rollout slabs with resident generation, bounded staleness, and quiescence before sync, eval, or checkpoint. |
+| `AsyncDiffusionTrainer` | buffered diffusion batch `Sample` → one `TrainStack` | The same separate-slab async loop for DiT. Requires `max_inflight=1` and scores each intact batch before launching the next, so the cross-slab trajectory transfer never queues behind a fresh generation. |
 | `PETrainer` | `ar` + `diffusion` Parts → two `TrainStack`s | Composed prompt-rewrite/image rollout; image rewards propagate to AR rewrites. `freeze_llm=true` trains and checkpoints diffusion only. |
 | `UnifiedModelTrainer` | whole `Sample` → one `UnifiedModelTrainStack` | AR and image losses accumulate into shared-backbone optimizer steps while prompt-tree lineage remains intact during DP scatter. |
 | `AgenticTrainer` / `AgenticEnvTrainer` | variable-depth `List[Sample]` → concatenated turn `Part` | Barrier multi-turn tool use. The base variant scores terminal answers; the env variant consumes per-trajectory environment returns. |
 | `AgenticPartialTrainer` / `AgenticEnvPartialTrainer` | filtered complete trajectory groups → concatenated turn `Part` | Colocated over-sample/commit/quiesce loop. `carry` is for Sample-resumable stateless tools; `drop` rejects incomplete roots from stateful environments that restart episodes. |
 | `AsyncAgenticTrainer` / `AsyncAgenticEnvTrainer` | buffered complete trajectory groups → concatenated turn `Part` | Disaggregated train/rollout slabs, resident agentic drive, weight-version staleness control, and the same explicit `carry`/`drop` tail policy. |
 
-The AR/diffusion async variants use `AsyncBatchRolloutEngine` in
-`unirl/rollout/engine/asynchronous.py`. Agentic variants use the driver-local
-`RolloutManager`: it dispatches individual trajectories, assembles root groups, and
-applies the trainer-built tail/staleness filter. Trainers retain admission, sync,
-quiescence, and training policy.
+All async variants use the driver-local `RolloutManager`. Batch trainers provide
+one slab-wide launcher and keep completed batches intact; agentic trainers provide
+one launcher per engine slot and let the manager assemble root groups. Trainers
+retain admission, launch ordering, scoring, and training policy.
 
 **Extending it:** a new domain is a new `<Domain>Trainer(BaseTrainer)` that builds its
 remotes inside a `placement(...)` scope and implements `train_step` + `train`; the

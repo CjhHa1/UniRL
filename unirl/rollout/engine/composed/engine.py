@@ -31,8 +31,8 @@ import torch
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.models.pe.instruction import postprocess_pe_texts
+from unirl.rollout.engine.base import SyncRolloutEngine
 from unirl.rollout.engine.composed.config import ComposedRolloutEngineConfig
-from unirl.rollout.engine.synchronous import SyncRolloutEngine
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
