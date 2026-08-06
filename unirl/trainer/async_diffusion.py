@@ -212,7 +212,8 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
     ) -> Sample:
         while True:
             ceiling = launch_ceiling(rollout_id, sync_interval=interval, max_staleness=stale, num_rollouts=num_rollouts)
-            self._top_up(ceiling, M)
+            if self._admitted_generations == 0:
+                self._top_up(ceiling, M)
             try:
                 chunks = self._rollout_manager.collect(self.batch_size)
             except RolloutUnderflow:

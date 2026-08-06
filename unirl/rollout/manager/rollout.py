@@ -43,6 +43,7 @@ class RolloutManager:
             capacities,
             worker_max_concurrency=worker_max_concurrency,
         )
+        self._group_size = int(group_size)
         self._pending = PendingGroups(group_size)
         self._buffer: Deque[_ReadyChunk] = deque()
         self._filter = filter_fn
@@ -68,7 +69,11 @@ class RolloutManager:
                 while self._buffer and selected_groups < n:
                     chunk = self._buffer.popleft()
                     if selected_groups + chunk.group_count > n:
-                        self._split_front(chunk)
+                        try:
+                            self._split_front(chunk)
+                        except BaseException:
+                            self._buffer.appendleft(chunk)
+                            raise
                         continue
                     selected.append(chunk)
                     selected_groups += chunk.group_count
@@ -85,8 +90,8 @@ class RolloutManager:
     def quiesce(self) -> List["Sample"]:
         self._ensure_open()
         undispatched = self._pool.pause()
-        self._rollout.set_stopping(True)
         try:
+            self._rollout.set_stopping(True)
             completed = self._resolve(self._pool.drain())
         finally:
             self._rollout.set_stopping(False)
@@ -121,10 +126,10 @@ class RolloutManager:
         self._route(self._resolve(self._pool.take_completed(block=False)), allow_suspended=False)
         if self._pool.live:
             raise RuntimeError("sync_weights requires no queued or in-flight rollout work")
-        weight_sync.sync()
         next_version = int(policy_version)
         if next_version < self._policy_version:
             raise ValueError(f"policy_version must be monotonic; current={self._policy_version}, next={next_version}")
+        weight_sync.sync()
         self._rollout.set_policy_version(next_version)
         self._policy_version = next_version
         return self._policy_version
@@ -159,12 +164,24 @@ class RolloutManager:
                     raise RuntimeError("trajectory suspended outside quiesce")
                 suspended.append(sample)
             elif status is None:
-                self._buffer.append(_ReadyChunk(_root_count(sample), [sample]))
+                self._buffer.append(_ReadyChunk(self._batch_group_count(sample), [sample]))
             else:
                 terminal_trajectories.append(sample)
         for group in self._pending.add(terminal_trajectories):
             self._buffer.append(_ReadyChunk(1, group))
         return suspended
+
+    def _batch_group_count(self, sample: "Sample") -> int:
+        roots = _roots_of(sample)
+        descendants = Counter(sample.root_group_ids(-1))
+        malformed = {root: descendants.get(root, 0) for root in roots if descendants.get(root, 0) != self._group_size}
+        extra = set(descendants) - set(roots)
+        if malformed or extra:
+            raise RuntimeError(
+                f"batch rollout fan-out does not match group_size={self._group_size}: "
+                f"malformed={malformed}, extra_roots={sorted(extra)}"
+            )
+        return len(roots)
 
     def _split_front(self, chunk: _ReadyChunk) -> None:
         if len(chunk.samples) != 1:
@@ -245,10 +262,6 @@ def _roots_of(sample: "Sample") -> List[str]:
     if not roots:
         raise ValueError("rollout Sample has no root ids")
     return roots
-
-
-def _root_count(sample: "Sample") -> int:
-    return len(_roots_of(sample))
 
 
 __all__ = ["RolloutManager", "RolloutUnderflow"]
