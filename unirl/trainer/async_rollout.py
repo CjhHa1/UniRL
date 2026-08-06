@@ -6,8 +6,19 @@ if TYPE_CHECKING:
     from unirl.types.sample import Sample
 
 
-def launch_ceiling(rollout_id: int, *, sync_interval: int, max_staleness: int, num_rollouts: int) -> int:
-    return min(num_rollouts, ((rollout_id // sync_interval) + 1 + max_staleness) * sync_interval)
+def launch_ceiling(
+    rollout_id: int,
+    *,
+    sync_interval: int,
+    max_staleness: int,
+    num_rollouts: int,
+    barrier_interval: int = 0,
+) -> int:
+    ceiling = min(num_rollouts, ((rollout_id // sync_interval) + 1 + max_staleness) * sync_interval)
+    if barrier_interval > 0:
+        next_barrier = ((rollout_id // barrier_interval) + 1) * barrier_interval
+        ceiling = min(ceiling, next_barrier)
+    return ceiling
 
 
 def combine_rollout_chunks(chunks: List["Sample"]) -> Tuple["Sample", int]:

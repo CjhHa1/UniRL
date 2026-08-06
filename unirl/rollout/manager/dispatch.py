@@ -50,7 +50,10 @@ class RolloutPool:
         self._queue: Deque[tuple[int, "Sample"]] = deque()
         self._running: List[_PendingUnit] = []
         self._completed: Deque[_PendingUnit] = deque()
+        self._resolving: List[_PendingUnit] = []
+        self._launching: Optional[tuple[int, int, "Sample"]] = None
         self._next_sequence = 0
+        self._next_launcher = 0
         self._paused = True
         self._closed = False
         self._failure: Optional[BaseException] = None
@@ -69,7 +72,8 @@ class RolloutPool:
 
     def pause(self) -> List["Sample"]:
         with self._condition:
-            self._raise_if_failed()
+            if self._closed:
+                raise RuntimeError("RolloutPool is closed")
             self._paused = True
             tasks = [task for _, task in self._queue]
             self._queue.clear()
@@ -83,29 +87,39 @@ class RolloutPool:
             self._raise_if_failed()
             completed = list(self._completed)
             self._completed.clear()
+            self._resolving.extend(completed)
             return completed
 
     def drain(self) -> List[_PendingUnit]:
         with self._condition:
-            while self._running and self._failure is None:
+            while self._launching is not None or self._running:
                 self._condition.wait()
-            self._raise_if_failed()
             completed = list(self._completed)
             self._completed.clear()
+            self._resolving.extend(completed)
             return completed
+
+    def acknowledge(self, units: List[_PendingUnit]) -> None:
+        with self._condition:
+            for unit in units:
+                if unit in self._resolving:
+                    self._resolving.remove(unit)
+            self._condition.notify_all()
 
     def fail(self, exc: BaseException) -> None:
         with self._condition:
-            if self._failure is None:
-                self._failure = exc
-            self._paused = True
-            self._condition.notify_all()
+            self._record_failure_locked(exc)
 
     @property
     def live(self) -> bool:
         with self._condition:
             self._raise_if_failed()
-            return bool(self._queue or self._running or self._completed)
+            return self._has_work()
+
+    @property
+    def has_work(self) -> bool:
+        with self._condition:
+            return self._has_work()
 
     def close(self) -> None:
         with self._condition:
@@ -118,7 +132,10 @@ class RolloutPool:
         self._thread.join()
 
     def _has_remote_work(self) -> bool:
-        return bool(self._queue or self._running)
+        return bool(self._queue or self._launching is not None or self._running)
+
+    def _has_work(self) -> bool:
+        return bool(self._queue or self._launching is not None or self._running or self._completed or self._resolving)
 
     def _raise_if_unavailable(self) -> None:
         self._raise_if_failed()
@@ -132,31 +149,52 @@ class RolloutPool:
     def _progress(self) -> None:
         while True:
             with self._condition:
-                if self._closed and not self._running:
+                if self._closed and self._launching is None and not self._running:
                     return
-                if self._failure is not None:
-                    return
-                try:
-                    self._launch_to_capacity()
-                except BaseException as exc:
-                    self._record_failure(exc)
-                    return
-                running = list(self._running)
-                if not running:
+                reservation = self._reserve_launch()
+                if reservation is not None:
+                    running = []
+                else:
+                    running = list(self._running)
+                if reservation is None and not running:
                     self._condition.wait()
                     continue
 
-            try:
-                ready = [unit for unit in running if unit.pending.ready()]
-            except BaseException as exc:
-                self._record_failure(exc)
-                return
+            if reservation is not None:
+                sequence, launcher_index, task = reservation
+                try:
+                    pending = self._launchers[launcher_index](task)
+                except BaseException as exc:
+                    with self._condition:
+                        self._launching = None
+                        if not self._closed:
+                            self._queue.appendleft((sequence, task))
+                        self._record_failure_locked(exc)
+                    continue
+                with self._condition:
+                    self._launching = None
+                    self._running.append(_PendingUnit(sequence, launcher_index, task, pending))
+                    self._condition.notify_all()
+                continue
+
+            ready = []
+            probe_error: Optional[BaseException] = None
+            for unit in running:
+                try:
+                    if unit.pending.ready():
+                        ready.append(unit)
+                except BaseException as exc:
+                    if probe_error is None:
+                        probe_error = exc
+                    ready.append(unit)
             if not ready:
                 with self._condition:
                     self._condition.wait(timeout=self._PROBE_INTERVAL_S)
                 continue
 
             with self._condition:
+                if probe_error is not None:
+                    self._record_failure_locked(probe_error)
                 for unit in ready:
                     if unit not in self._running:
                         continue
@@ -164,25 +202,29 @@ class RolloutPool:
                     self._completed.append(unit)
                 self._condition.notify_all()
 
-    def _launch_to_capacity(self) -> None:
-        if self._paused or self._closed:
-            return
+    def _reserve_launch(self) -> Optional[tuple[int, int, "Sample"]]:
+        if self._paused or self._closed or self._failure is not None or not self._queue:
+            return None
         load = [0] * len(self._launchers)
-        for unit in self._running:
+        for unit in [*self._running, *self._completed, *self._resolving]:
             load[unit.launcher] += 1
-        for index, launch in enumerate(self._launchers):
-            while self._queue and load[index] < self._capacities[index]:
+        if self._launching is not None:
+            load[self._launching[1]] += 1
+        for offset in range(len(self._launchers)):
+            index = (self._next_launcher + offset) % len(self._launchers)
+            if load[index] < self._capacities[index]:
                 sequence, task = self._queue.popleft()
-                pending = launch(task)
-                self._running.append(_PendingUnit(sequence, index, task, pending))
-                load[index] += 1
+                reservation = (sequence, index, task)
+                self._launching = reservation
+                self._next_launcher = (index + 1) % len(self._launchers)
+                return reservation
+        return None
 
-    def _record_failure(self, exc: BaseException) -> None:
-        with self._condition:
-            if self._failure is None:
-                self._failure = exc
-            self._paused = True
-            self._condition.notify_all()
+    def _record_failure_locked(self, exc: BaseException) -> None:
+        if self._failure is None:
+            self._failure = exc
+        self._paused = True
+        self._condition.notify_all()
 
 
 __all__ = ["RolloutPool"]

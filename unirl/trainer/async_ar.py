@@ -360,7 +360,13 @@ class AsyncARTrainer(ARTrainer):
         num_rollouts: int,
     ) -> Sample:
         while True:
-            ceiling = launch_ceiling(rollout_id, sync_interval=interval, max_staleness=stale, num_rollouts=num_rollouts)
+            ceiling = launch_ceiling(
+                rollout_id,
+                sync_interval=interval,
+                max_staleness=stale,
+                num_rollouts=num_rollouts,
+                barrier_interval=self.eval_interval if self.weight_sync is not None else 0,
+            )
             self._top_up(ceiling, M)
             try:
                 chunks = self._rollout_manager.collect(self.batch_size)

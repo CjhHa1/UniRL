@@ -138,7 +138,7 @@ class RolloutManager:
         if self._closed:
             return
         try:
-            if self._pool.live:
+            if self._pool.has_work:
                 self.quiesce()
         finally:
             self._pool.close()
@@ -152,6 +152,8 @@ class RolloutManager:
         except BaseException as exc:
             self._pool.fail(exc)
             raise
+        finally:
+            self._pool.acknowledge(units)
         return samples
 
     def _route(self, results: List[tuple[int, "Sample"]], *, allow_suspended: bool) -> List["Sample"]:
