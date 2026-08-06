@@ -214,7 +214,7 @@ sampling:
 # LoRA weight sync → vLLM-Omni rollout. Separate slabs ⇒ RemoteLoraWeightSync:
 # rank 0 ships the freshly-trained LoRA adapter to each cross-slab rollout Worker
 # by Ray RPC (no NCCL rendezvous, no name_remap — pushes the adapter directly).
-# The train loop publishes only when the optimizer-update lag budget binds.
+# The train loop publishes on weight_sync_interval or an earlier eval/save boundary.
 sync:
   _target_: unirl.distributed.weight_sync.lora.RemoteLoraWeightSync
   verify: true                         # checksum read-back asserts the synced LoRA landed; catches a wrong prefix

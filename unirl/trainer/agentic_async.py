@@ -22,7 +22,7 @@ through the driver-side :class:`~unirl.rollout.engine.asynchronous.AsyncAgenticR
   :class:`AgenticTrainer`'s helpers), then **quiesce + sync**: ``abort`` the in-flight
   tail at a turn boundary, apply the configured ``tail_policy`` (carry only when the
   environment can resume from the ``Sample``; otherwise drop), then
-  ``engine.sync_weights`` (one call: push + version bump).
+  ``engine.sync_weights`` (one call: push + train-version assignment + sync bump).
 
 ONE single-threaded loop (the ``AsyncARTrainer`` shape): with disjoint slabs the
 rollout slab keeps generating in the background (the engine's per-worker drain) while
@@ -54,6 +54,7 @@ from unirl.distributed.group.placement import placement, remote
 from unirl.rollout.engine.asynchronous import AsyncAgenticRolloutEngine, root_of
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.agentic import AgenticTrainer
+from unirl.trainer.async_batch_control import unwrap_replicated_int
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.sample import Part, Sample, _part_with_field
 from unirl.types.sampling import BaseSamplingParams
@@ -313,8 +314,8 @@ class AsyncAgenticTrainer(AgenticTrainer):
                 "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
                 "agent/max_turns": max(depths) if depths else 0,
                 "async/buffer_groups": self._engine.buffered_groups(),
-                "async/version": self._engine.version,
-                "async/version_span": (max(versions) - min(versions)) if versions else 0,
+                "async/sync_version": self._engine.sync_version,
+                "async/output_version_span_updates": (max(versions) - min(versions)) if versions else 0,
                 "async/assembler_pending_roots": self._engine.pending_groups(),
                 "async/carried_tail_trajectories": self._carried_tail_trajectories,
                 "async/dropped_tail_trajectories": self._dropped_tail_trajectories,
@@ -324,6 +325,12 @@ class AsyncAgenticTrainer(AgenticTrainer):
         )
         self._reset_transport_buffers()
         return result, mean_reward
+
+    def _current_train_version(self) -> int:
+        return unwrap_replicated_int(
+            self.backend.get_optimizer_step_count(),
+            name="backend optimizer step count",
+        )
 
     def train(
         self,
@@ -356,7 +363,10 @@ class AsyncAgenticTrainer(AgenticTrainer):
         self._engine = AsyncAgenticRolloutEngine(self.rollout, group_size=self._n, start_gen_id=start_rollout)
 
         if start_rollout < num_rollouts and start_rollout and self.weight_sync is not None:
-            self._engine.sync_weights(self.weight_sync)  # push restored weights into the fresh engine
+            self._engine.sync_weights(
+                self.weight_sync,
+                train_version=self._current_train_version(),
+            )
         if start_rollout < num_rollouts:
             self._submit_drive(carried=[], rollout_id=start_rollout)
 
@@ -387,7 +397,10 @@ class AsyncAgenticTrainer(AgenticTrainer):
                             save_mode=save_mode,
                         )
                     if need_sync:
-                        self._engine.sync_weights(self.weight_sync)
+                        self._engine.sync_weights(
+                            self.weight_sync,
+                            train_version=self._current_train_version(),
+                        )
                     if step < num_rollouts:
                         self._submit_drive(carried=carried, rollout_id=step)
         finally:

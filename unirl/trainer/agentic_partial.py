@@ -38,6 +38,7 @@ from typing import Dict, List, Literal, Optional
 from unirl.rollout.engine.asynchronous import AsyncAgenticRolloutEngine, root_of
 from unirl.trainer.agentic import AgenticTrainer
 from unirl.trainer.agentic_env import _EnvRewardSource
+from unirl.trainer.async_batch_control import unwrap_replicated_int
 from unirl.types.sample import Part, Sample
 
 logger = logging.getLogger(__name__)
@@ -155,7 +156,11 @@ class AgenticPartialTrainer(AgenticTrainer):
     def _drive_partial(self, rollout_id: int, sync_weights: bool, stale: int) -> List[List[Sample]]:
         self.rollout.wake_up()
         if sync_weights and self.weight_sync is not None:
-            self._engine.sync_weights(self.weight_sync)
+            train_version = unwrap_replicated_int(
+                self.backend.get_optimizer_step_count(),
+                name="backend optimizer step count",
+            )
+            self._engine.sync_weights(self.weight_sync, train_version=train_version)
         tasks = self._build_tasks(self._carried, rollout_id)
         self._carried = []
         self._engine.submit(tasks)
@@ -237,7 +242,7 @@ class AgenticPartialTrainer(AgenticTrainer):
                         "partial/discarded_completed_trajectories": self._last_discarded_completed_trajectories,
                         "partial/assembler_pending_roots": self._engine.pending_groups(),
                         "partial/buffer_groups": self._engine.buffered_groups(),
-                        "partial/version": self._engine.version,
+                        "partial/sync_version": self._engine.sync_version,
                     },
                 )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)

@@ -19,9 +19,9 @@ Engines share launch/poll/quiesce mechanisms but own different queue semantics:
   generation is consumed atomically in completion-order FIFO.
 - :class:`AsyncAgenticRolloutEngine` — trajectory granularity over the
   ``AgenticRolloutEngine`` rank-0 coordinator; ``submit`` fires a task-pool
-  drive and completions stream in via ``poll``. ``(output_version, gen_id)``
-  are stamped at COMPLETION; the per-turn version spread inside a carried
-  trajectory is corrected per-token by each gen Part's own ``output_version``.
+  drive and completions stream in via ``poll``. Complete groups are buffered
+  with ``(sync_version, gen_id)``; each gen Part independently carries the
+  train-version provenance of its own output.
 
 Submission is deliberately engine-specific (incompatible signatures and
 stamping semantics); the consumer verbs above are what the async trainers
@@ -57,7 +57,7 @@ T = TypeVar("T")
 
 
 class VersionedBuffer(Generic[T]):
-    """Payload-agnostic freshness buffer of ``(payload, output_version, gen_id)`` items.
+    """Payload-agnostic freshness buffer of ``(payload, version, gen_id)`` items.
 
     Unifies the batch path's per-``Sample`` buffering and the agentic path's
     per-group (``List[Sample]``) buffering; stamping semantics belong to the
@@ -68,8 +68,8 @@ class VersionedBuffer(Generic[T]):
         self._items: List[Tuple[T, int, int]] = []
         self._evicted: List[T] = []
 
-    def put(self, payload: T, *, output_version: int, gen_id: int) -> None:
-        self._items.append((payload, int(output_version), int(gen_id)))
+    def put(self, payload: T, *, version: int, gen_id: int) -> None:
+        self._items.append((payload, int(version), int(gen_id)))
 
     def size(self) -> int:
         return len(self._items)
@@ -376,9 +376,8 @@ class AsyncAgenticRolloutEngine:
     rank-0 coordinator Handle; buffers ``List[Sample]`` sibling groups.
 
     Normalizes the coordinator's BROADCAST+RANK_ZERO returns (every value
-    unwraps ``[0]``). Groups are stamped at COMPLETION: ``version`` is
-    the engine's counter when a root's last sibling lands, ``gen_id`` a
-    monotonic completed-group counter.
+    unwraps ``[0]``). Groups are stamped at completion with the current
+    publication count (``sync_version``) and a monotonic ``gen_id``.
 
     ``submit`` requires the prior drive to be finalized or quiesced — two live
     drains would double-pull the coordinator queue.
@@ -389,28 +388,32 @@ class AsyncAgenticRolloutEngine:
         self._pending = PendingGroups(group_size)
         self._buffer: VersionedBuffer[List["Sample"]] = VersionedBuffer()
         self._gen_id = int(start_gen_id)
-        self._version = 0
+        self._sync_version = 0
         self._drive_live = False
 
     @property
-    def version(self) -> int:
-        return self._version
+    def sync_version(self) -> int:
+        return self._sync_version
 
-    def sync_weights(self, weight_sync: Any) -> None:
-        """Push train weights via *weight_sync* and advance the version ledger.
+    def sync_weights(self, weight_sync: Any, *, train_version: int) -> None:
+        """Push train weights and align worker provenance with ``train_version``.
 
         The only sanctioned weight-push path — pairing the push with the worker
-        version assignment keeps output provenance and the buffer ledger aligned.
-        Raises while a drive is active (a weight push must be decode-idle); a
-        joined ``finalize_if_drained`` or ``quiesce`` ends the drive.
+        version assignment keeps output provenance truthful. ``sync_version`` is
+        a separate publication count used only for buffer staleness. Raises while
+        a drive is active (a weight push must be decode-idle); a joined
+        ``finalize_if_drained`` or ``quiesce`` ends the drive.
         """
         if self._drive_live:
             raise RuntimeError("sync_weights with a drive active; finalize or quiesce() first")
-        next_version = self._version + 1
         weight_sync.sync()
-        self._rollout.set_version(next_version)
-        self._version = next_version
-        logger.info("sync_weights: pushed train weights; version -> %d", self._version)
+        self._rollout.set_version(train_version)
+        self._sync_version += 1
+        logger.info(
+            "sync_weights: pushed train weights; train_version=%d sync_version=%d",
+            train_version,
+            self._sync_version,
+        )
 
     def submit(self, tasks: List["Sample"]) -> None:
         """Fire a background drive over a flat task list (fresh siblings + carried partials).
@@ -444,7 +447,11 @@ class AsyncAgenticRolloutEngine:
         return self._ingest(completed)
 
     def drain_freshest(self, n: int, *, max_staleness: int) -> Optional[List[List["Sample"]]]:
-        return self._buffer.drain_freshest(n, current_version=self._version, max_staleness=max_staleness)
+        return self._buffer.drain_freshest(
+            n,
+            current_version=self._sync_version,
+            max_staleness=max_staleness,
+        )
 
     def pop_evicted(self) -> List[List["Sample"]]:
         return self._buffer.pop_evicted()
@@ -474,7 +481,7 @@ class AsyncAgenticRolloutEngine:
         if completed:
             self._pending.add_completed(completed)
             for group in self._pending.pop_complete_groups():
-                self._buffer.put(group, output_version=self._version, gen_id=self._gen_id)
+                self._buffer.put(group, version=self._sync_version, gen_id=self._gen_id)
                 self._gen_id += 1
         return len(completed)
 
