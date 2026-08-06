@@ -337,8 +337,8 @@ class Part(Batch):
         """GRPO per-group advantage ``(reward - group_mean) / (group_std + eps)``.
 
         ``scope`` picks the normalization mode: ``"group"`` (default) normalizes
-        per group; ``"global"`` z-scores the whole batch (population std — the
-        historical convention) and ignores the grouping knobs. Under
+        per group; ``"global"`` z-scores the whole batch with population std
+        (``unbiased=False``, matching agentic) and ignores the grouping knobs. Under
         ``scope="group"``, ``group_layer`` picks the lineage layer whose ancestor
         id labels the groups (the id's first ``layer + 1`` segments): ``None``
         (default) groups by the immediate parent (:attr:`group_ids`; a root part
@@ -347,7 +347,9 @@ class Part(Batch):
         guarantees this at every layer), so the reduce is one ``view``.
         ``use_global_std`` keeps per-group means but one batch-wide std. Non-finite
         rewards are excluded from statistics and receive zero advantage; population
-        std (``unbiased=False``) makes ``branch=1`` degenerate to advantage 0.
+        std makes ``branch=1`` (and other single-finite groups) degenerate to
+        advantage 0. The denominator is ``std + eps`` (not ``sqrt(var + eps)``),
+        so ``eps`` only avoids div-by-zero and does not soft-floor near-zero variance.
         """
         if self.rewards is None:
             raise ValueError("Part.compute_advantages: part has no rewards")
