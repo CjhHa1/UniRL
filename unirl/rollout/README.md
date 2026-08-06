@@ -59,7 +59,8 @@ wrong objective.
 - **Driver-side scheduling.** One `manager.RolloutManager` serves batch and
   agentic trainers. Its progress thread dispatches bounded work and observes
   readiness; trainer-thread collection resolves results, assembles agentic
-  siblings, and applies the configured filter.
+  siblings, and applies the configured filter. `AgenticTrainer` collects a
+  complete barrier batch each step; quiescence is reserved for cleanup.
 
 **Extending it:** a new single-turn engine adds `engine/<name>/config.py` (a
 `BaseEngineConfig` whose `make_engine(**deps)` lazily imports and builds it) and

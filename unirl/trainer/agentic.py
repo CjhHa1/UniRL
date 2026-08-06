@@ -1,4 +1,4 @@
-"""Multi-turn agentic RL over the driver-side rollout manager."""
+"""Service-scored multi-turn RL over the driver-side rollout manager."""
 
 from __future__ import annotations
 
@@ -7,142 +7,175 @@ import re
 import sys
 import time
 from collections import Counter
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
-from omegaconf import OmegaConf
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 
-from unirl.algorithms.normalizers import build_group_index_map
+from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
-from unirl.rollout.manager import RolloutFilter, RolloutManager, identity
+from unirl.rollout.manager import RolloutManager
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.ar import ARTrainer
-from unirl.trainer.base import prepare_input_sample
+from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample, _part_with_field
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
+from unirl.utils.graceful_shutdown import run_with_timeout
+from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
 
 _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+_ROLLOUT_SHUTDOWN_TIMEOUT_S = 60.0
 
 
 def _extract_answer(text: Optional[str]) -> str:
-    """The last ``<answer>…</answer>`` span, else the whole text (the verifier is
-    tolerant of an unwrapped / ``\\boxed{}`` answer)."""
     if not text:
         return ""
     matches = list(_ANSWER_RE.finditer(text))
     return matches[-1].group(1).strip() if matches else text.strip()
 
 
-def _is_failed(traj: Sample) -> bool:
-    """Whether the engine marked this trajectory as a task-level failure.
-
-    :meth:`AgenticRolloutEngine.generate` isolates harness faults with a NaN reward
-    on the terminal Part, or — when the fault preceded the first turn — with no gen
-    Parts at all. Either shape must stay out of GRPO's group statistics; grading a
-    failed task's empty output as a genuine miss would bias every sibling in the
-    group. Worker and transport failures propagate through ``RolloutManager``.
-    """
-    gens = traj.gen_parts()
-    if not gens:
-        return True
-    rewards = gens[-1].rewards
-    return rewards is not None and bool(torch.isnan(hydrate(rewards)).any())
+def _is_failed(trajectory: Sample) -> bool:
+    return not trajectory.gen_parts() or not trajectory.parts or trajectory.parts[-1].harness_status == "failed"
 
 
-def _validate_agentic_cfg(kw: dict) -> None:
-    """Fail fast on cross-config invariants only jointly visible at the trainer.
-
-    The recipes assert these in prose comments but nothing enforced them, so a
-    mismatch silently broke the on-policy ratio or DP scatter. Each check is
-    skipped when either side is absent, so it never rejects a config that merely
-    omits a key. (The ``env.max_turns == config.max_turns`` check lives in
-    ``AgenticRolloutEngine.__init__``, where the built env is in scope.)
-    """
-    rollout_cfg = kw.get("rollout_cfg")
-    ep = OmegaConf.select(rollout_cfg, "config.episode_sampling") if rollout_cfg is not None else None
-    if ep is None:
-        return
-    n_ep = int(OmegaConf.select(ep, "samples_per_prompt") or 1)
-    t_ep = OmegaConf.select(ep, "temperature")
-
-    sampling_cfg = kw.get("sampling_cfg")
-    if sampling_cfg is not None:
-        n_s = int(OmegaConf.select(sampling_cfg, "samples_per_prompt") or 1)
-        if n_s != n_ep:
-            raise ValueError(
-                f"sampling.samples_per_prompt ({n_s}) must equal "
-                f"rollout.config.episode_sampling.samples_per_prompt ({n_ep})"
-            )
-        t_s = OmegaConf.select(sampling_cfg, "temperature")
-        if t_ep is not None and t_s is not None and abs(float(t_s) - float(t_ep)) > 1e-9:
-            raise ValueError(f"sampling.temperature ({t_s}) must equal episode_sampling.temperature ({t_ep})")
-
-    algorithm_cfg = kw.get("algorithm_cfg")
-    t_a = OmegaConf.select(algorithm_cfg, "sampling_temperature") if algorithm_cfg is not None else None
-    if t_ep is not None and t_a is not None and abs(float(t_a) - float(t_ep)) > 1e-9:
-        raise ValueError(
-            f"algorithm.sampling_temperature ({t_a}) must equal episode_sampling.temperature "
-            f"({t_ep}) — else replay's tempered log-softmax diverges from the sampler (ratio != 1)"
-        )
-
-    cfg = kw.get("cfg")
-    batch_size = kw.get("batch_size")
-    nd = OmegaConf.select(cfg, "num_devices") if cfg is not None else None
-    if nd is not None and batch_size is not None and (int(batch_size) * n_ep) % int(nd) != 0:
-        raise ValueError(
-            f"batch_size*samples_per_prompt ({int(batch_size) * n_ep}) must be divisible "
-            f"by num_devices ({int(nd)}) for the DP scatter"
-        )
-
-
-class AgenticTrainer(ARTrainer):
-    """Agentic (multi-turn tool-use) RL trainer over the ``AgenticRolloutEngine``."""
+class AgenticTrainer(BaseTrainer):
+    """One barrier agentic trainer with terminal-answer reward-service scoring."""
 
     def __init__(
         self,
         *,
+        cfg: DictConfig,
+        batch_size: int,
+        bundle_cfg: DictConfig,
+        pipeline_cfg: DictConfig,
+        backend_cfg: DictConfig,
+        rollout_cfg: DictConfig,
+        reward_cfg: DictConfig,
+        algorithm_cfg: DictConfig,
+        stack_cfg: DictConfig,
+        data_source_cfg: DictConfig,
+        sampling_cfg: DictConfig,
+        sync_cfg: DictConfig,
+        logging_cfg: Optional[DictConfig] = None,
         stop: Optional[List[str]] = None,
         per_worker_inflight: int = 8,
-        **kwargs,
     ) -> None:
-        _validate_agentic_cfg(kwargs)
-        cfg = kwargs.get("cfg")
-        self._worker_max_concurrency = int(cfg.get("worker_max_concurrency", 1)) if cfg is not None else 1
-        self._per_worker_inflight = int(per_worker_inflight)
-        super().__init__(**kwargs)
-        self._stop = list(stop) if stop else ["</tool_call>"]
-        self._n = total_samples_per_prompt(self.sampling_params)
-        self._rollout_manager: Optional[RolloutManager] = None
-
-    def _create_rollout_manager(self, filter_fn: RolloutFilter = identity) -> RolloutManager:
-        indices = [
-            index
-            for index, rank_info in enumerate(self.rollout.rank_infos)
-            if rank_info.tp_rank == 0 and rank_info.pp_rank == 0
-        ]
-        slots = [self.rollout.slot(index) for index in indices]
-        launchers = [lambda sample, slot=slot: slot.launch("generate", sample) for slot in slots]
-        return RolloutManager(
-            self.rollout,
-            launchers=launchers,
-            capacities=[self._per_worker_inflight] * len(launchers),
-            group_size=self._n,
-            worker_max_concurrency=self._worker_max_concurrency,
-            filter_fn=filter_fn,
+        self._validate_config(
+            cfg=cfg,
+            batch_size=batch_size,
+            rollout_cfg=rollout_cfg,
+            sampling_cfg=sampling_cfg,
+            algorithm_cfg=algorithm_cfg,
+            sync_cfg=sync_cfg,
         )
+        super().__init__(cfg=cfg, logging_cfg=logging_cfg)
 
-    def _build_request_sample(
-        self,
-        inputs: Sample,
-        rollout_id: int,
+        try:
+            self.batch_size = int(batch_size)
+            self.data_source = instantiate(data_source_cfg)
+            self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
+            self._group_size = total_samples_per_prompt(self.sampling_params)
+            self._stop = list(stop) if stop else ["</tool_call>"]
+            self._per_worker_inflight = int(per_worker_inflight)
+
+            with placement(self.pool, fraction=1.0, shared_workers=True):
+                self.bundle = remote_hydra(bundle_cfg)
+                self.pipeline = remote_hydra(pipeline_cfg, bundle=self.bundle)
+                self.backend = remote_hydra(backend_cfg, bundle=self.bundle)
+                self.reward = remote_hydra(reward_cfg)
+                self.algorithm = remote_hydra(algorithm_cfg, pipeline=self.pipeline)
+                self.stack = remote_hydra(stack_cfg, fsdp_backend=self.backend, algorithm=self.algorithm)
+                self._build_colocated_rollout(rollout_cfg, sync_cfg)
+
+            indices = [
+                index
+                for index, rank_info in enumerate(self.rollout.rank_infos)
+                if rank_info.tp_rank == 0 and rank_info.pp_rank == 0
+            ]
+            slots = [self.rollout.slot(index) for index in indices]
+            launchers = [lambda sample, slot=slot: slot.launch("generate", sample) for slot in slots]
+            self._rollout_manager = RolloutManager(
+                self.rollout,
+                launchers=launchers,
+                capacities=[self._per_worker_inflight] * len(launchers),
+                group_size=self._group_size,
+                worker_max_concurrency=int(cfg.get("worker_max_concurrency", 1)),
+            )
+        except BaseException:
+            self._shutdown_runtime()
+            raise
+
+    @staticmethod
+    def _validate_config(
         *,
-        sampling: Optional[Dict[str, BaseSamplingParams]] = None,
-    ) -> Sample:
-        """Build input-only prompts with per-turn stop and reward metadata."""
-        del sampling
+        cfg: DictConfig,
+        batch_size: int,
+        rollout_cfg: DictConfig,
+        sampling_cfg: DictConfig,
+        algorithm_cfg: DictConfig,
+        sync_cfg: Optional[DictConfig],
+    ) -> None:
+        if int(batch_size) <= 0:
+            raise ValueError(f"batch_size must be positive; got {batch_size}")
+        if sync_cfg is None:
+            raise ValueError("AgenticTrainer requires colocated TensorWeightSync")
+        sync_target = str(sync_cfg.get("_target_", ""))
+        if not sync_target.endswith("TensorWeightSync"):
+            raise ValueError(f"AgenticTrainer requires colocated TensorWeightSync; got {sync_target!r}")
+
+        episode = rollout_cfg.get("config", {}).get("episode_sampling")
+        if episode is None:
+            raise ValueError("rollout.config.episode_sampling is required")
+        group_size = int(sampling_cfg.get("samples_per_prompt", 1))
+        episode_group_size = int(episode.get("samples_per_prompt", 1))
+        if group_size != episode_group_size:
+            raise ValueError(
+                "sampling.samples_per_prompt must equal rollout.config.episode_sampling.samples_per_prompt"
+            )
+        sampling_temperature = float(sampling_cfg.get("temperature", 1.0))
+        episode_temperature = float(episode.get("temperature", 1.0))
+        algorithm_temperature = float(algorithm_cfg.get("sampling_temperature", 1.0))
+        if abs(sampling_temperature - episode_temperature) > 1e-9:
+            raise ValueError("sampling.temperature must equal rollout episode temperature")
+        if abs(sampling_temperature - algorithm_temperature) > 1e-9:
+            raise ValueError("sampling.temperature must equal algorithm.sampling_temperature")
+        if (int(batch_size) * group_size) % int(cfg.num_devices) != 0:
+            raise ValueError("batch_size*samples_per_prompt must be divisible by num_devices")
+
+    def _build_colocated_rollout(self, rollout_cfg: DictConfig, sync_cfg: DictConfig) -> None:
+        try:
+            self.backend.offload()
+        except BaseException:
+            self.backend.onload()
+            raise
+
+        rollout_built = False
+        rollout_released = False
+        try:
+            self.rollout = remote(**parse_hydra_cfg(rollout_cfg))
+            rollout_built = True
+            self.weight_sync = remote_hydra(sync_cfg, backend=self.backend, rollout=self.rollout)
+            self.rollout.sleep()
+            rollout_released = True
+            self.backend.onload()
+        except BaseException:
+            if rollout_built and not rollout_released:
+                try:
+                    self.rollout.shutdown()
+                    rollout_released = True
+                except BaseException:
+                    logger.exception("Failed to release agentic rollout after bootstrap failure")
+            if rollout_released or not rollout_built:
+                try:
+                    self.backend.onload()
+                except BaseException:
+                    logger.exception("Failed to restore training backend after rollout bootstrap failure")
+            raise
+
+    def _build_request_sample(self, inputs: Sample, rollout_id: int) -> Sample:
         return prepare_input_sample(
             inputs,
             rollout_id,
@@ -151,85 +184,205 @@ class AgenticTrainer(ARTrainer):
             root_control={"ar": {"stop": list(self._stop)}},
         )
 
-    def train_step(
-        self,
-        sample: Sample,
-        *,
-        training_progress: float = 0.0,
-        sync_weights: bool = False,
-        rollout_id: int = 0,
-    ) -> Tuple[TrainStepResult, float]:
-        """One agentic ``rollout → judge → advantage → optimizer step`` pass.
+    def _complete_groups(self, trajectories: List[Sample]) -> List[List[Sample]]:
+        expected = self.batch_size * self._group_size
+        if len(trajectories) != expected:
+            raise RuntimeError(f"expected {expected} trajectories, got {len(trajectories)}")
 
-        Returns ``(train_result, mean_reward)`` for the progress line.
-        """
-        t0 = time.perf_counter()
+        groups: Dict[str, List[Sample]] = {}
+        for trajectory in trajectories:
+            roots = list(dict.fromkeys(trajectory.root_group_ids(0)))
+            if len(roots) != 1:
+                raise RuntimeError("each agentic trajectory must belong to exactly one root group")
+            groups.setdefault(roots[0], []).append(trajectory)
 
-        if self._rollout_manager is None:
-            self._rollout_manager = self._create_rollout_manager()
-        manager = self._rollout_manager
+        malformed = {root: len(group) for root, group in groups.items() if len(group) != self._group_size}
+        if len(groups) != self.batch_size or malformed:
+            raise RuntimeError(
+                f"incomplete rollout groups: expected={self.batch_size}, actual={len(groups)}, malformed={malformed}"
+            )
+        return list(groups.values())
 
-        self.rollout.wake_up()
+    def _collect_groups(self, requests: Sample, *, rollout_id: int) -> List[List[Sample]]:
         original_error: Optional[BaseException] = None
+        wake_started = False
+        train_state_offloaded = False
+        sleep_succeeded = False
         try:
-            if sync_weights and self.weight_sync is not None:
-                manager.sync_weights(self.weight_sync, policy_version=rollout_id)
-            tasks = [prompt for prompt in sample.split() for _ in range(self._n)]
-            manager.submit(tasks)
-            trajs = manager.collect(int(sample.batch_size))
+            wake_started = True
+            self.rollout.wake_up()
+            self._rollout_manager.sync_weights(self.weight_sync, policy_version=rollout_id)
+            try:
+                self.backend.offload()
+            except BaseException:
+                self.backend.onload()
+                raise
+            train_state_offloaded = True
+
+            tasks = [prompt for prompt in requests.split() for _ in range(self._group_size)]
+            self._rollout_manager.submit(tasks)
+            trajectories = self._rollout_manager.collect(self.batch_size)
+            return self._complete_groups(trajectories)
         except BaseException as exc:
             original_error = exc
             try:
-                manager.quiesce()
+                self._rollout_manager.quiesce()
             except BaseException:
-                logger.exception("AgenticTrainer rollout cleanup failed")
+                logger.exception("Agentic rollout cleanup failed")
             raise
         finally:
-            try:
-                self.rollout.sleep()
-            except BaseException:
-                if original_error is None:
-                    raise
-                logger.exception("AgenticTrainer rollout sleep failed")
-        rewards, group_ids = self._rewards_and_groups(trajs, rollout_id)
+            if wake_started:
+                try:
+                    self.rollout.sleep()
+                    sleep_succeeded = True
+                except BaseException:
+                    if original_error is None:
+                        raise
+                    logger.exception("Agentic rollout sleep failed")
+            if train_state_offloaded and sleep_succeeded:
+                try:
+                    self.backend.onload()
+                except BaseException:
+                    if original_error is None:
+                        raise
+                    logger.exception("Agentic training backend restore failed")
 
-        return self._advantage_train_and_log(
-            trajs, rewards, group_ids, rollout_id=rollout_id, training_progress=training_progress, t0=t0
+    def train_step(
+        self,
+        inputs: Sample,
+        *,
+        training_progress: float = 0.0,
+        rollout_id: int = 0,
+    ) -> Tuple[TrainStepResult, float]:
+        t0 = time.perf_counter()
+        requests = self._build_request_sample(inputs, rollout_id)
+        groups = self._collect_groups(requests, rollout_id=rollout_id)
+        trajectories = [trajectory for group in groups for trajectory in group]
+        rewards = self._score_trajectories(trajectories, rollout_id)
+        advantages = self._group_advantages(groups, rewards)
+        return self._train_and_log(
+            trajectories,
+            rewards,
+            advantages,
+            rollout_id=rollout_id,
+            training_progress=training_progress,
+            t0=t0,
         )
 
-    def _advantage_train_and_log(
+    def _score_trajectories(self, trajectories: List[Sample], rollout_id: int) -> torch.Tensor:
+        rewards = torch.full((len(trajectories),), float("nan"), dtype=torch.float32)
+        valid_indices = [i for i, trajectory in enumerate(trajectories) if not _is_failed(trajectory)]
+        if not valid_indices:
+            logger.warning("Agentic rollout %d: every trajectory failed", rollout_id)
+            return rewards
+
+        questions: List[str] = []
+        predictions: List[str] = []
+        answers: List[Optional[str]] = []
+        for i in valid_indices:
+            trajectory = trajectories[i]
+            root = trajectory.parts[0]
+            metadata = root.metadata[0] if root.metadata else {}
+            prompt = root.primitives.get("text")
+            questions.append(prompt.texts[0] if isinstance(prompt, Texts) and prompt.texts else "")
+            terminal = trajectory.gen_parts()[-1].primitives.get("text")
+            terminal_text = terminal.texts[0] if isinstance(terminal, Texts) and terminal.texts else ""
+            predictions.append(_extract_answer(terminal_text))
+            answers.append((metadata or {}).get("answer"))
+
+        score_count = len(valid_indices)
+        reward_dp_size = max(1, int(self.reward.dp_size))
+        score_padding = (-score_count) % reward_dp_size
+        if score_padding:
+            questions.extend([questions[0]] * score_padding)
+            predictions.extend([predictions[0]] * score_padding)
+            answers.extend([answers[0]] * score_padding)
+
+        ar_sampling = self.sampling_params.get("ar")
+        score_input = Part.input(
+            [f"score{rollout_id}:{i}" for i in valid_indices]
+            + [f"score{rollout_id}:padding{i}" for i in range(score_padding)],
+            primitives={"text": Texts(texts=questions)},
+            metadata=[{"answer": answer} for answer in answers],
+        )
+        scoring = (
+            Sample.request(score_input)
+            .fork(1, sampling_params=ar_sampling)
+            .with_filled_frontier(primitives={"text": Texts(texts=predictions)})
+        )
+        scored = self.reward.score_and_attach(scoring)
+        scored_rewards = scored.parts[-1].rewards
+        if scored_rewards is None:
+            raise RuntimeError("reward service returned no rewards")
+        values = hydrate(scored_rewards).to(torch.float32).flatten()
+        if values.numel() != score_count + score_padding:
+            raise RuntimeError(
+                f"reward service returned {values.numel()} rewards for {score_count + score_padding} scoring rows"
+            )
+        if not bool(torch.isfinite(values).all()):
+            raise RuntimeError("reward service returned non-finite rewards")
+        rewards[torch.tensor(valid_indices, dtype=torch.long)] = values[:score_count]
+
+        failed = len(trajectories) - len(valid_indices)
+        if failed:
+            logger.warning(
+                "Agentic rollout %d: %d/%d trajectories failed and were excluded",
+                rollout_id,
+                failed,
+                len(trajectories),
+            )
+        return rewards
+
+    def _group_advantages(self, groups: List[List[Sample]], rewards: torch.Tensor) -> torch.Tensor:
+        advantages = torch.zeros_like(rewards, dtype=torch.float32)
+        offset = 0
+        for group in groups:
+            end = offset + len(group)
+            group_rewards = rewards[offset:end]
+            finite = torch.isfinite(group_rewards)
+            valid = group_rewards[finite]
+            if valid.numel():
+                centered = group_rewards - valid.mean()
+                std = valid.std(unbiased=False) if valid.numel() > 1 else valid.new_ones(())
+                normalized = centered / (std + 1e-8)
+                advantages[offset:end] = torch.where(finite, normalized, torch.zeros_like(normalized))
+            offset = end
+        if offset != rewards.numel():
+            raise RuntimeError("rollout group/reward cardinality mismatch")
+        return advantages
+
+    def _train_and_log(
         self,
-        trajs: List[Sample],
+        trajectories: List[Sample],
         rewards: torch.Tensor,
-        group_ids: List[str],
+        advantages: torch.Tensor,
         *,
         rollout_id: int,
         training_progress: float,
         t0: float,
-        extra_metrics: Optional[Dict[str, Any]] = None,
     ) -> Tuple[TrainStepResult, float]:
-        """GROUP-relative GRPO advantage → assign each trajectory's scalar advantage to ALL
-        its assistant turns → ONE padded ``train_track`` step → log. Shared by the barrier
-        ``train_step`` and the colocate partial-rollout trainer
-        (:class:`~unirl.trainer.agentic_partial.AgenticPartialTrainer`); the reward SOURCE
-        (answer vs env) is already resolved into ``rewards``/``group_ids`` by the caller.
-        ``extra_metrics`` are merged into the logged ``agent/*`` metrics."""
-        # Exclude crashed trajectories from reward means and GRPO.
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
 
-        advantages = self._group_advantages(rewards, group_ids)
-
         train_parts: List[Part] = []
-        for i, tr in enumerate(trajs):
-            adv_i = float(advantages[i].item())
-            for gp in tr.gen_parts():
-                gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
-                gp = _part_with_field(gp, "primitives", {})
-                gp = _part_with_field(gp, "rewards", None)
-                train_parts.append(gp)
+        for i, trajectory in enumerate(trajectories):
+            if not bool(finite[i]):
+                continue
+            advantage = float(advantages[i].item())
+            for generated in trajectory.gen_parts():
+                generated = _part_with_field(
+                    generated,
+                    "advantages",
+                    torch.full((generated.batch_size,), advantage, dtype=torch.float32),
+                )
+                generated = _part_with_field(generated, "primitive_metadata", {})
+                generated = _part_with_field(generated, "media_preview", None)
+                generated = _part_with_field(generated, "primitives", {})
+                generated = _part_with_field(generated, "rewards", None)
+                generated = _part_with_field(generated, "component_rewards", None)
+                train_parts.append(generated)
 
-        depths = [len(tr.gen_parts()) for tr in trajs]
+        depths = [len(trajectory.gen_parts()) for trajectory in trajectories]
         logger.info(
             "rollout %d trajectory turns: n=%d mean=%.2f min=%d max=%d hist=%s",
             rollout_id,
@@ -239,167 +392,157 @@ class AgenticTrainer(ARTrainer):
             max(depths, default=0),
             dict(sorted(Counter(depths).items())),
         )
-        if not train_parts:  # pathological: every sampled trajectory failed to generate
-            logger.warning("AgenticTrainer rollout %d produced no trainable turns.", rollout_id)
-            return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
 
-        train_part = Part.concat(train_parts)
-        train_part = self._pad_to_dp_multiple(train_part)
-        result = self.stack.train_track(train_part, training_progress=float(training_progress))
+        if train_parts:
+            train_part = self._pad_to_dp_multiple(Part.concat(train_parts))
+            result = self.stack.train_track(train_part, training_progress=float(training_progress))
+            train_rows = int(train_part.batch_size)
+        else:
+            result = TrainStepResult(0.0, 0.0, 0.0, False, [], {})
+            train_rows = 0
 
-        log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
-        metrics: Dict[str, Any] = {
-            "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
-            "agent/max_turns": max(depths) if depths else 0,
-            "agent/genless_trajectories": sum(1 for d in depths if d == 0),
-            "agent/train_rows": int(train_part.batch_size),
-        }
-        if extra_metrics:
-            metrics.update(extra_metrics)
+        log_sample = self._build_log_sample(trajectories, rewards, advantages, rollout_id)
         self.wandb_logger.log_rollout_step(
             rollout_id,
             result,
             log_sample,
             step_time_s=time.perf_counter() - t0,
-            extra_metrics=metrics,
+            extra_metrics={
+                "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
+                "agent/max_turns": max(depths) if depths else 0,
+                "agent/failed_trajectories": int((~finite).sum().item()),
+                "agent/train_rows": train_rows,
+            },
         )
         return result, mean_reward
 
-    def _rewards_and_groups(self, trajs: List[Sample], rollout_id: int) -> Tuple[torch.Tensor, List[str]]:
-        """Per-trajectory scalar reward + GRPO group id (root id) — the overridable
-        reward step. Base path grades each trajectory's ``<answer>`` against the
-        ground truth via the reward backend (MathVerify / LLM judge); the ``n``
-        siblings of a prompt share its root id (group-by-root). Subclasses swap the
-        reward SOURCE (e.g. :class:`~unirl.trainer.agentic_env.AgenticEnvTrainer`
-        reads the environment's per-trajectory return) while keeping the GRPO tail.
-
-        A FRESH flat scoring Sample is required because ``score_and_attach`` rejects
-        precomputed frontier rewards; its frontier carries no ``segment`` so the
-        truncation-shaping branch is skipped.
-        """
-        questions: List[str] = []
-        predictions: List[str] = []
-        answers: List[Optional[str]] = []
-        group_ids: List[str] = []
-        for tr in trajs:
-            root = tr.parts[0]
-            root_id = root.sample_ids[0]
-            metadata = root.metadata[0] if root.metadata else {}
-            q_prim = root.primitives.get("text")
-            questions.append(q_prim.texts[0] if (q_prim is not None and q_prim.texts) else "")
-            gens = tr.gen_parts()
-            term = ""
-            terminal_text = gens[-1].primitives.get("text") if gens else None
-            if isinstance(terminal_text, Texts) and terminal_text.texts:
-                term = terminal_text.texts[0]
-            predictions.append(_extract_answer(term))
-            answers.append((metadata or {}).get("answer"))
-            group_ids.append(root_id)
-
-        m = len(trajs)
-        ar_sp = self.sampling_params.get("ar")
-        score_in = Part.input(
-            [f"score{rollout_id}:{i}" for i in range(m)],
-            primitives={"text": Texts(texts=list(questions))},
-            metadata=[{"answer": a} for a in answers],
-        )
-        scoring = (
-            Sample.request(score_in)
-            .fork(1, sampling_params=ar_sp)
-            .with_filled_frontier(primitives={"text": Texts(texts=list(predictions))})
-        )
-        scoring = self.reward.score_and_attach(scoring)
-        rewards = hydrate(scoring.parts[-1].rewards).to(torch.float32)
-        # Mark failed trajectories as NaN so they receive zero advantage.
-        failed = torch.tensor([_is_failed(tr) for tr in trajs], dtype=torch.bool)
-        if bool(failed.any()):
-            logger.warning(
-                "AgenticTrainer rollout %d: %d/%d trajectories failed; excluded from GRPO statistics.",
-                rollout_id,
-                int(failed.sum()),
-                len(trajs),
-            )
-            rewards = torch.where(failed, torch.full_like(rewards, float("nan")), rewards)
-        return rewards, group_ids
-
     def _build_log_sample(
-        self, trajs: List[Sample], rewards: torch.Tensor, advantages: torch.Tensor, rollout_id: int
+        self,
+        trajectories: List[Sample],
+        rewards: torch.Tensor,
+        advantages: torch.Tensor,
+        rollout_id: int,
     ) -> Sample:
-        """A flat one-row-per-trajectory Sample whose gen frontier carries the
-        per-trajectory reward + advantage, for ``compute_rollout_sample_metrics``
-        (reward/advantage distributions). Reward-source agnostic — no reward backend,
-        no scoring sample — so it works for both the answer-graded and env-sourced paths."""
-        m = len(trajs)
-        ar_sp = self.sampling_params.get("ar")
-        log_in = Part.input([f"log{rollout_id}:{i}" for i in range(m)], primitives={"text": Texts(texts=[""] * m)})
-        log_sample = (
-            Sample.request(log_in)
-            .fork(1, sampling_params=ar_sp)
-            .with_filled_frontier(primitives={"text": Texts(texts=[""] * m)})
-        )
-        frontier = _part_with_field(log_sample.parts[-1], "rewards", rewards.to(torch.float32))
-        frontier = _part_with_field(frontier, "advantages", advantages.to(torch.float32))
-        return log_sample.with_parts([*log_sample.parts[:-1], frontier])
+        if len(trajectories) != rewards.numel() or rewards.numel() != advantages.numel():
+            raise RuntimeError("trajectory/reward/advantage cardinality mismatch")
+        finite = torch.isfinite(rewards)
+        count = int(finite.sum().item())
+        if count == 0:
+            return Sample(parts=[])
 
-    def _group_advantages(self, rewards: torch.Tensor, group_ids: List[str]) -> torch.Tensor:
-        """Group-relative GRPO advantages, ``ARTrainer.compute_advantages`` parity
-        (population std), over the ``n`` siblings of each prompt (grouped by root id;
-        completion order is fine). ``adv_normalization_scope='global'`` z-scores the
-        whole batch; ``normalize_adv_by_std=False`` mean-centers only."""
-        r = rewards.to(torch.float32)
-        # Give NaN failures zero advantage and exclude them from group statistics.
-        finite = torch.isfinite(r)
-        if self.adv_normalization_scope == "global":
-            rf = r[finite]
-            mean = rf.mean() if rf.numel() else r.new_zeros(())
-            centered = torch.where(finite, r - mean, torch.zeros_like(r))
-            if self.normalize_adv_by_std:
-                std = rf.std(unbiased=False) if rf.numel() > 1 else r.new_ones(())
-                centered = centered / (std + 1e-8)
-            return torch.where(finite, centered, torch.zeros_like(centered))
-        adv = torch.zeros_like(r)
-        for idxs in build_group_index_map(group_ids).values():
-            idx = torch.tensor(idxs, dtype=torch.long)
-            fin = finite[idx]
-            g = r[idx]
-            gf = g[fin]
-            if gf.numel() == 0:
-                continue  # whole group crashed -> zero advantage
-            centered = g - gf.mean()
-            if self.normalize_adv_by_std:
-                std = gf.std(unbiased=False) if gf.numel() > 1 else g.new_ones(())
-                centered = centered / (std + 1e-8)
-            adv[idx] = torch.where(fin, centered, torch.zeros_like(centered))
-        return adv
+        ar_sampling = self.sampling_params.get("ar")
+        root = Part.input(
+            [f"log{rollout_id}:{i}" for i in range(count)],
+            primitives={"text": Texts(texts=[""] * count)},
+        )
+        sample = (
+            Sample.request(root)
+            .fork(1, sampling_params=ar_sampling)
+            .with_filled_frontier(primitives={"text": Texts(texts=[""] * count)})
+        )
+        frontier = _part_with_field(sample.parts[-1], "rewards", rewards[finite].to(torch.float32))
+        frontier = _part_with_field(frontier, "advantages", advantages[finite].to(torch.float32))
+        return sample.with_parts([*sample.parts[:-1], frontier])
 
     def _pad_to_dp_multiple(self, part: Part) -> Part:
-        """Pad ``part`` up to a multiple of the train DP size by replicating the
-        shortest row with advantage 0 (zero gradient for GRPO/DRPO/CPPO), so the ragged
-        Σ-turns batch satisfies ``pytree_chunk``'s divisibility check."""
-        dp = int(getattr(self.stack, "dp_size", self.num_devices))
-        pad = (-int(part.batch_size)) % dp
+        dp_size = int(getattr(self.stack, "dp_size", self.num_devices))
+        pad = (-int(part.batch_size)) % dp_size
         if pad == 0:
             return part
         lengths = part.segment.lengths if part.segment is not None else None
-        src = int(torch.argmin(lengths).item()) if (lengths is not None and lengths.numel()) else 0
-        pad_block = part.select(torch.full((pad,), src, dtype=torch.long))
-        pad_block = _part_with_field(pad_block, "advantages", torch.zeros(pad, dtype=torch.float32))
-        return Part.concat([part, pad_block])
+        source = int(torch.argmin(lengths).item()) if lengths is not None and lengths.numel() else 0
+        padding = part.select(torch.full((pad,), source, dtype=torch.long))
+        padding = _part_with_field(padding, "advantages", torch.zeros(pad, dtype=torch.float32))
+        return Part.concat([part, padding])
 
-    def evaluate(self, rollout_id: int) -> float:
-        raise NotImplementedError(
-            "AgenticTrainer.evaluate is not implemented. Set eval_interval=0 (agentic evaluation is a follow-up)."
-        )
+    def train(
+        self,
+        *,
+        num_rollouts: int,
+        save_interval: int = 0,
+        save_dir: Optional[str] = None,
+        load_dir: Optional[str] = None,
+        save_mode: str = "auto",
+    ) -> None:
+        try:
+            start_rollout = self.maybe_load_checkpoint(load_dir, num_rollouts=num_rollouts)
+            for _ in range(start_rollout):
+                self.data_source.get_samples(self.batch_size)
+            self._init_wandb(num_rollouts=num_rollouts, extra={"agentic_execution": "barrier"})
+
+            for rollout_id in range(start_rollout, num_rollouts):
+                inputs = self.data_source.get_samples(self.batch_size)
+                training_progress = rollout_id / max(1, num_rollouts - 1)
+                result, mean_reward = self.train_step(
+                    inputs,
+                    training_progress=training_progress,
+                    rollout_id=rollout_id,
+                )
+                self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
+                self.maybe_save_checkpoint(
+                    rollout_id,
+                    num_rollouts,
+                    save_interval=save_interval,
+                    save_dir=save_dir,
+                    save_mode=save_mode,
+                )
+        finally:
+            try:
+                self._finish_wandb()
+            finally:
+                self._shutdown_runtime()
+
+    def shutdown(self) -> None:
+        self._shutdown_runtime()
 
     def _shutdown_runtime(self) -> None:
+        if getattr(self, "_runtime_shutdown_done", False):
+            return
+        self._runtime_shutdown_done = True
+        active_error = sys.exc_info()[1]
+        cleanup_errors: List[Tuple[str, BaseException]] = []
+
         manager = getattr(self, "_rollout_manager", None)
-        active_error = sys.exc_info()[0] is not None
-        try:
-            if manager is not None:
+        if manager is not None:
+            try:
                 manager.close()
-        except BaseException:
-            if not active_error:
-                raise
-            logger.exception("Agentic rollout manager shutdown failed")
-        finally:
-            super()._shutdown_runtime()
+            except BaseException as exc:
+                cleanup_errors.append(("rollout manager", exc))
+
+        rollout = getattr(self, "rollout", None)
+        shutdown = getattr(rollout, "shutdown", None)
+        if callable(shutdown):
+            try:
+                run_with_timeout(
+                    shutdown,
+                    timeout=_ROLLOUT_SHUTDOWN_TIMEOUT_S,
+                    what="agentic rollout engine shutdown",
+                )
+            except BaseException as exc:
+                cleanup_errors.append(("rollout engine", exc))
+
+        pool = getattr(self, "pool", None)
+        if pool is not None:
+            try:
+                pool.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down agentic trainer device pool")
+
+        if active_error is not None:
+            for operation, error in cleanup_errors:
+                active_error.add_note(f"failed to shut down {operation}: {error!r}")
+                logger.error(
+                    "Failed to shut down agentic %s",
+                    operation,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            return
+        if cleanup_errors:
+            operation, error = cleanup_errors[0]
+            for later_operation, later_error in cleanup_errors[1:]:
+                error.add_note(f"also failed to shut down {later_operation}: {later_error!r}")
+            error.add_note(f"agentic shutdown operation: {operation}")
+            raise error
+
+
+__all__ = ["AgenticTrainer"]

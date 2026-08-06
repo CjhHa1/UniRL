@@ -88,19 +88,13 @@ class AgenticRolloutEngine(SyncRolloutEngine):
         policy_version = self._policy_version
         try:
             outcome = self._harness.run(sample, self._harness_ctx)
-            if outcome.status == "completed":
-                result = self._attach_env_reward(outcome.sample, outcome.env_reward)
-            elif outcome.status == "suspended":
-                result = outcome.sample
-            elif outcome.status == "failed":
-                result = self._attach_env_reward(outcome.sample, float("nan"))
-            else:
+            if outcome.status not in ("completed", "suspended", "failed"):
                 raise ValueError(f"unknown harness outcome status: {outcome.status!r}")
-            result = self._stamp_generated_versions(result, generated_before, policy_version)
+            result = self._stamp_generated_versions(outcome.sample, generated_before, policy_version)
             return self._stamp_outcome(result, outcome.status)
         except Exception as exc:  # noqa: BLE001
             logger.warning("AgenticRolloutEngine: harness outcome failed, marking failed: %s", exc, exc_info=True)
-            return self._stamp_outcome(self._attach_env_reward(sample, float("nan")), "failed")
+            return self._stamp_outcome(sample, "failed")
 
     @staticmethod
     def _stamp_generated_versions(sample: Sample, generated_before: int, policy_version: int) -> Sample:
@@ -120,21 +114,6 @@ class AgenticRolloutEngine(SyncRolloutEngine):
             return sample
         last = _part_with_field(sample.parts[-1], "harness_status", status)
         return sample.with_parts([*sample.parts[:-1], last])
-
-    @staticmethod
-    def _attach_env_reward(sample: Sample, reward: Optional[float]) -> Sample:
-        if reward is None:
-            return sample
-        generated = sample.gen_parts()
-        if not generated:
-            return sample
-        last = generated[-1]
-        rewarded = _part_with_field(
-            last,
-            "rewards",
-            torch.full((int(last.batch_size),), float(reward), dtype=torch.float32),
-        )
-        return sample.with_parts([rewarded if part is last else part for part in sample.parts])
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def set_stopping(self, stopping: bool = True) -> None:
@@ -165,6 +144,11 @@ class AgenticRolloutEngine(SyncRolloutEngine):
     @property
     def is_offloaded(self) -> bool:
         return self._inner.is_offloaded
+
+    @property
+    def tensor_weight_sync_target(self) -> SyncRolloutEngine:
+        """The concrete receiver whose serializer contract tensor sync follows."""
+        return self._inner
 
     def health_check(self) -> bool:
         return self._inner.health_check()
