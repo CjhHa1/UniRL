@@ -49,7 +49,8 @@ tail_policy: carry # SearchTool/VisitTool are stateless; the carried Sample resu
 
 # rank-0 coordinator runs the background drain + serves next_task pulls + the
 # poll/abort/drained control RPCs concurrently on a threaded Worker — needs >=3.
-worker_max_concurrency: 8
+worker_max_concurrency: 10
+per_worker_inflight: 8
 
 # Per-turn stop: a tool-call turn ends at </tool_call> and yields to the tool.
 stop: ["</tool_call>"]

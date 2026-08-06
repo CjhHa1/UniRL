@@ -49,6 +49,9 @@ class CompletedGroups:
     def extend(self, groups: List[List["Sample"]]) -> None:
         self._groups.extend(groups)
 
+    def prepend(self, groups: List[List["Sample"]]) -> None:
+        self._groups.extendleft(reversed(groups))
+
     def popleft(self) -> List["Sample"]:
         return self._groups.popleft()
 

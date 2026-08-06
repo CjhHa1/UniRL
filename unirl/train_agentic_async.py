@@ -61,6 +61,7 @@ def main(cfg: DictConfig) -> None:
         oversample_batch_size=cfg.get("oversample_batch_size"),
         buffer_max_staleness=cfg.get("buffer_max_staleness"),
         tail_policy=cfg.get("tail_policy", "carry"),
+        per_worker_inflight=cfg.get("per_worker_inflight", 8),
     )
     trainer.train(
         num_rollouts=cfg.get("num_rollouts", 100),

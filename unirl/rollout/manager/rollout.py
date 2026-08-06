@@ -56,17 +56,21 @@ class RolloutManager:
         if n <= 0:
             raise ValueError(f"collect count must be positive; got {n}")
         selected = []
-        while len(selected) < n:
-            self._route(self._pool.take_completed(block=False), allow_suspended=False)
-            while len(self._buffer) and len(selected) < n:
-                kept = self._apply_filter(self._buffer.popleft())
-                if kept:
-                    selected.append(kept)
-            if len(selected) == n:
-                return selected
-            if not self._pool.live:
-                raise RolloutUnderflow(f"needed {n} rollout groups, collected {len(selected)}")
-            self._route(self._pool.take_completed(block=True), allow_suspended=False)
+        try:
+            while len(selected) < n:
+                self._route(self._pool.take_completed(block=False), allow_suspended=False)
+                while len(self._buffer) and len(selected) < n:
+                    kept = self._apply_filter(self._buffer.popleft())
+                    if kept:
+                        selected.append(kept)
+                if len(selected) == n:
+                    return selected
+                if not self._pool.live:
+                    raise RolloutUnderflow(f"needed {n} rollout groups, collected {len(selected)}")
+                self._route(self._pool.take_completed(block=True), allow_suspended=False)
+        except BaseException:
+            self._buffer.prepend(selected)
+            raise
         return selected
 
     def quiesce(self) -> List["Sample"]:

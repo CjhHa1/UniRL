@@ -26,7 +26,8 @@ tail_policy: drop # ALFWorld reset starts a fresh episode → a carried partial 
 # Colocate partial oversubscribes rank 0: its own run_drain + every worker's next_task pull +
 # the poll→drain_completed fan + submit/abort/sync all ride these threaded-actor slots. Give it
 # generous headroom (barrier only needs 8 because it never poll-fans).
-worker_max_concurrency: 24
+worker_max_concurrency: 10
+per_worker_inflight: 8
 stop: null # ALFWorld actions are free text; rely on per-turn max_new_tokens
 adv_normalization_scope: group
 normalize_adv_by_std: true

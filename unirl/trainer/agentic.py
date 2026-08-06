@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import time
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
@@ -412,6 +413,13 @@ class AgenticTrainer(ARTrainer):
 
     def _shutdown_runtime(self) -> None:
         manager = getattr(self, "_rollout_manager", None)
-        if manager is not None:
-            manager.close()
-        super()._shutdown_runtime()
+        active_error = sys.exc_info()[0] is not None
+        try:
+            if manager is not None:
+                manager.close()
+        except BaseException:
+            if not active_error:
+                raise
+            logger.exception("Agentic rollout manager shutdown failed")
+        finally:
+            super()._shutdown_runtime()

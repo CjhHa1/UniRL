@@ -28,7 +28,8 @@ oversample_batch_size: 12 # generate 12 games/drive; train the freshest 8 withou
 buffer_max_staleness: 2 # bounded off-policy: a buffered group may cross up to 2 syncs
 tail_policy: drop # ALFWorld reset creates a fresh episode; interrupted stateful tails cannot resume
 
-worker_max_concurrency: 8
+worker_max_concurrency: 10
+per_worker_inflight: 8
 stop: null # ALFWorld actions are free text; rely on per-turn max_new_tokens
 
 adv_normalization_scope: group
