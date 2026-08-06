@@ -152,6 +152,12 @@ class ComposedRolloutEngine(SyncRolloutEngine):
         for child in self._children_for_track_prefix(track_prefix):
             child.onload_weights()
 
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def set_version(self, train_version: int) -> None:
+        for child in self._child_by_name.values():
+            child.set_version(train_version)
+        self._version = train_version
+
     @property
     def is_offloaded(self) -> bool:
         return all(child.is_offloaded for child in self._child_by_name.values())

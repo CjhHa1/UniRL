@@ -396,20 +396,21 @@ class AsyncAgenticRolloutEngine:
     def version(self) -> int:
         return self._version
 
-    def sync_weights(self, weight_sync: Any) -> int:
+    def sync_weights(self, weight_sync: Any) -> None:
         """Push train weights via *weight_sync* and advance the version ledger.
 
-        The only sanctioned weight-push path — pairing the push with the bump
-        is what keeps the ledger truthful. Raises while a drive is active (a
-        weight push must be decode-idle); a joined ``finalize_if_drained`` or
-        ``quiesce`` ends the drive.
+        The only sanctioned weight-push path — pairing the push with the worker
+        version assignment keeps output provenance and the buffer ledger aligned.
+        Raises while a drive is active (a weight push must be decode-idle); a
+        joined ``finalize_if_drained`` or ``quiesce`` ends the drive.
         """
         if self._drive_live:
             raise RuntimeError("sync_weights with a drive active; finalize or quiesce() first")
+        next_version = self._version + 1
         weight_sync.sync()
-        self._version += 1
+        self._rollout.set_version(next_version)
+        self._version = next_version
         logger.info("sync_weights: pushed train weights; version -> %d", self._version)
-        return self._version
 
     def submit(self, tasks: List["Sample"]) -> None:
         """Fire a background drive over a flat task list (fresh siblings + carried partials).

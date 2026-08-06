@@ -81,6 +81,12 @@ class AsyncBatchControl:
 
         return self.weight_sync_interval
 
+    @property
+    def publication_due(self) -> bool:
+        """Whether the configured number of batches has consumed this snapshot."""
+
+        return self.batches_since_sync >= self.weight_sync_interval
+
     def restore(self, train_version: int) -> None:
         self.train_version = train_version
         self.published_version = 0
@@ -110,16 +116,16 @@ class AsyncBatchControl:
         num_rollouts: int,
         hard_boundary: int,
     ) -> int:
-        if self.batches_since_sync >= self.weight_sync_interval:
+        if self.publication_due:
             return 0
         freshness = self.weight_sync_interval - self.batches_since_sync
         allowed = min(freshness, num_rollouts - trained_batches, hard_boundary - trained_batches)
         return max(0, min(max_inflight - inflight_count, allowed - inflight_count - ready_count))
 
-    def sync_rollout(self, engine: Any, rollout: Any, weight_sync: Any, *, force: bool = False) -> bool:
+    def sync_rollout(self, engine: Any, rollout: Any, weight_sync: Any, *, force: bool = False) -> None:
         if not force and self.publish_lag == 0:
             self.batches_since_sync = 0
-            return False
+            return
         engine.quiesce()
         if engine.ready_count:
             raise RuntimeError(
@@ -129,7 +135,6 @@ class AsyncBatchControl:
         rollout.set_version(self.train_version)
         self.published_version = self.train_version
         self.batches_since_sync = 0
-        return True
 
     def output_metrics(self, output_version: int) -> dict[str, float]:
         staleness = self.staleness(output_version)
@@ -142,30 +147,30 @@ class AsyncBatchControl:
     def train_metrics(self, optimizer_updates: int) -> dict[str, int]:
         return {
             "async/train_version": self.train_version,
+            "async/published_version": self.published_version,
             "async/publish_lag": self.publish_lag,
             "async/optimizer_updates": optimizer_updates,
             "async/batches_since_sync": self.batches_since_sync,
         }
 
 
-def sync_period_batches(
+def max_publication_gap_batches(
     control: AsyncBatchControl,
     *,
     eval_interval: int = 0,
     save_interval: int = 0,
 ) -> int:
-    """Batches between weight publications, once every admission limit is applied.
+    """Maximum batches between publications after hard boundaries are applied.
 
-    The configured interval would publish every ``admission_depth`` batches,
-    but :func:`next_hard_boundary` clamps admission as well, so an eval or
-    checkpoint interval below that depth becomes the period instead.
+    Eval and checkpoint boundaries can add publications between the regular
+    cadence, so the actual gaps need not be constant.
     """
 
-    period = control.admission_depth
+    max_gap = control.admission_depth
     for interval in (eval_interval, save_interval):
         if interval > 0:
-            period = min(period, interval)
-    return period
+            max_gap = min(max_gap, interval)
+    return max_gap
 
 
 def log_admission_notes(
@@ -181,7 +186,11 @@ def log_admission_notes(
     case where the recipe's number does not buy what its name implies.
     """
 
-    period = sync_period_batches(control, eval_interval=eval_interval, save_interval=save_interval)
+    max_gap = max_publication_gap_batches(
+        control,
+        eval_interval=eval_interval,
+        save_interval=save_interval,
+    )
 
     if control.weight_sync_interval == 1:
         logger.warning(
@@ -194,32 +203,18 @@ def log_admission_notes(
             max_inflight,
             control.admission_depth,
         )
-    # The loop reaps before it launches, so one completed batch can sit in the
-    # ready queue behind the in-flight ones; anything past that never becomes
-    # concurrency, it only defers the sync.
-    usable_depth = max_inflight + 1
-    if control.admission_depth > usable_depth:
-        logger.info(
-            "weight_sync_interval=%d admits %d outstanding batches but the loop holds at most %d "
-            "(max_inflight=%d plus one reaped); the surplus does not deepen the pipeline, it "
-            "sets the weight-sync period to %d batches",
-            control.weight_sync_interval,
-            control.admission_depth,
-            usable_depth,
-            max_inflight,
-            period,
-        )
-    if period < control.admission_depth:
+    if max_gap < control.admission_depth:
         logger.warning(
-            "eval/checkpoint boundaries publish every %d batches, below weight_sync_interval=%d "
+            "eval/checkpoint boundaries cap the maximum publication gap at %d batches, "
+            "below weight_sync_interval=%d "
             "(eval_interval=%d, save_interval=%d), so derived max_staleness=%d is never fully "
             "spent — data tops out at %d batches stale",
-            period,
+            max_gap,
             control.admission_depth,
             eval_interval,
             save_interval,
             control.max_staleness,
-            period - 1,
+            max_gap - 1,
         )
 
 
@@ -256,7 +251,7 @@ def unwrap_replicated_int(value: object, *, name: str) -> int:
 __all__ = [
     "AsyncBatchControl",
     "log_admission_notes",
+    "max_publication_gap_batches",
     "next_hard_boundary",
-    "sync_period_batches",
     "unwrap_replicated_int",
 ]

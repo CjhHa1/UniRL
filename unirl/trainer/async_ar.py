@@ -24,10 +24,10 @@ updates, but the budget is stated in whole rollout batches:
 Generation runs through :class:`~unirl.rollout.engine.asynchronous.AsyncBatchRolloutEngine`
 (non-blocking Ray futures over the rollout Handle) on the single driver thread —
 no producer thread, no locks; the trainer's ``_next_rollout_batch`` loop owns the policy
-(optimizer-update launch admission, launch-then-reap order). Draining all in-flight generations
+(optimizer-update launch admission, reap-before-launch order). Draining all in-flight generations
 before each weight sync is **mandatory** (the engine corrupts an in-flight
-generation when weights + KV cache update mid-flight); this is the
-single-threaded ``_drain_all`` quiesce.
+generation when weights + KV cache update mid-flight); weight sync and teardown
+therefore quiesce the engine first.
 
 Subclasses ``ARTrainer`` to reuse ``_build_request_sample``/``evaluate`` and ``BaseTrainer``
 plumbing, but ``__init__`` calls ``BaseTrainer.__init__`` **directly** (the parent
@@ -53,8 +53,8 @@ from unirl.trainer.ar import ARTrainer
 from unirl.trainer.async_batch_control import (
     AsyncBatchControl,
     log_admission_notes,
+    max_publication_gap_batches,
     next_hard_boundary,
-    sync_period_batches,
     unwrap_replicated_int,
 )
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
@@ -248,15 +248,6 @@ class AsyncARTrainer(ARTrainer):
         self._drop_decoded(scored, rollout_id=gen_id)
         return scored.split()
 
-    def _drain_all(self) -> None:
-        """Finish + buffer EVERY in-flight generation (the single-threaded quiesce).
-
-        Mandatory before a weight sync (the engine corrupts an in-flight generate
-        when weights + KV cache update mid-flight), before eval/checkpoint (shared
-        engine), and in ``finally`` (no leaked ObjectRefs).
-        """
-        self._async_engine.quiesce()
-
     def _advantage_and_train(
         self,
         sample: Sample,
@@ -325,7 +316,7 @@ class AsyncARTrainer(ARTrainer):
                 "max_staleness": self._control.max_staleness,
                 "staleness_budget": self._control.staleness_budget,
                 "num_updates_per_batch": self._control.num_updates_per_batch,
-                "sync_period_batches": sync_period_batches(
+                "max_publication_gap_batches": max_publication_gap_batches(
                     self._control,
                     eval_interval=self.eval_interval,
                     save_interval=save_interval,
@@ -381,9 +372,7 @@ class AsyncARTrainer(ARTrainer):
                 step = rollout_id + 1
                 eval_due = self.eval_interval > 0 and step % self.eval_interval == 0
                 save_due = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
-                sync_due = (
-                    step < num_rollouts and self._control.batches_since_sync >= self._control.weight_sync_interval
-                )
+                sync_due = step < num_rollouts and self._control.publication_due
                 if eval_due or save_due or sync_due:
                     self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
 
@@ -400,7 +389,7 @@ class AsyncARTrainer(ARTrainer):
         finally:
             active_exception = sys.exc_info()[0] is not None
             try:
-                self._drain_all()
+                self._async_engine.quiesce()
             except Exception:
                 if not active_exception:
                     raise

@@ -172,10 +172,9 @@ class SyncRolloutEngine(BaseRolloutEngine, ABC):
 
     def _stamp_output_version(self, sample: Sample) -> Sample:
         """Stamp ``self._version`` onto the frontier (last) gen Part."""
-        v = getattr(self, "_version", None)
-        if v is None or not sample.parts:
+        if not sample.parts:
             return sample
-        gen = sample.parts[-1].fill(output_version=int(v))
+        gen = sample.parts[-1].fill(output_version=int(self._version))
         return sample.with_parts([*sample.parts[:-1], gen])
 
 
