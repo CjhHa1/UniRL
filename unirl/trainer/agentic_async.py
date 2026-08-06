@@ -17,12 +17,12 @@ through the driver-side :class:`~unirl.rollout.engine.asynchronous.AsyncAgenticR
   siblings + resumed carried partials and ``poll`` completed trajectories; the facade
   buckets them by root id into complete GRPO groups and stamps each into its
   staleness-bounded versioned buffer.
-* **Consumer** — drain the freshest ``batch_size`` complete groups (within
-  ``buffer_max_staleness``), reward + GRPO advantage + one optimizer step (reusing
-  :class:`AgenticTrainer`'s helpers), then **quiesce + sync**: ``abort`` the in-flight
+* **Consumer** — drain the freshest ``batch_size`` complete groups within the
+  update-version budget derived from ``buffer_max_staleness``, then reward,
+  compute GRPO advantage, and train. Before sync, ``abort`` the in-flight
   tail at a turn boundary, apply the configured ``tail_policy`` (carry only when the
   environment can resume from the ``Sample``; otherwise drop), then
-  ``engine.sync_weights`` (one call: push + train-version assignment + sync bump).
+  ``engine.sync_weights`` (one call: push + train-version assignment).
 
 ONE single-threaded loop (the ``AsyncARTrainer`` shape): with disjoint slabs the
 rollout slab keeps generating in the background (the engine's per-worker drain) while
@@ -108,6 +108,8 @@ class AsyncAgenticTrainer(AgenticTrainer):
 
         self._train_fraction = float(train_fraction)
         self._buffer_max_staleness = buffer_max_staleness
+        self._num_updates_per_batch = int(stack_cfg.get("num_updates_per_batch", 1))
+        self._buffer_staleness_budget_updates = 0
         self._tail_policy = tail_policy
         if self._tail_policy not in ("carry", "drop"):
             raise ValueError(f"tail_policy must be 'carry' or 'drop'; got {self._tail_policy!r}")
@@ -234,9 +236,9 @@ class AsyncAgenticTrainer(AgenticTrainer):
             },
         )
 
-    def _drain_buffer(self, n: int, *, max_staleness: int) -> Optional[List[List[Sample]]]:
+    def _drain_buffer(self, n: int, *, staleness_budget: int) -> Optional[List[List[Sample]]]:
         """Drain fresh groups and forget ground truth for stale evictions."""
-        picked = self._engine.drain_freshest(n, max_staleness=max_staleness)
+        picked = self._engine.drain_freshest(n, staleness_budget=staleness_budget)
         for group in self._engine.pop_evicted():
             if group:
                 self._gt_by_root.pop(root_of(group[0]), None)
@@ -247,17 +249,22 @@ class AsyncAgenticTrainer(AgenticTrainer):
         the staleness bound, then drain the freshest ones. If the in-flight drive drains
         without filling the buffer (staleness eviction / failures / small over-sample),
         refill with a fresh drive."""
-        stale = self._buffer_max_staleness if self._buffer_max_staleness is not None else 0
         refills = 0
         while True:
             self._engine.poll()
-            picked = self._drain_buffer(self.batch_size, max_staleness=stale)
+            picked = self._drain_buffer(
+                self.batch_size,
+                staleness_budget=self._buffer_staleness_budget_updates,
+            )
             if picked is not None:
                 return picked
             if self._engine.finalize_if_drained() is None:
                 time.sleep(self._POLL_INTERVAL_S)
                 continue
-            picked = self._drain_buffer(self.batch_size, max_staleness=stale)
+            picked = self._drain_buffer(
+                self.batch_size,
+                staleness_budget=self._buffer_staleness_budget_updates,
+            )
             if picked is not None:
                 return picked
 
@@ -305,6 +312,16 @@ class AsyncAgenticTrainer(AgenticTrainer):
 
         log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
         versions = [gp.output_version for tr in trajs for gp in tr.gen_parts() if gp.output_version is not None]
+        version_metrics: Dict[str, int] = {"async/published_version": self._engine.version}
+        if versions:
+            head_version = min(versions)
+            version_metrics.update(
+                {
+                    "async/head_output_version": head_version,
+                    "async/head_staleness_updates": self._engine.version - head_version,
+                    "async/output_version_span_updates": max(versions) - head_version,
+                }
+            )
         self.wandb_logger.log_rollout_step(
             rollout_id,
             result,
@@ -314,8 +331,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
                 "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
                 "agent/max_turns": max(depths) if depths else 0,
                 "async/buffer_groups": self._engine.buffered_groups(),
-                "async/sync_version": self._engine.sync_version,
-                "async/output_version_span_updates": (max(versions) - min(versions)) if versions else 0,
+                **version_metrics,
                 "async/assembler_pending_roots": self._engine.pending_groups(),
                 "async/carried_tail_trajectories": self._carried_tail_trajectories,
                 "async/dropped_tail_trajectories": self._dropped_tail_trajectories,
@@ -343,26 +359,30 @@ class AsyncAgenticTrainer(AgenticTrainer):
         save_mode: str = "full",
     ) -> None:
         interval = max(1, weight_sync_interval)
-        stale = self._buffer_max_staleness if self._buffer_max_staleness is not None else 0
+        max_staleness_syncs = self._buffer_max_staleness if self._buffer_max_staleness is not None else 0
+        # Real-version gaps shrink when optimizer steps skip, so eligibility tracks policy movement.
+        self._buffer_staleness_budget_updates = max_staleness_syncs * interval * self._num_updates_per_batch
 
         start_rollout = self.maybe_load_checkpoint(load_dir, num_rollouts=num_rollouts)
+        resumed = bool(load_dir)
         for _ in range(start_rollout):
             self.data_source.get_samples(self._oversample)
         self._init_wandb(
             num_rollouts=num_rollouts,
             extra={
                 "adv_normalization_scope": self.adv_normalization_scope,
-                "buffer_max_staleness": stale,
+                "buffer_max_staleness_intervals": max_staleness_syncs,
                 "oversample_batch_size": self._oversample,
                 "train_fraction": self._train_fraction,
                 "tail_policy": self._tail_policy,
                 "weight_sync_interval": interval,
+                "buffer_staleness_budget_updates": self._buffer_staleness_budget_updates,
             },
         )
 
         self._engine = AsyncAgenticRolloutEngine(self.rollout, group_size=self._n, start_gen_id=start_rollout)
 
-        if start_rollout < num_rollouts and start_rollout and self.weight_sync is not None:
+        if start_rollout < num_rollouts and resumed and self.weight_sync is not None:
             self._engine.sync_weights(
                 self.weight_sync,
                 train_version=self._current_train_version(),

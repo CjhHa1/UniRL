@@ -5,7 +5,7 @@ admission and reap/launch ordering.
 
 ``AsyncBatchRolloutEngine`` consumes atomic FIFO batches tagged with
 ``output_version``. ``AsyncAgenticRolloutEngine`` buffers completed groups by
-``sync_version`` while each generated Part carries its own output provenance.
+their oldest generated Part's output version.
 """
 
 from __future__ import annotations
@@ -53,26 +53,30 @@ class VersionedBuffer(Generic[T]):
         n: int,
         *,
         current_version: Optional[int] = None,
-        max_staleness: Optional[int] = None,
+        staleness_budget: Optional[int] = None,
     ) -> Optional[List[T]]:
         """Pop the ``n`` freshest eligible payloads, carrying leftovers forward.
 
         Over-stale items are evicted first (retrievable via :meth:`pop_evicted`),
-        then remaining items are sorted by descending ``gen_id`` (stable — ties
-        keep insertion order). Returns ``None`` without consuming anything when
-        fewer than ``n`` remain after eviction.
+        then remaining items are sorted by version and ``gen_id``, newest first.
+        Returns ``None`` without consuming when fewer than ``n`` remain.
         """
-        if max_staleness is not None and current_version is not None:
+        if staleness_budget is not None and current_version is not None:
             kept: List[Tuple[T, int, int]] = []
             for item in self._items:
-                if current_version - item[1] <= max_staleness:
+                staleness = current_version - item[1]
+                if staleness < 0:
+                    raise RuntimeError(
+                        f"buffer item {item[2]} has future version {item[1]} > current version {current_version}"
+                    )
+                if staleness <= staleness_budget:
                     kept.append(item)
                 else:
                     self._evicted.append(item[0])
             self._items = kept
         if len(self._items) < n:
             return None
-        self._items.sort(key=lambda item: item[2], reverse=True)
+        self._items.sort(key=lambda item: (item[1], item[2]), reverse=True)
         picked, self._items = self._items[:n], self._items[n:]
         return [payload for payload, _, _ in picked]
 
@@ -350,8 +354,8 @@ class AsyncAgenticRolloutEngine:
     rank-0 coordinator Handle; buffers ``List[Sample]`` sibling groups.
 
     Normalizes the coordinator's BROADCAST+RANK_ZERO returns (every value
-    unwraps ``[0]``). Groups are stamped at completion with the current
-    publication count (``sync_version``) and a monotonic ``gen_id``.
+    unwraps ``[0]``). Groups are stamped with their oldest output version and a
+    monotonic ``gen_id``.
 
     ``submit`` requires the prior drive to be finalized or quiesced — two live
     drains would double-pull the coordinator queue.
@@ -362,32 +366,26 @@ class AsyncAgenticRolloutEngine:
         self._pending = PendingGroups(group_size)
         self._buffer: VersionedBuffer[List["Sample"]] = VersionedBuffer()
         self._gen_id = start_gen_id
-        self._sync_version = 0
+        self._version = 0
         self._drive_live = False
 
     @property
-    def sync_version(self) -> int:
-        return self._sync_version
+    def version(self) -> int:
+        return self._version
 
     def sync_weights(self, weight_sync: Any, *, train_version: int) -> None:
         """Push train weights and align worker provenance with ``train_version``.
 
-        The only sanctioned weight-push path — pairing the push with the worker
-        version assignment keeps output provenance truthful. ``sync_version`` is
-        a separate publication count used only for buffer staleness. Raises while
-        a drive is active (a weight push must be decode-idle); a joined
+        The only sanctioned weight-push path pairs the push with the worker
+        version assignment. Raises while a drive is active; a joined
         ``finalize_if_drained`` or ``quiesce`` ends the drive.
         """
         if self._drive_live:
             raise RuntimeError("sync_weights with a drive active; finalize or quiesce() first")
         weight_sync.sync()
         self._rollout.set_version(train_version)
-        self._sync_version += 1
-        logger.info(
-            "sync_weights: pushed train weights; train_version=%d sync_version=%d",
-            train_version,
-            self._sync_version,
-        )
+        self._version = train_version
+        logger.info("sync_weights: pushed train weights; version=%d", self._version)
 
     def submit(self, tasks: List["Sample"]) -> None:
         """Fire a background drive over a flat task list (fresh siblings + carried partials).
@@ -420,11 +418,11 @@ class AsyncAgenticRolloutEngine:
         self._drive_live = False
         return self._ingest(completed)
 
-    def drain_freshest(self, n: int, *, max_staleness: int) -> Optional[List[List["Sample"]]]:
+    def drain_freshest(self, n: int, *, staleness_budget: int) -> Optional[List[List["Sample"]]]:
         return self._buffer.drain_freshest(
             n,
-            current_version=self._sync_version,
-            max_staleness=max_staleness,
+            current_version=self._version,
+            staleness_budget=staleness_budget,
         )
 
     def pop_evicted(self) -> List[List["Sample"]]:
@@ -455,7 +453,12 @@ class AsyncAgenticRolloutEngine:
         if completed:
             self._pending.add_completed(completed)
             for group in self._pending.pop_complete_groups():
-                self._buffer.put(group, version=self._sync_version, gen_id=self._gen_id)
+                gen_parts = [part for traj in group for part in traj.gen_parts()]
+                versions = [part.output_version for part in gen_parts]
+                if any(version is None for version in versions):
+                    raise RuntimeError("completed agentic group is missing output_version provenance")
+                version = min(versions) if versions else self._version
+                self._buffer.put(group, version=version, gen_id=self._gen_id)
                 self._gen_id += 1
         return len(completed)
 
