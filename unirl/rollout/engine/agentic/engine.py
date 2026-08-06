@@ -63,6 +63,7 @@ class AgenticRolloutEngine(SyncRolloutEngine):
             f"env.max_turns ({env_max_turns}) must equal config.max_turns ({self._max_turns})",
         )
         self._stopping = False
+        self._policy_version = 0
         self._harness: RolloutHarness = ToolAgentHarness(
             env=self._env,
             sampling=config.episode_sampling,
@@ -83,6 +84,8 @@ class AgenticRolloutEngine(SyncRolloutEngine):
         inner_cfg.chat_template_kwargs = chat_template_kwargs
 
     def generate(self, sample: Sample) -> Sample:
+        generated_before = len(sample.gen_parts())
+        policy_version = self._policy_version
         try:
             outcome = self._harness.run(sample, self._harness_ctx)
             if outcome.status == "completed":
@@ -93,10 +96,23 @@ class AgenticRolloutEngine(SyncRolloutEngine):
                 result = self._attach_env_reward(outcome.sample, float("nan"))
             else:
                 raise ValueError(f"unknown harness outcome status: {outcome.status!r}")
+            result = self._stamp_generated_versions(result, generated_before, policy_version)
             return self._stamp_outcome(result, outcome.status)
         except Exception as exc:  # noqa: BLE001
             logger.warning("AgenticRolloutEngine: harness outcome failed, marking failed: %s", exc, exc_info=True)
             return self._stamp_outcome(self._attach_env_reward(sample, float("nan")), "failed")
+
+    @staticmethod
+    def _stamp_generated_versions(sample: Sample, generated_before: int, policy_version: int) -> Sample:
+        generated_seen = 0
+        parts = []
+        for part in sample.parts:
+            if part.is_gen:
+                if generated_seen >= generated_before:
+                    part = _part_with_field(part, "weight_version", policy_version)
+                generated_seen += 1
+            parts.append(part)
+        return sample.with_parts(parts)
 
     @staticmethod
     def _stamp_outcome(sample: Sample, status: str) -> Sample:
@@ -123,6 +139,12 @@ class AgenticRolloutEngine(SyncRolloutEngine):
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def set_stopping(self, stopping: bool = True) -> None:
         self._stopping = bool(stopping)
+
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def set_policy_version(self, policy_version: int) -> None:
+        if policy_version < 0:
+            raise ValueError(f"policy_version must be non-negative; got {policy_version}")
+        self._policy_version = int(policy_version)
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def shutdown(self) -> None:

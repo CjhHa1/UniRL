@@ -108,7 +108,9 @@ class RolloutManager:
         if self._pool.live:
             raise RuntimeError("sync_weights requires no queued or in-flight trajectories")
         weight_sync.sync()
-        self._weight_version += 1
+        next_version = self._weight_version + 1
+        self._rollout.set_policy_version(next_version)
+        self._weight_version = next_version
         return self._weight_version
 
     def close(self) -> None:
@@ -137,7 +139,7 @@ class RolloutManager:
 
     def _apply_filter(self, samples: List["Sample"]) -> List["Sample"]:
         candidates = list(samples)
-        kept = list(self._filter(candidates, self._weight_version))
+        kept = list(self._filter(list(candidates), self._weight_version))
         if kept and Counter(map(id, kept)) != Counter(map(id, candidates)):
             raise RuntimeError("agentic rollout filter must retain or discard an entire root")
         return kept
