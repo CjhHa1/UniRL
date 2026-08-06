@@ -139,8 +139,8 @@ class AsyncAgenticTrainer(AgenticTrainer):
 
         Fresh prompts (``oversample_batch_size`` of them) are split into per-prompt
         request trees and replicated ``n`` times (the GRPO siblings share a root id);
-        carried partials (their root ids + turn history preserved) are appended as-is,
-        to be resumed by the engine's ``_run_one`` from ``len(gen_parts())``.
+        carried partials (their root ids + turn history preserved) are appended as-is;
+        the harness resumes them from ``len(gen_parts())``.
 
         Fresh roots are namespaced by ``_drive_seq`` as well as ``rollout_id`` so a
         refill can never reuse a drained drive's root ids for different source rows.

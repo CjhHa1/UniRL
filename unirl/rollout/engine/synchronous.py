@@ -147,7 +147,7 @@ class BaseRolloutEngine(Remote, ABC):
 
 
 class SyncRolloutEngine(BaseRolloutEngine, ABC):
-    """Engines that fill and return one ``Sample``; ``generate`` may be called concurrently (agentic drain)."""
+    """Engines that fill and return one ``Sample``; ``generate`` may be called concurrently."""
 
     _weight_version: int = 0
 

@@ -37,13 +37,13 @@ def _extract_answer(text: Optional[str]) -> str:
 
 
 def _is_failed(traj: Sample) -> bool:
-    """Whether the engine marked this trajectory an infrastructure failure.
+    """Whether the engine marked this trajectory as a task-level failure.
 
-    :meth:`AgenticRolloutEngine._run_one` isolates faults by returning ``done=True``
-    with a NaN reward on the terminal Part, or — when the fault preceded the first
-    turn — with no gen Parts at all. Either shape must stay out of GRPO's group
-    statistics; grading a dead backend's empty output as a genuine miss would bias
-    every sibling in the group.
+    :meth:`AgenticRolloutEngine.generate` isolates harness faults with a NaN reward
+    on the terminal Part, or — when the fault preceded the first turn — with no gen
+    Parts at all. Either shape must stay out of GRPO's group statistics; grading a
+    failed task's empty output as a genuine miss would bias every sibling in the
+    group. Worker and transport failures propagate through ``RolloutManager``.
     """
     gens = traj.gen_parts()
     if not gens:
@@ -133,10 +133,7 @@ class AgenticTrainer(ARTrainer):
         *,
         sampling: Optional[Dict[str, BaseSamplingParams]] = None,
     ) -> Sample:
-        """The ``P`` prompts as an input-only ``Sample`` tree — NO ``fork`` (the
-        agentic engine fans the ``n`` GRPO siblings itself) — with the per-turn
-        ``stop`` on the root control bag and root ``metadata`` (the ground-truth
-        answer) carried for the reward judge."""
+        """Build input-only prompts with per-turn stop and reward metadata."""
         del sampling
         return prepare_input_sample(
             inputs,
@@ -210,8 +207,7 @@ class AgenticTrainer(ARTrainer):
         ``train_step`` and the colocate partial-rollout trainer
         (:class:`~unirl.trainer.agentic_partial.AgenticPartialTrainer`); the reward SOURCE
         (answer vs env) is already resolved into ``rewards``/``group_ids`` by the caller.
-        ``extra_metrics`` are merged into the logged ``agent/*`` metrics (e.g. the partial
-        trainer's committed/carried/dropped counts)."""
+        ``extra_metrics`` are merged into the logged ``agent/*`` metrics."""
         # Exclude crashed trajectories from reward means and GRPO.
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
