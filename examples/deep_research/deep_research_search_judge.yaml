@@ -87,7 +87,6 @@ rollout:
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
     max_turns: 8 # research trajectories need more turns than the calculator smoke
-    per_worker_concurrency: 8
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native

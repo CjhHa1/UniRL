@@ -3,15 +3,14 @@
 
 Drives :class:`unirl.trainer.agentic.AgenticTrainer` over the
 :class:`~unirl.rollout.engine.agentic.engine.AgenticRolloutEngine`. Sibling of
-``train_ar.py``; a separate entrypoint because the agentic rollout returns a
-``List[Sample]`` of variable-depth trajectories (the trainer is hard-coded per
-entrypoint, per the repo pattern).
+``train_ar.py``; a separate entrypoint because the agentic manager collects groups
+of variable-depth trajectories.
 
 The reward grades each trajectory's terminal ``<answer>`` through the reward backend;
 ``train_agentic_env.py`` is the sibling whose reward is the environment's own
 per-trajectory return.
 
-Launch (per node, SPMD; rank 0 owns the driver + the agentic coordinator):
+Launch (per node, SPMD; rank 0 owns the driver):
   QWEN3_INSTRUCT_PATH=/path/to/Qwen3-4B-Instruct DATA_PATH=data/asearcher/train.jsonl \
   SERPER_KEY_ID=... JINA_API_KEYS=... JUDGE_URL=... JUDGE_MODEL=... \
   python -m unirl.train_agentic --config-name=deep_research/deep_research_search_judge

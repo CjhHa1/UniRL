@@ -1,42 +1,4 @@
-"""Fully-async agentic RL trainer — disaggregated producer/consumer (LIN-531).
-
-Sibling of :class:`~unirl.trainer.agentic.AgenticTrainer` (synchronous + *colocated*:
-the agentic engine's ``generate`` barrier and the FSDP train shard time-share each
-GPU). ``AsyncAgenticTrainer`` places training and rollout on **disjoint GPU slabs**
-(like :class:`~unirl.trainer.async_ar.AsyncARTrainer`), keeps the agentic engine
-**resident**, pushes weights cross-slab via ``NCCLWeightSync``, and overlaps
-multi-turn generation with training.
-
-Mechanism vs policy (LIN-531): the **engine** exposes a ``submit`` / ``poll`` /
-``finalize_if_drained`` / ``abort`` interface over a background drain (see
-:class:`~unirl.rollout.engine.agentic.engine.AgenticRolloutEngine`), consumed
-through the driver-side :class:`~unirl.rollout.engine.asynchronous.AsyncAgenticRolloutEngine`
-(group assembly + versioned buffering); this **trainer** owns the *policy* —
-
-* **Producer** — keep the rollout slab saturated: ``submit`` a pool of fresh prompt
-  siblings + resumed carried partials and ``poll`` completed trajectories; the facade
-  buckets them by root id into complete GRPO groups and stamps each into its
-  staleness-bounded versioned buffer.
-* **Consumer** — drain the freshest ``batch_size`` complete groups (within
-  ``buffer_max_staleness``), reward + GRPO advantage + one optimizer step (reusing
-  :class:`AgenticTrainer`'s helpers), then **quiesce + sync**: ``abort`` the in-flight
-  tail at a turn boundary, apply the configured ``tail_policy`` (carry only when the
-  environment can resume from the ``Sample``; otherwise drop), then
-  ``engine.sync_weights`` (one call: push + version bump).
-
-ONE single-threaded loop (the ``AsyncARTrainer`` shape): with disjoint slabs the
-rollout slab keeps generating in the background (the engine's per-worker drain) while
-the driver polls / trains — concurrency from disaggregation, not driver threads. In
-steady state the buffer is refilled *during* the previous train step, so :meth:`_next_batch`
-returns without waiting. Staleness bounds how far the producer leads the consumer; the
-per-token rollout-anchored ratio corrects the off-policy gap (a carried trajectory whose
-turns span weight versions is correct per-token because each gen ``Part`` keeps its own
-``weight_version`` + logprobs).
-
-.. note::
-   The GPU integration (two-slab placement, NCCL sync, and the train loop) follows
-   ``AsyncARTrainer`` and requires an end-to-end GPU run for validation.
-"""
+"""Disaggregated agentic RL over a continuously progressing rollout manager."""
 
 from __future__ import annotations
 
@@ -165,14 +127,11 @@ class AsyncAgenticTrainer(AgenticTrainer):
                 f"(NCCLWeightSync); got sync._target_={target!r}."
             )
         addr, port = self.weight_sync.pick_master()[0]
-        targets = self.rollout.tp_zero_workers
-        self.weight_sync.set_rollout_targets(targets, self.rollout.role_name)
+        self.weight_sync.set_rollout_targets(self.rollout.workers, self.rollout.role_name)
         self.weight_sync.connect(
             master_addr=addr,
             master_port=port,
-            num_rollout_gpus=len(targets) * self.rollout.tp_size,
-            tp_size=self.rollout.tp_size,
-            pp_size=self.rollout.pp_size,
+            num_rollout_gpus=len(self.rollout.workers),
         )
 
     def _build_tasks(self, carried: List[Sample], rollout_id: int) -> List[Sample]:

@@ -3,12 +3,12 @@
 
 Drives :class:`unirl.trainer.agentic_partial.AgenticPartialTrainer` — the colocate/synchronous
 partial-rollout sibling of ``train_agentic`` (barrier `AgenticTrainer`). Train and rollout
-still time-share each GPU; the trainer over-samples, commits the freshest `batch_size` complete
+still time-share each GPU; the trainer over-samples, commits the first accepted `batch_size` complete
 GRPO groups, and checkpoints the in-flight tail at a turn boundary (carried and resumed next
 round when the tools are stateless, as search/visit are) instead of waiting for the slowest
 trajectory.
 
-Launch (single node; rank 0 owns the driver + the agentic coordinator):
+Launch (single node; rank 0 owns the driver):
   QWEN3_INSTRUCT_PATH=... DATA_PATH=data/asearcher/train.jsonl \
   SERPER_KEY_ID=... JINA_API_KEYS=... JUDGE_URL=... JUDGE_MODEL=... \
   python -m unirl.train_agentic_partial \

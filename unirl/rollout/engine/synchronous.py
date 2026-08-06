@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import torch
 
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.types.sample import Sample
-
-RolloutOutput = Union[Sample, List[Sample]]
 
 
 class BaseEngineConfig(ABC):
@@ -62,7 +60,7 @@ class BaseRolloutEngine(Remote, ABC):
         }
 
     @abstractmethod
-    def generate(self, sample: Sample) -> RolloutOutput:
+    def generate(self, sample: Sample) -> Sample:
         """Synchronously run rollout generation; each concrete contract owns its dispatch mode."""
 
     def abort(self, ids: Optional[List[str]] = None) -> List[Sample]:
@@ -166,4 +164,4 @@ class SyncRolloutEngine(BaseRolloutEngine, ABC):
         return sample.with_parts([*sample.parts[:-1], gen])
 
 
-__all__ = ["BaseRolloutEngine", "SyncRolloutEngine", "RolloutOutput"]
+__all__ = ["BaseRolloutEngine", "SyncRolloutEngine"]

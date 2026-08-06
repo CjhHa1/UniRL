@@ -2,8 +2,8 @@
 # M2 PARTIAL — Deep-research agentic RL, COLOCATE partial rollout: AgenticPartialTrainer
 # over the AgenticRolloutEngine (train + rollout time-share each GPU, TensorWeightSync).
 # The synchronous partial-rollout sibling of deep_research_search_judge.yaml (barrier
-# AgenticTrainer): over-samples `oversample_batch_size` prompt-groups, commits the freshest
-# `batch_size` complete GRPO groups, and `abort`s the in-flight tail at a turn boundary.
+# AgenticTrainer): over-samples `oversample_batch_size` prompt-groups, commits accepted
+# complete GRPO groups, and quiesces the in-flight tail at a turn boundary.
 # Cuts the straggler while keeping every GPU on generation; the per-token rollout-anchored
 # ratio corrects a carried trajectory whose turns span multiple weight versions.
 #
@@ -34,13 +34,11 @@ weight_sync_interval: 1
 eval_interval: 0 # agentic eval not implemented (AgenticTrainer.evaluate raises); keep 0
 
 # ---- partial-rollout knobs (LIN-531) ----
-oversample_batch_size: 6 # generate 6 prompt-groups/drive; commit the freshest 4 -> 2 slow groups carried
+oversample_batch_size: 6 # generate 6 prompt-groups/drive; commit 4 accepted groups
 buffer_max_staleness: 1 # a completed buffered group may cross up to 1 weight sync before eviction
 tail_policy: carry # SearchTool/VisitTool are stateless Tools; the carried Sample holds all resume state
 
-# Colocate partial oversubscribes rank 0: its own run_drain + every worker's next_task pull +
-# the poll->drain_completed fan + submit/abort/sync all ride these threaded-actor slots. Give it
-# generous headroom (barrier only needs 8 because it never poll-fans).
+# Eight trajectory calls plus two actor slots reserved for stop and transport control.
 worker_max_concurrency: 10
 per_worker_inflight: 8
 
@@ -104,8 +102,6 @@ rollout:
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
     max_turns: 8 # research trajectories need more turns than the calculator smoke
-    per_worker_concurrency: 8
-    partial_rollout: true # LIN-531: abort->checkpoint->resume at turn boundaries
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native
@@ -183,7 +179,7 @@ algorithm:
 
 sync:
   # Colocate full-weight push into the inner SGLang (delegated through the agentic engine). Runs in
-  # the awake+decode-idle window abort() leaves.
+  # the awake+decode-idle window quiesce leaves.
   _target_: unirl.distributed.weight_sync.full.tensor.TensorWeightSync
   lora_merged: false
   bucket_size_mb: 64

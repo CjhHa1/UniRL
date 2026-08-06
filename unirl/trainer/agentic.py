@@ -1,24 +1,4 @@
-"""AgenticTrainer — multi-turn agentic RL over the AgenticRolloutEngine (LIN-519).
-
-A sibling of :class:`~unirl.trainer.ar.ARTrainer` for the AGENTIC path. The rollout is
-the rank-0-coordinated
-:class:`~unirl.rollout.engine.agentic.engine.AgenticRolloutEngine`, whose ``generate``
-returns a FLAT ``List[Sample]`` of variable-depth, independently terminated
-trajectories (one per GRPO sibling) — not a single batched Sample. So this trainer
-overrides only:
-
-- ``__init__`` — wire the rank-0 coordinator (``set_workers``);
-- ``_build_request_sample`` — emit JUST the prompts (no ``fork``: the engine fans the
-  ``n`` GRPO siblings internally) with the per-turn ``stop`` on the root control bag;
-- ``train_step`` — consume the trajectory list: judge each trajectory's ``<answer>``
-  with the reward backend, compute GROUP-relative GRPO advantages over the ``n``
-  siblings of each prompt, assign each trajectory's scalar advantage to ALL its
-  assistant turns, concatenate every turn into ONE training Part (padded to a DP
-  multiple), and run ONE optimizer step.
-
-Everything else — worker construction, weight sync, checkpointing, the ``train`` loop
-— is inherited from ``ARTrainer`` / ``BaseTrainer`` unchanged.
-"""
+"""Multi-turn agentic RL over the driver-side rollout manager."""
 
 from __future__ import annotations
 
@@ -136,7 +116,6 @@ class AgenticTrainer(ARTrainer):
         self._stop = list(stop) if stop else ["</tool_call>"]
         self._n = total_samples_per_prompt(self.sampling_params)
         self._rollout_manager: Optional[RolloutManager] = None
-        self.rollout.set_workers(self.rollout.workers, self.rollout.role_name)
 
     def _create_rollout_manager(self, filter_fn: RolloutFilter = identity) -> RolloutManager:
         return RolloutManager(
@@ -407,8 +386,7 @@ class AgenticTrainer(ARTrainer):
 
     def evaluate(self, rollout_id: int) -> float:
         raise NotImplementedError(
-            "AgenticTrainer.evaluate is not implemented: the agentic engine returns "
-            "List[Sample], not a Sample. Set eval_interval=0 (agentic eval is a follow-up)."
+            "AgenticTrainer.evaluate is not implemented. Set eval_interval=0 (agentic evaluation is a follow-up)."
         )
 
     def _shutdown_runtime(self) -> None:

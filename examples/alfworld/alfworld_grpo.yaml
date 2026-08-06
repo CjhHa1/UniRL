@@ -87,7 +87,6 @@ rollout:
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
     max_turns: 15 # ALFWorld is long-horizon; cap per-episode turns (cost lever)
-    per_worker_concurrency: 8
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native

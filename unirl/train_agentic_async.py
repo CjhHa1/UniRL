@@ -14,8 +14,7 @@ must use ``drop`` until cross-worker stateful resume is implemented. The trainer
 hard-coded per entrypoint (the repo pattern), because the async agentic driver differs
 from both the colocate agentic loop and the async-AR DP_SCATTER loop.
 
-Launch (per node, SPMD; rank 0 owns the driver + the agentic coordinator on the
-rollout slab):
+Launch (per node, SPMD; rank 0 owns the driver):
   QWEN3_INSTRUCT_PATH=/path/to/Qwen3-4B-Instruct DATA_PATH=data/asearcher/train.jsonl \
   SERPER_KEY_ID=... JINA_API_KEYS=... JUDGE_URL=... JUDGE_MODEL=... \
   python -m unirl.train_agentic_async \

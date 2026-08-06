@@ -38,11 +38,11 @@ turn on the `"policy"` engine, and stops when the environment returns `done=True
 `max_turns`, or — at a turn boundary — when the runtime requests a cooperative suspension
 (`HarnessContext.suspend_requested`).
 
-`AgenticRolloutEngine` is the production coordinator. Rank 0 expands `P` prompts into `P * n`
-single-trajectory tasks. Each worker runs up to `per_worker_concurrency` synchronous trajectories
-in a thread pool; concurrent calls let the inner backend batch generation while other threads wait
-on tools. `generate` is a barrier call. `submit`, `poll`, and `abort` provide the background
-partial-rollout interface.
+`RolloutManager` expands `P` prompts into `P * n` tasks and dispatches each through a
+single engine slot. Ray actor concurrency lets each worker run up to
+`per_worker_inflight` synchronous trajectories while the inner backend batches requests.
+`AgenticRolloutEngine.generate` runs one trajectory; manager `collect` and `quiesce`
+provide group completion and turn-boundary suspension.
 
 ## Trajectories and observations
 
@@ -61,11 +61,10 @@ generated `Part`; tool-only environments normally omit it.
 
 ### Partial rollout and resume
 
-On `abort`, workers stop pulling new work and let each in-flight turn finish. The trajectory is
-checkpointed before the next turn, so generation is never interrupted mid-turn. The returned
-carried set contains those checkpointed trajectories plus queued tasks that never started. A
-trajectory that becomes terminal during quiescence enters the completed buffer instead; call
-`poll()` once after `abort()` to collect it.
+On manager `quiesce`, dispatch pauses and each in-flight turn finishes. A nonterminal
+trajectory is checkpointed before its next turn, so generation is never interrupted mid-turn.
+The returned carried set contains checkpointed trajectories and queued tasks retained by the
+configured root filter. Trajectories that become terminal during quiescence enter group assembly.
 
 Resumption starts at `len(sample.gen_parts())`, preserving the same lineage and continuing under
 the newly synchronized weights. This works only when `Environment.reset(partial)` preserves the

@@ -8,7 +8,7 @@ the reward is the environment's own per-trajectory return — task-success or a 
 signal, attached to each trajectory by the engine — so no reward backend is scored and
 the recipe's ``reward`` block is built but unused.
 
-Launch (single node; rank 0 owns the driver + the agentic coordinator):
+Launch (single node; rank 0 owns the driver):
   QWEN3_INSTRUCT_PATH=/path/to/Qwen3-8B DATA_PATH=/path/to/alfworld_games.jsonl \
   ALFWORLD_DATA=/path/to/alfworld/data \
   python -m unirl.train_agentic_env --config-name=alfworld/alfworld_grpo num_devices=8

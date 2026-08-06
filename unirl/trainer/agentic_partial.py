@@ -1,31 +1,4 @@
-"""Colocate partial-rollout agentic trainers (LIN-531).
-
-The **synchronous / colocate** driver of partial rollout — the missing quadrant next to the
-barrier `AgenticTrainer` (colocate, waits for every trajectory) and the fully-async
-`AsyncAgenticTrainer` (disaggregated slabs). Train and rollout still **time-share each GPU**
-(`sleep()`/`wake_up()`), single loop, one optimizer step per rollout; the only change from the
-barrier is *how the rollout completes*:
-
-- **Over-sample** `oversample_batch_size` prompt-groups per drive, **commit the freshest
-  `batch_size` complete GRPO groups**, and **`abort` the in-flight tail at a turn boundary**
-  instead of draining every trajectory. The slow straggler no longer gates the round.
-- **Tail policy** — `carry` re-submits the checkpointed tail next round when the environment can
-  reconstruct its state from the `Sample` (current stateless tools); `drop` discards it for
-  **stateful** envs like ALFWorld, whose `reset` starts a fresh episode.
-
-Motivation (LIN-531 ALFWorld comparison): the fully-async trainer *lost* on ALFWorld because
-disaggregation halves the generation GPUs; colocate+partial keeps all GPUs for generation while
-still cutting the straggler tail — the slime "over-sample + abort + recycle" / verl `bypass_mode`
-pattern. The driver-side :class:`~unirl.rollout.engine.asynchronous.AsyncAgenticRolloutEngine`
-(submit/poll/finalize_if_drained/quiesce + group assembly and versioned buffering) is shared with
-``AsyncAgenticTrainer``; only the colocate wake/sync/sleep choreography is new.
-
-Correctness: `TensorWeightSync.sync` writes the live SRT weight pool, so it must run **awake +
-decode-idle** — sync sits at the top (post-`wake_up`, pre-`submit`, barrier parity) and `abort`
-(not `sleep`) provides the pre-sleep quiesce. The off-policy carried tail is corrected per-token
-(each gen Part keeps its own `weight_version` + logprobs); `buffer_max_staleness` separately bounds
-how long a completed group remains eligible in the buffer.
-"""
+"""Colocated agentic partial rollout with filtered tail handling."""
 
 from __future__ import annotations
 
@@ -44,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgenticPartialTrainer(AgenticTrainer):
-    """Colocate partial-rollout trainer (over-sample → commit-N → abort tail → carry/drop)."""
+    """Colocate partial-rollout trainer (over-sample → commit-N → quiesce)."""
 
     _MAX_REFILLS = 64  # underflow guard: refills of a drained-but-short buffer before giving up
 

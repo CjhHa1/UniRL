@@ -2,7 +2,7 @@
 # LIN-531 — Colocate PARTIAL-ROLLOUT ALFWorld: AgenticEnvPartialTrainer, COLOCATE (train + rollout
 # time-share each GPU, TensorWeightSync). The synchronous partial-rollout sibling of alfworld_grpo.yaml
 # (barrier AgenticEnvTrainer). Over-samples ALFWorld episodes, commits the fastest `batch_size` complete
-# GRPO groups, and `abort`s the slow tail at a turn boundary. `tail_policy: drop` because ALFWorld is a
+# GRPO groups, and quiesces the slow tail at a turn boundary. `tail_policy: drop` because ALFWorld is a
 # stateful-episode env (a carried partial restarts on reset) — dropping still cuts the 15-turn straggler
 # while keeping ALL GPUs for generation. This is the sweet spot the disaggregated async trainer missed on
 # ALFWorld (it halved the generation GPUs). Head-to-head vs alfworld_grpo.yaml (barrier) and
@@ -19,13 +19,11 @@ weight_sync_interval: 1
 eval_interval: 0
 
 # ---- partial-rollout knobs (LIN-531) ----
-oversample_batch_size: 12 # generate 12 games/drive; commit the fastest 8 → 4 slow games' tail aborted
+oversample_batch_size: 12 # generate 12 games/drive; commit 8 accepted groups and quiesce the tail
 buffer_max_staleness: 2 # a buffered group may cross up to 2 weight syncs before eviction
 tail_policy: drop # ALFWorld reset starts a fresh episode → a carried partial restarts, so DROP it
 
-# Colocate partial oversubscribes rank 0: its own run_drain + every worker's next_task pull +
-# the poll→drain_completed fan + submit/abort/sync all ride these threaded-actor slots. Give it
-# generous headroom (barrier only needs 8 because it never poll-fans).
+# Eight trajectory calls plus two actor slots reserved for stop and transport control.
 worker_max_concurrency: 10
 per_worker_inflight: 8
 stop: null # ALFWorld actions are free text; rely on per-turn max_new_tokens
@@ -87,8 +85,6 @@ rollout:
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
     max_turns: 15 # ALFWorld is long-horizon; the variable depth the partial commit-N exploits
-    per_worker_concurrency: 8
-    partial_rollout: true
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native

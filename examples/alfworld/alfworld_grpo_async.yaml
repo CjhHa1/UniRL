@@ -3,7 +3,7 @@
 # The async sibling of alfworld_grpo.yaml (colocate AgenticEnvTrainer barrier). ALFWorld
 # episodes are variable-depth (2 vs 15 turns), so the synchronous barrier waits for the
 # slowest episode each round; this async recipe overlaps generation with training on
-# disjoint slabs, trains the FRESHEST complete GRPO groups (oversample > batch), and
+# disjoint slabs, trains filtered complete GRPO groups (oversample > batch), and
 # checkpoints the in-flight tail at a turn boundary on each NCCL weight sync (partial
 # rollout). ALFWorld episodes are worker-local and checkpoint teardown closes them, so
 # this recipe DROPS interrupted tails instead of pretending they can resume. Same env +
@@ -24,7 +24,7 @@ eval_interval: 0
 
 # ---- async / disaggregation knobs (LIN-531) ----
 train_fraction: 0.5 # 4 train GPUs (FSDP) + 4 rollout GPUs (resident agentic engine)
-oversample_batch_size: 12 # generate 12 games/drive; train the freshest 8 without waiting for every slow game
+oversample_batch_size: 12 # generate 12 games/drive; train 8 accepted groups without waiting for every slow game
 buffer_max_staleness: 2 # bounded off-policy: a buffered group may cross up to 2 syncs
 tail_policy: drop # ALFWorld reset creates a fresh episode; interrupted stateful tails cannot resume
 
@@ -86,15 +86,11 @@ backend:
     total_steps: 1000
 
 rollout:
-  # Multi-turn agentic engine driving a STATEFUL per-episode ALFWorld env, DISAGGREGATED
-  # (owns its own GPU slab, stays resident). partial_rollout=true → the in-flight tail is
-  # checkpointed at a turn boundary on each weight sync and then dropped by the trainer.
+  # Multi-turn agentic engine driving a stateful ALFWorld env on its own resident GPU slab.
   _target_: unirl.rollout.engine.agentic.engine.AgenticRolloutEngine
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
     max_turns: 15 # ALFWorld is long-horizon; the variance the async overlap exploits
-    per_worker_concurrency: 8
-    partial_rollout: true
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native

@@ -5,7 +5,7 @@
 # DISJOINT GPU slabs (train_fraction), the engine stays RESIDENT, and weights cross the
 # slab boundary via NCCLWeightSync (not the colocate TensorWeightSync).
 #
-# Partial rollout: on each weight sync the trainer abort()s the in-flight tail at a TURN
+# Partial rollout: on each weight sync the trainer quiesces the in-flight tail at a turn
 # boundary (single-version Parts), syncs, and resumes the carried partials under the new
 # weights. Safe here because SearchTool/VisitTool are stateless and the Sample contains the
 # whole conversation. StatefulTool sessions (SandboxTool) must use tail_policy=drop until
@@ -34,7 +34,7 @@
 num_devices: 2
 batch_size: 4 # P complete GRPO groups trained per rollout step
 num_rollouts: 200
-weight_sync_interval: 1 # abort->NCCL-sync->resume every rollout
+weight_sync_interval: 1 # quiesce->NCCL-sync->resume every rollout
 eval_interval: 0 # agentic eval not implemented yet (AgenticTrainer.evaluate raises)
 
 # ---- async / disaggregation knobs (LIN-531) ----
@@ -47,8 +47,7 @@ oversample_batch_size: 8
 buffer_max_staleness: 1
 tail_policy: carry # SearchTool/VisitTool are stateless; the carried Sample resumes exactly
 
-# rank-0 coordinator runs the background drain + serves next_task pulls + the
-# poll/abort/drained control RPCs concurrently on a threaded Worker — needs >=3.
+# Eight trajectory calls plus two actor slots reserved for stop and transport control.
 worker_max_concurrency: 10
 per_worker_inflight: 8
 
@@ -60,7 +59,7 @@ adv_normalization_scope: group
 normalize_adv_by_std: true
 
 logging:
-  report_to_wandb: false # flip on for real runs; async metrics: async/version_span, async/buffer_groups
+  report_to_wandb: false # flip on for real runs; async metrics include async/version_span
   project_name: unirl-deep-research
   run_name: deepresearch_search_judge_qwen3_async
   entity: ${oc.env:WANDB_ENTITY,null}
@@ -110,15 +109,11 @@ backend:
     total_steps: 2000
 
 rollout:
-  # Resident agentic engine on its own slab: the trainer submits drives, then reaps (poll)
-  # and interrupts (abort). partial_rollout=true enables the turn-boundary
-  # checkpoint/resume on each weight sync.
+  # Resident agentic engine on its own slab; the driver manager schedules trajectories.
   _target_: unirl.rollout.engine.agentic.engine.AgenticRolloutEngine
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
     max_turns: 8 # research trajectories need more turns than the calculator smoke
-    per_worker_concurrency: 8
-    partial_rollout: true # LIN-531: abort->checkpoint->resume at turn boundaries
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native

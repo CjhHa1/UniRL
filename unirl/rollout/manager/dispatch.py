@@ -157,7 +157,7 @@ class TrajectoryPool:
             load[item.slot] += 1
         for index, slot in enumerate(self._slots):
             while self._queue and load[index] < self._cap:
-                pending = slot.launch("run_trajectory", self._queue.popleft())
+                pending = slot.launch("generate", self._queue.popleft())
                 self._running.append(_Running(index, pending))
                 load[index] += 1
 

@@ -82,10 +82,10 @@ flows through them like this:
 7. Each train worker owns a model `Bundle`, an `FSDPBackend`, and one loss algorithm.
 8. Dedicated-rollout modes (separate / colocate) sync trainer weights back to the rollout workers.
 
-Agentic workflows extend step 3 into a trajectory: the coordinator repeatedly
-invokes a single-turn engine, executes tool or environment actions between turns,
-and returns `list[Sample]`. The agentic trainers then assemble the trainable turns
-before applying the same reward, advantage, and train-stack contracts.
+Agentic workflows extend step 3 into trajectories: a driver-side manager dispatches
+one task per remote engine slot, while each engine executes model and environment
+turns. The manager assembles sibling groups before the trainer applies the same
+reward, advantage, and train-stack contracts.
 
 ## Deeper Module Docs
 

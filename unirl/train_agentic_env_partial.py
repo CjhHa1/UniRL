@@ -3,8 +3,8 @@
 
 Drives :class:`unirl.trainer.agentic_partial.AgenticEnvPartialTrainer` — the colocate/synchronous
 partial-rollout sibling of ``train_agentic_env`` (barrier `AgenticEnvTrainer`). Over-samples
-episodes, commits the fastest `batch_size` complete GRPO groups, and `abort`s the slow tail at a
-turn boundary. Stateful-episode envs use ``tail_policy: drop`` because a carried partial restarts.
+episodes, commits `batch_size` accepted GRPO groups, and quiesces the slow tail at a turn
+boundary. Stateful-episode envs use ``tail_policy: drop`` because a carried partial restarts.
 Keeps all GPUs for generation (colocate) while cutting the straggler — the sweet spot the
 fully-async trainer missed on ALFWorld.
 

@@ -46,8 +46,8 @@ stay swappable by `_target_`.
   preserve prompt lineage and carry sampling parameters. A single-stage stack
   receives the trainable frontier `Part`; `UnifiedModelTrainStack` receives the
   whole `Sample` so AR and image Parts are sharded by the same prompt trees.
-  Agentic engines return a `List[Sample]` of variable-depth trajectories; their
-  trainers assign each trajectory's advantage to all generated turns and
+  Agentic managers collect `List[Sample]` groups of variable-depth trajectories;
+  their trainers assign each trajectory's advantage to all generated turns and
   concatenate those turn Parts for training. (ReFL — which differentiates
   directly through decoded media and uses no rollout Samples or advantages —
   lives outside core as `experimental/refl`.)
@@ -64,15 +64,14 @@ The current trainer surface is:
 | `PETrainer` | `ar` + `diffusion` Parts → two `TrainStack`s | Composed prompt-rewrite/image rollout; image rewards propagate to AR rewrites. `freeze_llm=true` trains and checkpoints diffusion only. |
 | `UnifiedModelTrainer` | whole `Sample` → one `UnifiedModelTrainStack` | AR and image losses accumulate into shared-backbone optimizer steps while prompt-tree lineage remains intact during DP scatter. |
 | `AgenticTrainer` / `AgenticEnvTrainer` | variable-depth `List[Sample]` → concatenated turn `Part` | Barrier multi-turn tool use. The base variant scores terminal answers; the env variant consumes per-trajectory environment returns. |
-| `AgenticPartialTrainer` / `AgenticEnvPartialTrainer` | freshest complete trajectory groups → concatenated turn `Part` | Colocated over-sample/commit/abort loop. `carry` is for Sample-resumable stateless tools; `drop` purges tails from stateful environments that restart episodes. |
+| `AgenticPartialTrainer` / `AgenticEnvPartialTrainer` | filtered complete trajectory groups → concatenated turn `Part` | Colocated over-sample/commit/quiesce loop. `carry` is for Sample-resumable stateless tools; `drop` rejects incomplete roots from stateful environments that restart episodes. |
 | `AsyncAgenticTrainer` / `AsyncAgenticEnvTrainer` | buffered complete trajectory groups → concatenated turn `Part` | Disaggregated train/rollout slabs, resident agentic drive, weight-version staleness control, and the same explicit `carry`/`drop` tail policy. |
 
-The async variants program against the driver-side async engines in
-`unirl/rollout/engine/asynchronous.py`: `AsyncBatchRolloutEngine` (AR/diffusion — non-blocking
-batched generations, launch-time version stamps) and `AsyncAgenticRolloutEngine`
-(partial/async agentic — trajectory drives, group assembly, completion-time stamps).
-The trainers keep the policy: launch ceilings, reap-vs-launch order, quiesce points,
-and tail carry/drop.
+The AR/diffusion async variants use `AsyncBatchRolloutEngine` in
+`unirl/rollout/engine/asynchronous.py`. Agentic variants use the driver-local
+`RolloutManager`: it dispatches individual trajectories, assembles root groups, and
+applies the trainer-built tail/staleness filter. Trainers retain admission, sync,
+quiescence, and training policy.
 
 **Extending it:** a new domain is a new `<Domain>Trainer(BaseTrainer)` that builds its
 remotes inside a `placement(...)` scope and implements `train_step` + `train`; the
