@@ -25,7 +25,7 @@
 #     false for Edit text-only: same edit chat template / drop-64, no vision
 #     tokens (upstream image=None) — not base Qwen-Image's drop-34 stage.
 #   - data_source → datasets/image_edit (JSONL with prompt + media[image,role=condition]).
-#     MultimodalRLDataSource emits primitives["image"]: NativeImages, preserving
+#     MultimodalRLDataSource emits packed primitives["image"]: Images, preserving
 #     each source image's native aspect ratio until the Edit-Plus VAE processor.
 #   - reward → PickScore (V1). V2 will swap in EditReward for instruction
 #     following — the local PickScore scorer doesn't read the source image,

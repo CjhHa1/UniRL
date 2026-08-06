@@ -6,7 +6,7 @@ which ``HunyuanImage3DiffusionStage.diffuse`` always stores) and runs the
 3D-VAE decode in fp32 (bf16 is unsupported by most VAE implementations),
 then normalizes ``[-1, 1] → [0, 1]`` before wrapping in ``Images``.
 
-``HunyuanImage3VAEEncodeStage`` implements ``EncodeStage[NativeImages, ImageLatentCondition]``
+``HunyuanImage3VAEEncodeStage`` implements ``EncodeStage[Images, ImageLatentCondition]``
 for the it2i original-image conditioning branch (lands fully in PR 5;
 included here so the import surface is stable).
 """
@@ -19,7 +19,7 @@ import torch
 
 from unirl.models.types.codec import DecodeStage, EncodeStage
 from unirl.types.conditions import ImageLatentCondition
-from unirl.types.primitives import Images, NativeImages
+from unirl.types.primitives import Images
 from unirl.types.segments import LatentSegment
 
 from .bundle import HunyuanImage3Bundle
@@ -86,22 +86,21 @@ class HunyuanImage3VAEDecodeStage(DecodeStage[LatentSegment, Images]):
             else:
                 decoded = _decode(clean)
         pixels = ((decoded + 1.0) / 2.0).clamp(0.0, 1.0)
-        return Images(pixels=pixels)
+        return Images.from_dense(pixels)
 
 
-class HunyuanImage3VAEEncodeStage(EncodeStage[NativeImages | Images, ImageLatentCondition]):
+class HunyuanImage3VAEEncodeStage(EncodeStage[Images, ImageLatentCondition]):
     """HunyuanImage3 3D-VAE encode stage (it2i edit conditioning).
 
-    Encodes uniform ``NativeImages`` into dense VAE latents
-    and packages them as ``ImageLatentCondition.latents``. Used by the
-    it2i path in PR 5 to carry the original image into the DiT stage's
-    conditioning.
+    Encodes uniform ``Images`` into dense VAE latents and packages them as
+    ``ImageLatentCondition.latents``. Used by the it2i path in PR 5 to carry
+    the original image into the DiT stage's conditioning.
     """
 
     def __init__(self, bundle: HunyuanImage3Bundle) -> None:
         self.bundle = bundle
 
-    def encode(self, p: NativeImages | Images) -> ImageLatentCondition:
+    def encode(self, p: Images) -> ImageLatentCondition:
         """Encode pixel images into VAE latents.
 
         Adds a singleton time axis on the way in (3D-VAE expects
@@ -110,14 +109,13 @@ class HunyuanImage3VAEEncodeStage(EncodeStage[NativeImages | Images, ImageLatent
         ``[B, C_lat, H_lat, W_lat]`` consistent with the rest of the
         unirl image pipeline.
         """
-        pixels_list = [image.pixels for image in p.to_list()]
-        shapes = {tuple(pixels.shape) for pixels in pixels_list}
-        if len(shapes) != 1:
+        try:
+            pixels = p.to_dense()
+        except ValueError as exc:
             raise ValueError(
                 "HunyuanImage3VAEEncodeStage.encode requires uniform image shapes; "
                 "the canonical i2t/it2i path must use the upstream per-sample image processor"
-            )
-        pixels = torch.stack(pixels_list, dim=0)
+            ) from exc
         scaling_factor = getattr(self.bundle.vae.config, "scaling_factor", 1.0)
         with torch.no_grad():
             # pixels: [B, 3, H, W] in [0, 1] → [B, 3, 1, H, W] in [-1, 1]

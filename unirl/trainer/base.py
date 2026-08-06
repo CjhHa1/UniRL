@@ -290,7 +290,7 @@ class BaseTrainer:
         Call after scoring / advantages (and any decoded-reading debug dump),
         immediately before dispatching to ``train_track``.
         """
-        from unirl.types.primitives import Images, NativeImages, Texts
+        from unirl.types.primitives import Images, Texts
 
         gen_parts = sample.gen_parts()
         wb = self.wandb_logger
@@ -300,7 +300,7 @@ class BaseTrainer:
             multi = len(gen_parts) > 1
             cond = sample.conditioning()
             default_prompts = next((list(c.texts) for c in cond if isinstance(c, Texts)), None)
-            input_image = next((c for c in cond if isinstance(c, (NativeImages, Images))), None)
+            input_image = next((c for c in cond if isinstance(c, Images)), None)
             for part in gen_parts:
                 name = "ar" if isinstance(part.sampling_params, ARSamplingParams) else "diffusion"
                 preview = part.media_preview

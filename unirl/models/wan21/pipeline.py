@@ -29,7 +29,7 @@ from typing import Any, Optional
 from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import DanceSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Images, NativeImages, Texts
+from unirl.types.primitives import Images, Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import DiffusionSamplingParams
 
@@ -213,7 +213,7 @@ class WAN21Pipeline(Pipeline):
                 f"WAN21Pipeline.generate: expected a Texts prompt from sample.conditioning()[0], "
                 f"got {type(texts).__name__ if texts is not None else 'None'}"
             )
-        images_prim = next((c for c in conditioning[1:] if isinstance(c, (NativeImages, Images))), None)
+        images_prim = next((c for c in conditioning[1:] if isinstance(c, Images)), None)
 
         wan_conds = self.build_conditions(texts, guidance_scale=float(params.guidance_scale))
 

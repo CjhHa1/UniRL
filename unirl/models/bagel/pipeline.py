@@ -2,7 +2,7 @@
 
 Four-tier flow, per-sample (navit ``bs=1``)::
 
-    Texts [+ NativeImages] ─build 3 KV contexts─▶ BagelDiffusionConditions ─diffuse─▶ LatentSegment ─vae_decode─▶ Images
+    Texts [+ Images] ─build 3 KV contexts─▶ BagelDiffusionConditions ─diffuse─▶ LatentSegment ─vae_decode─▶ Images
 
 Also serves the text-out modes (t2t / i2t / it2t, via :class:`BagelARStage`) and
 the composed **t2ti** (native think-then-generate: the AR und path plans a
@@ -56,7 +56,7 @@ from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.sde.runtime import FlowMatchSchedulePolicy
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Images, NativeImages, Texts
+from unirl.types.primitives import Images, Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
 from unirl.types.segments.latent import LatentSegment
@@ -196,16 +196,14 @@ class BagelPipeline(Pipeline):
     def _extract_input_images(self, conditioning: List[Any], task: str, *, n_prompts: Optional[int]) -> List[Any]:
         """Validated per-sample input PILs for image-input tasks (it2i / i2t / it2t).
 
-        Requires a native-resolution image primitive in the conditioning chain,
-        a ViT-loaded bundle (``enable_vit``), and — when prompts are present —
-        a matching per-sample count. Dense ``Images`` remain accepted for chained
-        generated-image inputs.
+        Requires an ``Images`` primitive in the conditioning chain, a ViT-loaded
+        bundle (``enable_vit``), and — when prompts are present — a matching
+        per-sample count. Packed storage preserves each input's native resolution.
         """
-        images_prim = next((c for c in conditioning if isinstance(c, (NativeImages, Images))), None)
-        if not isinstance(images_prim, (NativeImages, Images)):
+        images_prim = next((c for c in conditioning if isinstance(c, Images)), None)
+        if not isinstance(images_prim, Images):
             raise TypeError(
-                f"BagelPipeline.generate ({task}): expected a NativeImages or Images input "
-                "in sample.conditioning(), found none"
+                f"BagelPipeline.generate ({task}): expected an Images input in sample.conditioning(), found none"
             )
         if getattr(self.bundle.model, "vit_model", None) is None:
             raise ValueError(

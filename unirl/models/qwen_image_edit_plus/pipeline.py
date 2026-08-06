@@ -4,7 +4,7 @@ Text+image → image editing flow::
 
     Texts ──text_embed──▶ ┐
                          ├─▶ QwenImageEditPlusConditions ──diffuse──▶ LatentSegment
-    NativeImages ─vae_encode▶ ┘                                           │
+    Images ───────vae_encode▶ ┘                                           │
                                                                          ▼
                                                                      vae_decode
                                                                          │
@@ -35,7 +35,7 @@ from unirl.models.qwen_image.vae import QwenImageVAEDecodeStage
 from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Images, NativeImages, Texts
+from unirl.types.primitives import Images, Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import DiffusionSamplingParams
 
@@ -56,9 +56,8 @@ class QwenImageEditPlusPipeline(Pipeline):
     Reads from the conditioning ancestors:
 
     - ``primitives["text"]: Texts`` — required edit instructions.
-    - ``primitives["image"]: NativeImages`` — **required** native-resolution
-      source images (Edit-Plus is edit-only; legacy uniform ``Images`` remains
-      accepted for compatibility).
+    - ``primitives["image"]: Images`` — **required** source images. Packed
+      storage preserves each sample's native resolution (Edit-Plus is edit-only).
       The source remains required for VAE latent concatenation even when
       ``use_condition_image_prompt=False``; that switch only controls whether
       the text encoder also sees the source image.
@@ -193,7 +192,7 @@ class QwenImageEditPlusPipeline(Pipeline):
         texts: Texts,
         *,
         negatives: Optional[Texts] = None,
-        images: Optional[NativeImages | Images] = None,
+        images: Optional[Images] = None,
         guidance_scale: float = 1.0,
     ) -> QwenImageEditPlusConditions:
         """Build the text side of Edit-Plus conditions.
@@ -240,7 +239,7 @@ class QwenImageEditPlusPipeline(Pipeline):
 
         conditioning = sample.conditioning()
         text_inputs = [value for value in conditioning if isinstance(value, Texts)]
-        image_inputs = [value for value in conditioning if isinstance(value, (NativeImages, Images))]
+        image_inputs = [value for value in conditioning if isinstance(value, Images)]
         if len(text_inputs) != 1:
             raise TypeError(
                 "QwenImageEditPlusPipeline.generate: expected exactly one Texts conditioning "
@@ -248,7 +247,7 @@ class QwenImageEditPlusPipeline(Pipeline):
             )
         if len(image_inputs) != 1:
             raise TypeError(
-                "QwenImageEditPlusPipeline.generate: expected exactly one NativeImages conditioning "
+                "QwenImageEditPlusPipeline.generate: expected exactly one Images conditioning "
                 f"primitive (Edit-Plus is edit-only), got {len(image_inputs)}"
             )
         texts, images = text_inputs[0], image_inputs[0]

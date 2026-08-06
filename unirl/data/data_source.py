@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
 import torch
 from torch.utils.data import DataLoader
 
-from unirl.types.primitives import Image, NativeImages, Texts, Videos
+from unirl.types.primitives import Image, Images, Texts, Videos
 from unirl.types.sample import Part, PrimitiveMap, Sample
 
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
@@ -207,7 +207,7 @@ def _reject_unsupported_media_refs(batch: Dict[str, Any], *, context: str) -> No
     The ``media_refs`` channel carries a ``MediaRef(uri, modality, role)``
     URI list. The driver consumes the supported pairs via
     :func:`_load_condition_images` and :func:`_load_condition_videos` into
-    chained input Parts. Condition images use ``NativeImages`` so their
+    chained input Parts. Condition images use packed ``Images`` so their
     per-sample source resolutions remain ragged until a model consumes them.
     all other (modality, role) combinations are not yet typed and
     would be silently dropped (degrading I2V/V2V/text-conditioned jobs
@@ -409,7 +409,7 @@ class MultimodalRLDataSource:
         primitives: Dict[str, Any] = {"text": Texts(texts=prompts)}
         images = _load_condition_images(media_refs)
         if images is not None:
-            primitives["image"] = NativeImages.from_list(images)
+            primitives["image"] = Images.from_list(images)
         videos = _load_videos(media_refs)
         if videos is not None:
             primitives["video"] = videos
@@ -440,7 +440,7 @@ class MultimodalRLDataSource:
         primitives: Dict[str, Any] = {"text": Texts(texts=prompts)}
         images = _load_condition_images(media_refs)
         if images is not None:
-            primitives["image"] = NativeImages.from_list(images)
+            primitives["image"] = Images.from_list(images)
         videos = _load_videos(media_refs)
         if videos is not None:
             primitives["video"] = videos

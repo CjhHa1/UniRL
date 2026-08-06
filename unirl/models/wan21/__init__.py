@@ -5,10 +5,10 @@ Implements the ``Bundle`` / ``Pipeline`` / ``EmbedStage`` /
 :mod:`unirl.models.sd3` and :mod:`unirl.models.wan22` (text-to-video peer).
 
 I2V is wired through two optional ``EncodeStage`` siblings:
-:class:`WAN21ImageLatentEncodeStage` (``NativeImages`` → 20-channel mask + VAE
+:class:`WAN21ImageLatentEncodeStage` (``Images`` → 20-channel mask + VAE
 latent payload, channel-concatted onto noise before the transformer)
-and :class:`WAN21CLIPVisionEncodeStage` (``NativeImages`` → CLIP penultimate
-patch embeddings, forwarded as ``encoder_hidden_states_image``). Both
+and :class:`WAN21CLIPVisionEncodeStage` (``Images`` → CLIP penultimate patch
+embeddings, forwarded as ``encoder_hidden_states_image``). Both
 fire only when the I2V checkpoint declares ``transformer.config.image_dim
 > 0``; T2V bundles skip them and the pipeline is unchanged.
 

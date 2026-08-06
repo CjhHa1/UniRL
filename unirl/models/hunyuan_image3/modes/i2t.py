@@ -1,8 +1,7 @@
 """i2t — image-to-text autoregressive generation.
 
 Reads ``primitives["text"]: Texts`` (the prompt) and
-``primitives["image"]: NativeImages`` (the native-resolution image to
-caption / answer about),
+``primitives["image"]: Images`` (the image to caption / answer about),
 plus ``stage_params["ar"]: dict`` (optional). Builds chat-templated
 ``input_ids`` with embedded ``<img>`` markers via the chat-template
 wrapper, then runs ``HunyuanImage3ARStage.autoregress`` against the
@@ -23,7 +22,7 @@ import torch
 
 from unirl.models.types.ar import ARSamplingParams
 from unirl.types.conditions import ImageEmbedCondition
-from unirl.types.primitives import Images, NativeImages, Texts
+from unirl.types.primitives import Images, Texts
 from unirl.types.sample import Sample
 
 from ..ar import HunyuanImage3ARParams
@@ -47,11 +46,10 @@ def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
             f"prompt from sample.conditioning()[0] must be Texts, "
             f"got {type(texts).__name__ if texts is not None else 'None'}"
         )
-    images = next((c for c in conditioning[1:] if isinstance(c, (NativeImages, Images))), None)
-    if not isinstance(images, (NativeImages, Images)):
+    images = next((c for c in conditioning[1:] if isinstance(c, Images)), None)
+    if not isinstance(images, Images):
         raise TypeError(
-            "HunyuanImage3Pipeline.generate (i2t): expected a chained NativeImages "
-            "(or legacy uniform Images) input in sample.conditioning(), found none"
+            "HunyuanImage3Pipeline.generate (i2t): expected a chained Images input in sample.conditioning(), found none"
         )
 
     model_cfg: Dict[str, Any] = dict((sample.parts[0].control or {}).get("ar") or {})

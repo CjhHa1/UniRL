@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from unirl.types.primitives import Images, NativeImages, Texts, Videos
+from unirl.types.primitives import Images, Texts, Videos
 from unirl.types.sample import Turn
 
 Conversation = List[Dict[str, Any]]
@@ -82,7 +82,7 @@ def build_vision_messages(
     if not turns:
         return []
     roles = [t.role for t in turns]
-    is_image = [isinstance(t.content, (NativeImages, Images)) for t in turns]
+    is_image = [isinstance(t.content, Images) for t in turns]
     cols = [t.content.to_pils() if im else t.content.texts for t, im in zip(turns, is_image)]
     role_groups = _group_consecutive_roles(roles)
     prefix = _system_prefix(system_instruction, roles)

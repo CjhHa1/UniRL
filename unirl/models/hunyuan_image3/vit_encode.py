@@ -25,18 +25,18 @@ import torch
 
 from unirl.models.types.codec import EncodeStage
 from unirl.types.conditions import ImageEmbedCondition
-from unirl.types.primitives import Images, NativeImages
+from unirl.types.primitives import Images
 
 from .bundle import HunyuanImage3Bundle
 
 
-class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages | Images, ImageEmbedCondition]):
+class HunyuanImage3VitEncodeStage(EncodeStage[Images, ImageEmbedCondition]):
     """SigLIP2-based image → ImageEmbedCondition stage."""
 
     def __init__(self, bundle: HunyuanImage3Bundle) -> None:
         self.bundle = bundle
 
-    def encode(self, p: NativeImages | Images) -> ImageEmbedCondition:
+    def encode(self, p: Images) -> ImageEmbedCondition:
         """Encode pixel images into ViT patch embeddings.
 
         Pixel input convention: ``[B, C, H, W]`` in ``[0, 1]``. SigLIP2
@@ -44,14 +44,14 @@ class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages | Images, ImageEmbedC
         rescale to match the upstream ``image_processor`` convention
         (``HunyuanImage-3.0/hunyuan_image_3/image_processor.py``).
         """
-        pixels_list = [image.pixels for image in p.to_list()]
-        shapes = {tuple(pixels.shape) for pixels in pixels_list}
-        if len(shapes) != 1:
+        try:
+            x = p.to_dense()
+        except ValueError as exc:
             raise ValueError(
                 "HunyuanImage3VitEncodeStage.encode requires uniform image shapes; "
                 "use encode_for_cond_vit for native mixed-resolution inputs"
-            )
-        x = torch.stack(pixels_list, dim=0).to(self.bundle.device).to(self.bundle.dtype)
+            ) from exc
+        x = x.to(self.bundle.device).to(self.bundle.dtype)
         # [0, 1] → [-1, 1] mirroring upstream image_processor.
         x = x * 2.0 - 1.0
 
@@ -70,7 +70,7 @@ class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages | Images, ImageEmbedC
     # Chat-template-driven input prep -- canonical i2t / it2i entry point.
     # ------------------------------------------------------------------
 
-    def encode_for_cond_vit(self, p: NativeImages | Images) -> Dict[str, Any]:
+    def encode_for_cond_vit(self, p: Images) -> Dict[str, Any]:
         """Prep cond-image features for the unified MM forward.
 
         Mirrors ``HunyuanImage3ForCausalMM._encode_cond_image``
@@ -81,7 +81,7 @@ class HunyuanImage3VitEncodeStage(EncodeStage[NativeImages | Images, ImageEmbedC
         cond_vit tensors and the ``vit_kwargs`` dict shape SigLIP2 needs.
 
         Args:
-            p: ``NativeImages`` carrying per-sample ``[3, H_i, W_i]``
+            p: ``Images`` carrying packed per-sample ``[3, H_i, W_i]``
                 float tensors in ``[0, 1]``.
 
         Returns:

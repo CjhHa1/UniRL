@@ -3,10 +3,10 @@
 Sibling of :mod:`unirl.rollout.engine.sglang_diffusion.adapters.qwen_image`
 (the T2I modality) with two image-edit deltas:
 
-- **Request side.** Edit-Plus requires a native or dense image batch in an aligned
+- **Request side.** Edit-Plus requires a packed image batch in an aligned
   image-conditioning Part
   (fail-fast if absent — Edit-Plus is edit-only). The adapter extracts PILs
-  via :meth:`NativeImages.to_pils` and injects each into the sampling kwargs under
+  via :meth:`Images.to_pils` and injects each into the sampling kwargs under
   ``condition_image`` — a SamplingParams field injected by
   :mod:`._patches.patch_sampling_io` and copied onto ``Req.condition_image``
   in ``prepare_request``. SGLang's ``InputValidationStage`` checks

@@ -27,7 +27,7 @@ import torch
 from unirl.models.qwen_image.text_embed import extract_masked_hidden
 from unirl.models.types.embedding import ImageConditionedEmbedStage
 from unirl.types.conditions import TextEmbedCondition
-from unirl.types.primitives import Images, NativeImages, Texts
+from unirl.types.primitives import Images, Texts
 
 from .bundle import QwenImageEditPlusBundle
 
@@ -58,7 +58,7 @@ def _condition_size_for_aspect(width: int, height: int) -> Tuple[int, int]:
     return int(cond_w), int(cond_h)
 
 
-class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, NativeImages | Images, TextEmbedCondition]):
+class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, Images, TextEmbedCondition]):
     """Edit-template text (+ optional source images) → ``TextEmbedCondition``.
 
     Both CFG branches pass the *same* source images when multimodal (matching
@@ -89,7 +89,7 @@ class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, NativeIm
 
         return Qwen2VLProcessor.from_pretrained(path, subfolder="processor")
 
-    def embed(self, p: Texts, images: Optional[NativeImages | Images] = None) -> TextEmbedCondition:
+    def embed(self, p: Texts, images: Optional[Images] = None) -> TextEmbedCondition:
         """Encode prompts; optionally condition on source images."""
         prompt_embeds, prompt_embeds_mask = self._encode(list(p.texts), images)
         return TextEmbedCondition(
@@ -98,7 +98,7 @@ class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, NativeIm
             pooled=None,
         )
 
-    def _condition_pils(self, images: NativeImages | Images):
+    def _condition_pils(self, images: Images):
         """Convert source images to per-sample PILs resized to the
         condition grid (≈384², aspect-preserving), mirroring upstream's
         ``image_processor.resize`` before the VL processor."""
@@ -113,7 +113,7 @@ class QwenImageEditPlusTextEmbedStage(ImageConditionedEmbedStage[Texts, NativeIm
             resized.append(pil)
         return resized
 
-    def _encode(self, prompts: List[str], images: Optional[NativeImages | Images]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _encode(self, prompts: List[str], images: Optional[Images]) -> Tuple[torch.Tensor, torch.Tensor]:
         bundle = self.bundle
         device = bundle.device
         dtype = next(bundle.text_encoder.parameters()).dtype

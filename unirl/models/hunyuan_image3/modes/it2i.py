@@ -1,7 +1,7 @@
 """it2i — image-edit (text + cond image conditioning, image output).
 
-Reads ``primitives["text"]: Texts`` + ``primitives["image"]: NativeImages``
-(the native-resolution source image to edit) and
+Reads ``primitives["text"]: Texts`` + ``primitives["image"]: Images``
+(the source image to edit) and
 ``stage_params["diffusion"]: dict``.
 Encodes the source image via the upstream
 ``HunyuanImage3VitEncodeStage.encode_for_cond_vit`` (image_processor)
@@ -27,7 +27,7 @@ import torch
 from unirl.config.require import require
 from unirl.types.conditions import ImageEmbedCondition
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Images, NativeImages, Texts
+from unirl.types.primitives import Images, Texts
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import DiffusionSamplingParams
 
@@ -126,11 +126,10 @@ def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
         f"must be Texts, "
         f"got {type(texts).__name__ if texts is not None else 'None'}",
     )
-    images = next((c for c in conditioning[1:] if isinstance(c, (NativeImages, Images))), None)
+    images = next((c for c in conditioning[1:] if isinstance(c, Images)), None)
     require(
-        isinstance(images, (NativeImages, Images)),
-        "HunyuanImage3Pipeline.generate (it2i): expected a chained NativeImages "
-        "(or legacy uniform Images) input in sample.conditioning(), found none",
+        isinstance(images, Images),
+        "HunyuanImage3Pipeline.generate (it2i): expected a chained Images input in sample.conditioning(), found none",
     )
 
     require(

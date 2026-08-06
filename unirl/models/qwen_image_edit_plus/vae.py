@@ -1,7 +1,7 @@
 """QwenImageEditPlus VAE stages — source-image encoder + (reused) decoder.
 
 ``QwenImageEditPlusVAEEncodeStage`` is the one genuinely new stage: it
-turns source ``NativeImages`` into a :class:`QwenImageEditPlusLatentCondition`
+turns source ``Images`` into a :class:`QwenImageEditPlusLatentCondition`
 carrying one VAE-encoded spatial latent ``[16, H_i/8, W_i/8]`` per sample. The diffusion
 step (:class:`QwenImageEditPlusDiffusionStep`) packs both the noise latent
 and this image latent with the same 2×2 channel-pack before concatenating
@@ -21,7 +21,7 @@ from typing import Dict, List
 import torch
 
 from unirl.models.types.codec import EncodeStage
-from unirl.types.primitives import Images, NativeImages
+from unirl.types.primitives import Images
 
 from .bundle import QwenImageEditPlusBundle
 from .conditions import QwenImageEditPlusLatentCondition
@@ -46,7 +46,7 @@ def _vae_size_for_aspect(width: int, height: int) -> tuple[int, int]:
     return int(vae_width), int(vae_height)
 
 
-class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, QwenImageEditPlusLatentCondition]):
+class QwenImageEditPlusVAEEncodeStage(EncodeStage[Images, QwenImageEditPlusLatentCondition]):
     """Encode a source image into a VAE-latent condition for token concat.
 
     Pipeline:
@@ -85,7 +85,7 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, QwenIma
         self.bundle = bundle
 
     @torch.no_grad()
-    def encode(self, images: NativeImages | Images) -> QwenImageEditPlusLatentCondition:
+    def encode(self, images: Images) -> QwenImageEditPlusLatentCondition:
         """Encode source pixels into a ragged latent condition.
 
         Args:
@@ -104,10 +104,8 @@ class QwenImageEditPlusVAEEncodeStage(EncodeStage[NativeImages | Images, QwenIma
                 "recipes encode in the rollout engine (image_latent arrives "
                 "captured); trainside rollout requires load_vae=True."
             )
-        if not isinstance(images, (NativeImages, Images)):
-            raise TypeError(
-                f"QwenImageEditPlusVAEEncodeStage.encode: expected NativeImages or Images, got {type(images).__name__}"
-            )
+        if not isinstance(images, Images):
+            raise TypeError(f"QwenImageEditPlusVAEEncodeStage.encode: expected Images, got {type(images).__name__}")
         source_pils = images.to_pils()
         if not source_pils:
             raise ValueError("QwenImageEditPlusVAEEncodeStage.encode: empty image batch")

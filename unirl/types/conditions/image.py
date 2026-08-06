@@ -28,7 +28,9 @@ class ImageLatentCondition(Condition):
 
     def __post_init__(self) -> None:
         if isinstance(self.latents, (list, tuple)):
-            raise TypeError("ImageLatentCondition.latents must be a dense tensor; use a ragged condition type")
+            raise TypeError(
+                "ImageLatentCondition.latents must be a dense tensor; use the owning model's ragged condition type"
+            )
 
 
 @dataclass

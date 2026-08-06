@@ -37,7 +37,7 @@ from contextlib import nullcontext
 import torch
 
 from unirl.models.types.codec import DecodeStage
-from unirl.types.primitives import Images, NativeImages
+from unirl.types.primitives import Images
 from unirl.types.segments import LatentSegment
 
 from .bundle import Flux2KleinBundle
@@ -105,7 +105,7 @@ class Flux2KleinVAEDecodeStage(DecodeStage[LatentSegment, Images]):
                 decoded = _decode(clean)
 
         pixels = ((decoded + 1.0) / 2.0).clamp(0.0, 1.0)
-        return Images(pixels=pixels)
+        return Images.from_dense(pixels)
 
 
 class Flux2KleinVAEEncodeStage:
@@ -133,7 +133,7 @@ class Flux2KleinVAEEncodeStage:
         self.bundle = bundle
 
     @torch.no_grad()
-    def encode(self, images: NativeImages | Images, *, height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, images: Images, *, height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:
         if self.bundle.vae is None:
             raise RuntimeError(
                 "Flux2KleinVAEEncodeStage.encode: no VAE loaded "
@@ -142,10 +142,8 @@ class Flux2KleinVAEEncodeStage:
                 "recipes encode in the rollout engine; trainside rollout "
                 "requires load_vae=True."
             )
-        if not isinstance(images, (NativeImages, Images)):
-            raise TypeError(
-                f"Flux2KleinVAEEncodeStage.encode: expected NativeImages or Images, got {type(images).__name__}"
-            )
+        if not isinstance(images, Images):
+            raise TypeError(f"Flux2KleinVAEEncodeStage.encode: expected Images, got {type(images).__name__}")
         pixels_list = [image.pixels for image in images.to_list()]
         if not pixels_list or any(pixels is None or pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(

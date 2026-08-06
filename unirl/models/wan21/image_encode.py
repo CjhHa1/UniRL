@@ -1,4 +1,4 @@
-"""WAN21ImageLatentEncodeStage — native images → mask+VAE latent payload.
+"""WAN21ImageLatentEncodeStage — packed Images → mask+VAE latent payload.
 
 Mirrors diffusers ``pipelines/wan/pipeline_wan_i2v.py:423-481`` for the
 ``expand_timesteps=False`` path (WAN 2.1 I2V + WAN 2.2 14B I2V). Encode
@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 from unirl.models.types.codec import EncodeStage
 from unirl.types.conditions import ImageLatentCondition
-from unirl.types.primitives import Images, NativeImages
+from unirl.types.primitives import Images
 
 _SPATIAL_DOWNSAMPLE: int = 8
 _TEMPORAL_DOWNSAMPLE: int = 4
@@ -36,7 +36,7 @@ class _VAEBundle(Protocol):
     dtype: torch.dtype
 
 
-class WAN21ImageLatentEncodeStage(EncodeStage[NativeImages | Images, ImageLatentCondition]):
+class WAN21ImageLatentEncodeStage(EncodeStage[Images, ImageLatentCondition]):
     """Encode a reference image into the 20-channel WAN I2V condition payload."""
 
     def __init__(
@@ -52,7 +52,7 @@ class WAN21ImageLatentEncodeStage(EncodeStage[NativeImages | Images, ImageLatent
         self.height = int(height)
         self.width = int(width)
 
-    def encode(self, p: NativeImages | Images) -> ImageLatentCondition:
+    def encode(self, p: Images) -> ImageLatentCondition:
         if self.bundle.vae is None:
             raise RuntimeError(
                 "WAN21ImageLatentEncodeStage.encode: no VAE loaded "
@@ -61,10 +61,8 @@ class WAN21ImageLatentEncodeStage(EncodeStage[NativeImages | Images, ImageLatent
                 "recipes encode in the rollout engine; trainside I2V "
                 "requires load_vae=True."
             )
-        if not isinstance(p, (NativeImages, Images)):
-            raise TypeError(
-                f"WAN21ImageLatentEncodeStage.encode: expected NativeImages or Images, got {type(p).__name__}"
-            )
+        if not isinstance(p, Images):
+            raise TypeError(f"WAN21ImageLatentEncodeStage.encode: expected Images, got {type(p).__name__}")
         pixels_list = [image.pixels for image in p.to_list()]
         if not pixels_list or any(pixels is None or pixels.ndim != 3 or pixels.shape[0] != 3 for pixels in pixels_list):
             raise ValueError(

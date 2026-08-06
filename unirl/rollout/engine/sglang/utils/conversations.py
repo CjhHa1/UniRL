@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-from unirl.types.primitives import Images, NativeImages
+from unirl.types.primitives import Images
 from unirl.types.sample import Sample
 
 Conversation = List[Dict[str, Any]]
@@ -115,7 +115,7 @@ def build_vision_conversations(
     turns, _ = sample.vision_conditioning()
     rep, k = unique_group_indices(sample.parts[-1].group_ids)
     roles = [t.role for t in turns]
-    is_image = [isinstance(t.content, (NativeImages, Images)) for t in turns]
+    is_image = [isinstance(t.content, Images) for t in turns]
     cols = [t.content.to_pils() if im else t.content.texts for t, im in zip(turns, is_image)]
     role_groups = _group_consecutive_roles(roles)
     prefix = _system_prefix(system_instruction, roles)

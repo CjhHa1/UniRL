@@ -35,7 +35,7 @@ from unirl.types.advantages import compute_gae_advantages as _compute_gae
 from unirl.types.advantages import scatter_terminal_rewards
 from unirl.types.conditions import Condition
 from unirl.types.media_preview import MediaPreview
-from unirl.types.primitives import Images, NativeImages, PrimitiveValue, Texts, primitive_modality_key
+from unirl.types.primitives import Images, PrimitiveValue, Texts, primitive_modality_key
 from unirl.types.sample_id import ancestor_id, child_id, parent_id
 from unirl.types.sampling import BaseSamplingParams
 from unirl.types.segments import Segment, TextSegment
@@ -531,7 +531,7 @@ class Sample(Batch):
         :meth:`Part.input_child` so only the head is a root, e.g.::
 
             text = Part.input(ids, primitives={"text": Texts(...)})
-            Sample.request(text, text.input_child({"image": Images(...)}))  # image+text
+            Sample.request(text, text.input_child({"image": Images.from_dense(...)}))  # image+text
 
         :meth:`Sample.conditioning` then surfaces both primitives (text, image)
         in turn order for the gen step. See ``unirl/types/README.md``.
@@ -884,17 +884,14 @@ class Sample(Batch):
             raise ValueError(f"Sample.text_conditioning: the LLM path requires all-text turns; got non-text {non_text}")
         return ts
 
-    def vision_conditioning(self) -> tuple[List[Turn], List[NativeImages | Images]]:
+    def vision_conditioning(self) -> tuple[List[Turn], List[Images]]:
         """VLM render: the trajectory as a text+image conversation. Returns the
         role-tagged turns (for placeholder ordering) plus the image collection
         (1..k, for the processor). Fails loud on zero images or any non-text/image
         modality."""
         ts = self.turns()
-        image_types = (NativeImages, Images)
-        images = [t.content for t in ts if isinstance(t.content, image_types)]
-        extra = [
-            primitive_modality_key(t.content) for t in ts if not isinstance(t.content, (Texts, NativeImages, Images))
-        ]
+        images = [t.content for t in ts if isinstance(t.content, Images)]
+        extra = [primitive_modality_key(t.content) for t in ts if not isinstance(t.content, (Texts, Images))]
         if extra or not images:
             raise ValueError(
                 f"Sample.vision_conditioning: requires text+image turns only; got "

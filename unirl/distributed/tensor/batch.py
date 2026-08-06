@@ -356,6 +356,9 @@ def _repeat_interleave_value(value: Any, n: int, batch_size: int) -> Any:
         return tuple(v for v in value for _ in range(n))
     if isinstance(value, dict):
         return {k: _repeat_interleave_value(v, n, batch_size) for k, v in value.items()}
+    if hasattr(value, "select_ranges") and getattr(value, "batch_size", None) == batch_size:
+        ranges = [(index, index + 1) for index in range(batch_size) for _ in range(n)]
+        return value.select_ranges(ranges)
     if isinstance(value, Batch):
         return value.repeat_interleave(n)
     return value
@@ -501,9 +504,14 @@ def _repeat_interleave_packed_data(
             "construct via the regular dataclass __init__ with per-sample lists."
         )
     if n <= 0:
+        if hasattr(value, "select_ranges"):
+            return value.select_ranges([])
         return value[:0].clone()
     if n == 1:
         return value.clone()
+    if hasattr(value, "select_ranges"):
+        ranges = [(int(cu[i].item()), int(cu[i + 1].item())) for i in range(int(cu.numel()) - 1) for _ in range(n)]
+        return value.select_ranges(ranges)
     chunks: List[torch.Tensor] = []
     for i in range(int(cu.numel()) - 1):
         chunk = value[int(cu[i].item()) : int(cu[i + 1].item())]
