@@ -32,11 +32,11 @@ from unirl.distributed.tensor.batch import (
 )
 from unirl.distributed.tensor.ref import hydrate
 from unirl.types.advantages import (
-    _finite_stats,
-    scatter_terminal_rewards,
+    compute_gae_advantages as _compute_gae,
 )
 from unirl.types.advantages import (
-    compute_gae_advantages as _compute_gae,
+    finite_mean_std,
+    scatter_terminal_rewards,
 )
 from unirl.types.conditions import Condition
 from unirl.types.media import MediaRefs
@@ -360,7 +360,7 @@ class Part(Batch):
         if scope == "global":
             rewards_g = rewards_local.to(torch.float32)
             finite = torch.isfinite(rewards_g)
-            mean, std = _finite_stats(rewards_g[finite])
+            mean, std = finite_mean_std(rewards_g)
             centered = torch.where(finite, rewards_g - mean, torch.zeros_like(rewards_g))
             if normalize:
                 adv_g = centered / (std + eps)
@@ -388,6 +388,7 @@ class Part(Batch):
 
         rewards = rewards_local.to(torch.float32)
         reshaped = rewards.view(n_groups, branch)
+        # Per-row finite mean/std (same contract as :func:`finite_mean_std`, vectorized).
         finite = torch.isfinite(reshaped)
         counts = finite.sum(dim=1, keepdim=True)
         finite_values = torch.where(finite, reshaped, torch.zeros_like(reshaped))
@@ -395,7 +396,7 @@ class Part(Batch):
         centered = torch.where(finite, reshaped - mean, torch.zeros_like(reshaped))
         if normalize:
             if use_global_std:
-                _, std = _finite_stats(rewards[torch.isfinite(rewards)])
+                _, std = finite_mean_std(rewards)
             else:
                 variance = (centered * centered).sum(dim=1, keepdim=True) / counts.clamp_min(1)
                 std = torch.where(counts > 1, variance.sqrt(), torch.ones_like(variance))
