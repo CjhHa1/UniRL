@@ -4,13 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-
-def _finite_stats(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    if values.numel() == 0:
-        return values.new_zeros(()), values.new_ones(())
-    mean = values.mean()
-    std = values.std(unbiased=False) if values.numel() > 1 else values.new_ones(())
-    return mean, std
+from unirl.types.advantages import _finite_stats
 
 
 def normalize_grouped(

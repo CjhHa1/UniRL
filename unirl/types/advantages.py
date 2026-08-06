@@ -12,6 +12,15 @@ from typing import Optional, Tuple
 import torch
 
 
+def _finite_stats(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mean and population std over ``values``; empty → ``(0, 1)``, singleton → std ``1``."""
+    if values.numel() == 0:
+        return values.new_zeros(()), values.new_ones(())
+    mean = values.mean()
+    std = values.std(unbiased=False) if values.numel() > 1 else values.new_ones(())
+    return mean, std
+
+
 def compute_gae_advantages(
     rewards: torch.Tensor,
     values: torch.Tensor,
