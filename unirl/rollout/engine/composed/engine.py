@@ -109,7 +109,7 @@ class ComposedRolloutEngine(SyncRolloutEngine):
             "diffusion": self._diffusion,
         }
 
-        self._weight_version = 0
+        self._version = 0
         self._generate_lock = threading.Lock()
         self._shutdown_lock = threading.Lock()
         self._shutdown_requested = False
@@ -258,7 +258,7 @@ class ComposedRolloutEngine(SyncRolloutEngine):
             primitive_metadata=dict(diff_child.primitive_metadata),
             conditions=dict(diff_child.conditions),
             media_preview=diff_child.media_preview,
-            weight_version=diff_child.weight_version,
+            output_version=diff_child.output_version,
         )
 
         return Sample(parts=[input_part, ar_part, diffusion_part])

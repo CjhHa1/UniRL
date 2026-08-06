@@ -23,13 +23,12 @@ diffusion hooks:
 Async control uses the same optimizer-update clock as AsyncARTrainer:
   * ``max_inflight`` — must be ``1`` so a reap-time transfer never competes with
     a queued generation on the rollout workers.
-  * ``max_staleness`` — how many whole rollout batches the behavior policy may
-    trail the train policy by, checked at batch admission and consumption. The
-    clock underneath counts committed optimizer updates; the budget is stated in
-    batches because those are the only points where admission can react.
-    ``num_updates_per_batch > 1`` therefore also means the updates after the
-    first in a batch run at up to ``num_updates_per_batch - 1`` more updates of
-    drift than the admitted figure.
+  * ``weight_sync_interval`` — how many rollout batches one published snapshot
+    serves. ``1`` publishes after every batch; interval ``K`` derives maximum
+    batch-entry staleness ``K - 1``. The clock underneath counts committed
+    optimizer updates. ``num_updates_per_batch > 1`` therefore also means the
+    updates after the first in a batch run at up to
+    ``num_updates_per_batch - 1`` more updates of drift than the admitted figure.
 
 ``_next_rollout_batch`` polls (reaps) BEFORE topping up launches, which is what makes the
 overlap fast here: reaping a generation pulls its trajectory segment off the
@@ -76,7 +75,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         self,
         *,
         max_inflight: int = 1,
-        max_staleness: int = 0,
+        weight_sync_interval: int = 1,
         **diffusion_kwargs: Any,
     ) -> None:
         layout = diffusion_kwargs.setdefault("layout", "separate")
@@ -98,7 +97,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
 
         self._max_inflight = max_inflight
         self._control = AsyncBatchControl(
-            max_staleness=max_staleness,
+            weight_sync_interval=weight_sync_interval,
             num_updates_per_batch=diffusion_kwargs["stack_cfg"].get("num_updates_per_batch", 1),
         )
 
@@ -185,6 +184,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             num_rollouts=num_rollouts,
             extra={
                 "max_inflight": self._max_inflight,
+                "weight_sync_interval": self._control.weight_sync_interval,
                 "max_staleness": self._control.max_staleness,
                 "staleness_budget": self._control.staleness_budget,
                 "num_updates_per_batch": self._control.num_updates_per_batch,
@@ -197,8 +197,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             },
         )
         # Reported here rather than in __init__: save_interval only arrives with
-        # the train call, and it clamps the publication period just as the
-        # staleness budget does.
+        # the train call, and it clamps the configured publication interval.
         log_admission_notes(
             self._control,
             max_inflight=self._max_inflight,
@@ -239,14 +238,16 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                     training_progress=training_progress,
                     rollout_id=rollout_id,
                     t0=t0,
-                    extra_metrics=self._control.behavior_metrics(batch.behavior_version),
+                    extra_metrics=self._control.output_metrics(batch.output_version),
                 )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
 
                 step = rollout_id + 1
                 eval_due = self.eval_interval > 0 and step % self.eval_interval == 0
                 save_due = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
-                sync_due = step < num_rollouts and self._control.publish_lag > self._control.staleness_budget
+                sync_due = (
+                    step < num_rollouts and self._control.batches_since_sync >= self._control.weight_sync_interval
+                )
                 if eval_due or save_due or sync_due:
                     self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
 
@@ -299,7 +300,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             for _ in range(slots):
                 engine.submit(
                     self._build_async_sample(engine.next_gen_id),
-                    behavior_version=self._control.rollout_version,
+                    output_version=self._control.published_version,
                 )
             batch = engine.pop_next_batch(
                 train_version=self._control.train_version,

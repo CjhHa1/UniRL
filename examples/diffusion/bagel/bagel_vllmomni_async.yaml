@@ -50,17 +50,16 @@ train_fraction: 0.5            # 4 train GPUs + 4 rollout GPUs on an 8-GPU pool
 # With max_inflight=1 the trainer polls (reaps) before topping up launches, so
 # each generation transfers in the idle window before the next launch, then
 # that next generation overlaps the train step. Real overlap needs admission
-# depth > 1, i.e. max_staleness >= 1.
+# depth > 1, i.e. weight_sync_interval >= 2.
 #
-# max_staleness counts whole rollout batches, so admission depth is
-# max_staleness + 1 = 12 regardless of num_updates_per_batch. That depth is also
-# the weight-sync period: publication happens every 12 batches (24 optimizer
-# updates), and a batch is at most 11 batches (22 updates) stale when it enters
-# training. 11 is a long way past AReaL's recommended eta <= 8 — and
-# FlowGRPO's rollout-anchored ratio is their "naive PPO" arm, with no decoupled
-# objective to absorb the drift. Lower this first if the ratio starts to swing.
+# weight_sync_interval=12 means one published rollout snapshot serves 12 batches
+# regardless of num_updates_per_batch. Publication happens every 12 batches
+# (24 optimizer updates), and a batch is at most 11 batches (22 updates) stale
+# when it enters training. 11 is a long way past AReaL's recommended eta <= 8,
+# and FlowGRPO's rollout-anchored ratio is their "naive PPO" arm, with no decoupled
+# objective to absorb the drift. Lower the interval first if the ratio swings.
 max_inflight: 1
-max_staleness: 11
+weight_sync_interval: 12
 
 logging:
   report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)

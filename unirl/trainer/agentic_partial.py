@@ -23,7 +23,7 @@ pattern. The driver-side :class:`~unirl.rollout.engine.asynchronous.AsyncAgentic
 Correctness: `TensorWeightSync.sync` writes the live SRT weight pool, so it must run **awake +
 decode-idle** — sync sits at the top (post-`wake_up`, pre-`submit`, barrier parity) and `abort`
 (not `sleep`) provides the pre-sleep quiesce. The off-policy carried tail is corrected per-token
-(each gen Part keeps its own `weight_version` + logprobs); `buffer_max_staleness` separately bounds
+(each gen Part keeps its own `output_version` + logprobs); `buffer_max_staleness` separately bounds
 how long a completed group remains eligible in the buffer.
 """
 
@@ -237,7 +237,7 @@ class AgenticPartialTrainer(AgenticTrainer):
                         "partial/discarded_completed_trajectories": self._last_discarded_completed_trajectories,
                         "partial/assembler_pending_roots": self._engine.pending_groups(),
                         "partial/buffer_groups": self._engine.buffered_groups(),
-                        "partial/weight_version": self._engine.weight_version,
+                        "partial/version": self._engine.version,
                     },
                 )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)

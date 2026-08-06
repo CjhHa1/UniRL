@@ -96,7 +96,7 @@ class Part(Batch):
     control: Dict[str, Any] = shared_field(default_factory=dict)
     sampling_params: Optional[BaseSamplingParams] = shared_field(default=None)
     role: Optional[str] = shared_field(default=None)
-    weight_version: Optional[int] = shared_field(default=None)
+    output_version: Optional[int] = shared_field(default=None)
     init_noise_group_ids: List[str] = concat_field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -297,7 +297,7 @@ class Part(Batch):
         conditions: Optional[Dict[str, Condition]] = None,
         media_preview: Optional[MediaPreview] = None,
         status: Optional[torch.Tensor] = None,
-        weight_version: Optional[int] = None,
+        output_version: Optional[int] = None,
     ) -> "Part":
         """Return a copy of this gen-shell part with generation outputs written.
 
@@ -314,7 +314,7 @@ class Part(Batch):
             ("conditions", conditions),
             ("media_preview", media_preview),
             ("status", status),
-            ("weight_version", weight_version),
+            ("output_version", output_version),
         ):
             if value is not None:
                 kwargs[name] = value

@@ -14,12 +14,12 @@ updates, but the budget is stated in whole rollout batches:
 
 * ``max_inflight`` — how many generations run concurrently (overlap/parallelism
   depth). ``1`` ≈ the classic one-step pipeline; higher fans out more.
-* ``max_staleness`` — how many whole rollout batches the behavior policy may
-  trail the train policy by, checked at batch admission and consumption. ``0``
-  aligns policy versions; the rollout-anchored PPO ratio remains the numerical
-  source of truth. Batches are the unit because admission only ever runs at a
-  batch boundary; with ``num_updates_per_batch > 1`` the updates after the first
-  in a batch additionally drift by up to ``num_updates_per_batch - 1``.
+* ``weight_sync_interval`` — how many rollout batches one published snapshot
+  serves. ``1`` publishes after every batch; interval ``K`` derives maximum
+  batch-entry staleness ``K - 1``. The rollout-anchored PPO ratio remains the
+  numerical source of truth. With ``num_updates_per_batch > 1`` the updates
+  after the first in a batch additionally drift by up to
+  ``num_updates_per_batch - 1``.
 
 Generation runs through :class:`~unirl.rollout.engine.asynchronous.AsyncBatchRolloutEngine`
 (non-blocking Ray futures over the rollout Handle) on the single driver thread —
@@ -110,7 +110,7 @@ class AsyncARTrainer(ARTrainer):
         eval_temperature: float = 1.0,
         train_fraction: float = 0.5,
         max_inflight: int = 1,
-        max_staleness: int = 0,
+        weight_sync_interval: int = 1,
     ) -> None:
         validate_qwen3_5_training_contract(
             pipeline_cfg=pipeline_cfg,
@@ -148,7 +148,7 @@ class AsyncARTrainer(ARTrainer):
         self._train_fraction = float(train_fraction)
         self._max_inflight = max(1, int(max_inflight))
         self._control = AsyncBatchControl(
-            max_staleness=max_staleness,
+            weight_sync_interval=weight_sync_interval,
             num_updates_per_batch=stack_cfg.get("num_updates_per_batch", 1),
         )
         self._train_devices = int(round(self.num_devices * self._train_fraction))
@@ -321,6 +321,7 @@ class AsyncARTrainer(ARTrainer):
             extra={
                 "adv_normalization_scope": self.adv_normalization_scope,
                 "max_inflight": self._max_inflight,
+                "weight_sync_interval": self._control.weight_sync_interval,
                 "max_staleness": self._control.max_staleness,
                 "staleness_budget": self._control.staleness_budget,
                 "num_updates_per_batch": self._control.num_updates_per_batch,
@@ -332,8 +333,7 @@ class AsyncARTrainer(ARTrainer):
             },
         )
         # Reported here rather than in __init__: save_interval only arrives with
-        # the train call, and it clamps the publication period just as the
-        # staleness budget does.
+        # the train call, and it clamps the configured publication interval.
         log_admission_notes(
             self._control,
             max_inflight=self._max_inflight,
@@ -374,14 +374,16 @@ class AsyncARTrainer(ARTrainer):
                     training_progress=training_progress,
                     rollout_id=rollout_id,
                     t0=t0,
-                    extra_metrics=self._control.behavior_metrics(batch.behavior_version),
+                    extra_metrics=self._control.output_metrics(batch.output_version),
                 )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
 
                 step = rollout_id + 1
                 eval_due = self.eval_interval > 0 and step % self.eval_interval == 0
                 save_due = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
-                sync_due = step < num_rollouts and self._control.publish_lag > self._control.staleness_budget
+                sync_due = (
+                    step < num_rollouts and self._control.batches_since_sync >= self._control.weight_sync_interval
+                )
                 if eval_due or save_due or sync_due:
                     self._control.sync_rollout(self._async_engine, self.rollout, self.weight_sync)
 
@@ -436,7 +438,7 @@ class AsyncARTrainer(ARTrainer):
             for _ in range(slots):
                 engine.submit(
                     self._build_async_sample(engine.next_gen_id),
-                    behavior_version=self._control.rollout_version,
+                    output_version=self._control.published_version,
                 )
             batch = engine.pop_next_batch(
                 train_version=self._control.train_version,

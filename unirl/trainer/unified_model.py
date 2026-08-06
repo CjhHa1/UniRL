@@ -400,7 +400,7 @@ class UnifiedModelTrainer(BaseTrainer):
             segment=ar_gen.segment,
             primitives={"text": recaptions},
             conditions=dict(ar_gen.conditions),
-            weight_version=ar_gen.weight_version,
+            output_version=ar_gen.output_version,
         )
 
         dit_prompts = Texts(texts=[prompts.texts[i // n_rec] for i in range(n_ar) for _ in range(n_img)])
@@ -426,7 +426,7 @@ class UnifiedModelTrainer(BaseTrainer):
             primitive_metadata=dict(img_gen.primitive_metadata),
             conditions=dict(img_gen.conditions),
             media_preview=img_gen.media_preview,
-            weight_version=img_gen.weight_version,
+            output_version=img_gen.output_version,
         )
 
         # Materialize engine outputs before DP reshards a single transport handle.

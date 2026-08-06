@@ -93,12 +93,12 @@ class CheckpointWeightSync(FullWeightSync):
         Runs on every train rank (``BROADCAST``). ``_iter_full_tensors`` all-gathers
         each FSDP shard on every rank in lockstep, so all ranks must iterate; only
         rank-0 keeps the materialized tensors and writes the file. The path is
-        deterministic from ``weight_version`` (incremented in lockstep on every
+        deterministic from ``version`` (incremented in lockstep on every
         rank), so all ranks agree on it without a broadcast.
         """
         import torch
 
-        version = int(self.weight_version)
+        version = int(self.version)
         path = os.path.join(self._dir, f"weights_v{version}.pt")
         marker = path + ".ready"
 
@@ -129,7 +129,7 @@ class CheckpointWeightSync(FullWeightSync):
         self._wait_for_marker(marker, path)
         self._rollout.update_weights_from_path(path, track_prefix=self._track_prefix)
 
-        self.weight_version += 1
+        self.version += 1
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

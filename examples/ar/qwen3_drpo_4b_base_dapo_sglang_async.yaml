@@ -23,12 +23,12 @@ num_rollouts: 800
 
 # Train slab share (rollout gets the rest). 0.5 -> equal split.
 train_fraction: 0.5
-# Async control. max_staleness counts whole rollout batches the behavior policy
-# may trail the train policy by; admission depth is max_staleness + 1.
-# max_staleness=0 keeps the behavior/train versions aligned at batch admission;
+# Async control. weight_sync_interval is the number of rollout batches served
+# by one published rollout snapshot; maximum batch-entry staleness is interval-1.
+# interval=1 keeps output/train versions aligned at batch admission;
 # max_inflight remains a resource cap.
 max_inflight: 1
-max_staleness: 0
+weight_sync_interval: 1
 
 eval_interval: 10
 adv_normalization_scope: group

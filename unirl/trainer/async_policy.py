@@ -2,18 +2,18 @@
 
 Two quantities ride the optimizer-update clock and only one of them is staleness:
 
-* ``staleness`` — updates between the behavior policy that generated a batch and
+* ``staleness`` — updates between the output version that generated a batch and
   the train weights that batch starts training against, i.e. the off-policyness
-  of the data. This is AReaL's ``eta`` / ``max_head_offpolicyness``.
+  of the data.
 * ``publish_lag`` — updates between the current train weights and the snapshot
-  last published to the rollout engine. This is sync debt: no batch is that
-  stale, but it is what makes a weight sync due.
+  last published to the rollout engine. This records sync debt separately from
+  the batch-counted publication cadence.
 
-Recipes state the budget in whole rollout batches (``max_staleness``) because
-admission and consumption only ever run at a batch boundary. Stating it in raw
-updates instead would quantize it to ``num_updates_per_batch`` — 22 and 23 would
-both mean a 12-batch depth — and silently change meaning whenever that count
-changes. ``staleness_budget`` converts once into the clock the versions count in.
+Recipes state the publication cadence as ``weight_sync_interval`` rollout
+batches. One published rollout snapshot serves that many batches, and the
+oldest batch admitted under it is ``weight_sync_interval - 1`` batches stale.
+``staleness_budget`` converts that derived maximum into the committed-optimizer-
+update clock used by the version ledger.
 
 Batch entry is also the only point the budget is enforced at, which matters once
 ``num_updates_per_batch > 1``: the anchor is frozen for the whole batch while the
@@ -34,26 +34,38 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AsyncBatchControl:
-    """Track train/rollout versions and gate batch generation."""
+    """Track train/published versions and gate batch generation."""
 
-    max_staleness: int
+    weight_sync_interval: int
     num_updates_per_batch: int
     train_version: int = 0
-    rollout_version: int = 0
+    published_version: int = 0
+    batches_since_sync: int = 0
 
     def __post_init__(self) -> None:
-        if self.max_staleness < 0:
-            raise ValueError(f"max_staleness must be >= 0, got {self.max_staleness}")
+        if self.weight_sync_interval < 1:
+            raise ValueError(f"weight_sync_interval must be >= 1, got {self.weight_sync_interval}")
         if self.num_updates_per_batch < 1:
             raise ValueError(f"num_updates_per_batch must be >= 1, got {self.num_updates_per_batch}")
-        if self.rollout_version > self.train_version:
+        if self.published_version > self.train_version:
             raise ValueError(
-                f"rollout_version cannot be ahead of train_version: {self.rollout_version} > {self.train_version}"
+                f"published_version cannot be ahead of train_version: {self.published_version} > {self.train_version}"
+            )
+        if not 0 <= self.batches_since_sync <= self.weight_sync_interval:
+            raise ValueError(
+                "batches_since_sync must be within the current publication interval: "
+                f"0 <= {self.batches_since_sync} <= {self.weight_sync_interval}"
             )
 
     @property
+    def max_staleness(self) -> int:
+        """Maximum batch-entry staleness implied by the publication cadence."""
+
+        return self.weight_sync_interval - 1
+
+    @property
     def staleness_budget(self) -> int:
-        """``max_staleness`` batches expressed in committed optimizer updates."""
+        """Derived maximum staleness expressed in committed optimizer updates."""
 
         return self.max_staleness * self.num_updates_per_batch
 
@@ -61,30 +73,32 @@ class AsyncBatchControl:
     def publish_lag(self) -> int:
         """Sync debt: updates the published rollout snapshot trails train by."""
 
-        return self.train_version - self.rollout_version
+        return self.train_version - self.published_version
 
     @property
     def admission_depth(self) -> int:
-        """Outstanding generations the budget allows, in whole batches."""
+        """Batches one published rollout snapshot may serve."""
 
-        return self.max_staleness + 1
+        return self.weight_sync_interval
 
     def restore(self, train_version: int) -> None:
         self.train_version = train_version
-        self.rollout_version = 0
+        self.published_version = 0
+        self.batches_since_sync = 0
 
-    def staleness(self, behavior_version: int) -> int:
-        """Optimizer updates between train and a batch's behavior policy."""
+    def staleness(self, output_version: int) -> int:
+        """Optimizer updates between train and the policy that produced a batch."""
 
-        stale = self.train_version - behavior_version
+        stale = self.train_version - output_version
         if stale < 0:
             raise ValueError(
-                f"rollout batch has future behavior version {behavior_version} > train version {self.train_version}"
+                f"rollout batch has future output version {output_version} > train version {self.train_version}"
             )
         return stale
 
     def record_optimizer_updates(self, optimizer_updates: int) -> None:
         self.train_version += optimizer_updates
+        self.batches_since_sync += 1
 
     def launch_slots(
         self,
@@ -96,17 +110,15 @@ class AsyncBatchControl:
         num_rollouts: int,
         hard_boundary: int,
     ) -> int:
-        if self.publish_lag > self.staleness_budget:
+        if self.batches_since_sync >= self.weight_sync_interval:
             return 0
-        # Floor division is what keeps a partially-committed step honest: a step
-        # that skipped updates moved the clock by less than a whole batch, and
-        # rounding down never admits a generation the budget cannot cover.
-        freshness = (self.staleness_budget - self.publish_lag) // self.num_updates_per_batch + 1
+        freshness = self.weight_sync_interval - self.batches_since_sync
         allowed = min(freshness, num_rollouts - trained_batches, hard_boundary - trained_batches)
         return max(0, min(max_inflight - inflight_count, allowed - inflight_count - ready_count))
 
     def sync_rollout(self, engine: Any, rollout: Any, weight_sync: Any, *, force: bool = False) -> bool:
         if not force and self.publish_lag == 0:
+            self.batches_since_sync = 0
             return False
         engine.quiesce()
         if engine.ready_count:
@@ -114,14 +126,15 @@ class AsyncBatchControl:
                 f"cannot sync rollout weights with completed batches queued: ready_count={engine.ready_count}"
             )
         weight_sync.sync()
-        rollout.set_policy_version(self.train_version)
-        self.rollout_version = self.train_version
+        rollout.set_version(self.train_version)
+        self.published_version = self.train_version
+        self.batches_since_sync = 0
         return True
 
-    def behavior_metrics(self, behavior_version: int) -> dict[str, float]:
-        staleness = self.staleness(behavior_version)
+    def output_metrics(self, output_version: int) -> dict[str, float]:
+        staleness = self.staleness(output_version)
         return {
-            "async/behavior_version": behavior_version,
+            "async/output_version": output_version,
             "async/staleness_updates": staleness,
             "async/staleness_batches": staleness / self.num_updates_per_batch,
         }
@@ -131,6 +144,7 @@ class AsyncBatchControl:
             "async/train_version": self.train_version,
             "async/publish_lag": self.publish_lag,
             "async/optimizer_updates": optimizer_updates,
+            "async/batches_since_sync": self.batches_since_sync,
         }
 
 
@@ -142,7 +156,7 @@ def sync_period_batches(
 ) -> int:
     """Batches between weight publications, once every admission limit is applied.
 
-    The staleness budget alone would publish every ``admission_depth`` batches,
+    The configured interval would publish every ``admission_depth`` batches,
     but :func:`next_hard_boundary` clamps admission as well, so an eval or
     checkpoint interval below that depth becomes the period instead.
     """
@@ -169,9 +183,10 @@ def log_admission_notes(
 
     period = sync_period_batches(control, eval_interval=eval_interval, save_interval=save_interval)
 
-    if control.max_staleness == 0:
+    if control.weight_sync_interval == 1:
         logger.warning(
-            "max_staleness=0 admits one generation at a time; generation cannot overlap the preceding train batch"
+            "weight_sync_interval=1 admits one generation at a time; generation cannot overlap the preceding "
+            "train batch"
         )
     if max_inflight > control.admission_depth:
         logger.warning(
@@ -185,10 +200,10 @@ def log_admission_notes(
     usable_depth = max_inflight + 1
     if control.admission_depth > usable_depth:
         logger.info(
-            "max_staleness=%d admits %d outstanding batches but the loop holds at most %d "
+            "weight_sync_interval=%d admits %d outstanding batches but the loop holds at most %d "
             "(max_inflight=%d plus one reaped); the surplus does not deepen the pipeline, it "
             "sets the weight-sync period to %d batches",
-            control.max_staleness,
+            control.weight_sync_interval,
             control.admission_depth,
             usable_depth,
             max_inflight,
@@ -196,9 +211,9 @@ def log_admission_notes(
         )
     if period < control.admission_depth:
         logger.warning(
-            "eval/checkpoint boundaries publish every %d batches, below the %d the staleness "
-            "budget allows (eval_interval=%d, save_interval=%d), so max_staleness=%d is never "
-            "fully spent — data tops out at %d batches stale",
+            "eval/checkpoint boundaries publish every %d batches, below weight_sync_interval=%d "
+            "(eval_interval=%d, save_interval=%d), so derived max_staleness=%d is never fully "
+            "spent — data tops out at %d batches stale",
             period,
             control.admission_depth,
             eval_interval,

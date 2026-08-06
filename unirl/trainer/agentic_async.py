@@ -30,8 +30,8 @@ the driver polls / trains — concurrency from disaggregation, not driver thread
 steady state the buffer is refilled *during* the previous train step, so :meth:`_next_batch`
 returns without waiting. Staleness bounds how far the producer leads the consumer; the
 per-token rollout-anchored ratio corrects the off-policy gap (a carried trajectory whose
-turns span weight versions is correct per-token because each gen ``Part`` keeps its own
-``weight_version`` + logprobs).
+turns span output versions is correct per-token because each gen ``Part`` keeps its own
+``output_version`` + logprobs).
 
 .. note::
    The GPU integration (two-slab placement, NCCL sync, and the train loop) follows
@@ -303,7 +303,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
         result = self.stack.train_track(train_part, training_progress=float(training_progress))
 
         log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
-        versions = [gp.weight_version for tr in trajs for gp in tr.gen_parts() if gp.weight_version is not None]
+        versions = [gp.output_version for tr in trajs for gp in tr.gen_parts() if gp.output_version is not None]
         self.wandb_logger.log_rollout_step(
             rollout_id,
             result,
@@ -313,7 +313,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
                 "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
                 "agent/max_turns": max(depths) if depths else 0,
                 "async/buffer_groups": self._engine.buffered_groups(),
-                "async/weight_version": self._engine.weight_version,
+                "async/version": self._engine.version,
                 "async/version_span": (max(versions) - min(versions)) if versions else 0,
                 "async/assembler_pending_roots": self._engine.pending_groups(),
                 "async/carried_tail_trajectories": self._carried_tail_trajectories,
