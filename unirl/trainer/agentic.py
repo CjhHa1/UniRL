@@ -33,12 +33,13 @@ from omegaconf import OmegaConf
 
 from unirl.algorithms.normalizers import build_group_index_map
 from unirl.distributed.tensor import hydrate
+from unirl.rollout.manager import RolloutFilter, RolloutManager, identity
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
 from unirl.trainer.base import prepare_input_sample
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample, _part_with_field
-from unirl.types.sampling import BaseSamplingParams
+from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +120,31 @@ def _validate_agentic_cfg(kw: dict) -> None:
 class AgenticTrainer(ARTrainer):
     """Agentic (multi-turn tool-use) RL trainer over the ``AgenticRolloutEngine``."""
 
-    def __init__(self, *, stop: Optional[List[str]] = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        stop: Optional[List[str]] = None,
+        per_worker_inflight: int = 8,
+        **kwargs,
+    ) -> None:
         _validate_agentic_cfg(kwargs)
+        cfg = kwargs.get("cfg")
+        self._worker_max_concurrency = int(cfg.get("worker_max_concurrency", 1)) if cfg is not None else 1
+        self._per_worker_inflight = int(per_worker_inflight)
         super().__init__(**kwargs)
         self._stop = list(stop) if stop else ["</tool_call>"]
+        self._n = total_samples_per_prompt(self.sampling_params)
+        self._rollout_manager: Optional[RolloutManager] = None
         self.rollout.set_workers(self.rollout.workers, self.rollout.role_name)
+
+    def _create_rollout_manager(self, filter_fn: RolloutFilter = identity) -> RolloutManager:
+        return RolloutManager(
+            self.rollout,
+            group_size=self._n,
+            per_worker_inflight=self._per_worker_inflight,
+            worker_max_concurrency=self._worker_max_concurrency,
+            filter_fn=filter_fn,
+        )
 
     def _build_request_sample(
         self,
@@ -159,11 +180,33 @@ class AgenticTrainer(ARTrainer):
         """
         t0 = time.perf_counter()
 
+        if self._rollout_manager is None:
+            self._rollout_manager = self._create_rollout_manager()
+        manager = self._rollout_manager
+
         self.rollout.wake_up()
-        if sync_weights and self.weight_sync is not None:
-            self.weight_sync.sync()
-        trajs: List[Sample] = self.rollout.generate(sample)[0]
-        self.rollout.sleep()
+        original_error: Optional[BaseException] = None
+        try:
+            if sync_weights and self.weight_sync is not None:
+                manager.sync_weights(self.weight_sync)
+            tasks = [prompt for prompt in sample.split() for _ in range(self._n)]
+            manager.submit(tasks)
+            groups = manager.collect(int(sample.batch_size))
+        except BaseException as exc:
+            original_error = exc
+            try:
+                manager.quiesce()
+            except BaseException:
+                logger.exception("AgenticTrainer rollout cleanup failed")
+            raise
+        finally:
+            try:
+                self.rollout.sleep()
+            except BaseException:
+                if original_error is None:
+                    raise
+                logger.exception("AgenticTrainer rollout sleep failed")
+        trajs = [trajectory for group in groups for trajectory in group]
 
         rewards, group_ids = self._rewards_and_groups(trajs, rollout_id)
 
@@ -366,3 +409,9 @@ class AgenticTrainer(ARTrainer):
             "AgenticTrainer.evaluate is not implemented: the agentic engine returns "
             "List[Sample], not a Sample. Set eval_interval=0 (agentic eval is a follow-up)."
         )
+
+    def _shutdown_runtime(self) -> None:
+        manager = getattr(self, "_rollout_manager", None)
+        if manager is not None:
+            manager.close()
+        super()._shutdown_runtime()

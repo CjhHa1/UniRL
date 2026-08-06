@@ -350,18 +350,32 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         as a legitimate low-scoring sibling (trainers give NaN zero advantage).
         Failure-isolated: never raises into the drain.
         """
+        sample = self.run_trajectory(task)
+        return sample, sample.parts[-1].harness_status != "suspended"
+
+    def run_trajectory(self, sample: Sample) -> Sample:
+        """Run one trajectory to terminal or to a turn-boundary checkpoint."""
         try:
-            outcome = self._harness.run(task, self._harness_ctx)
+            outcome = self._harness.run(sample, self._harness_ctx)
             if outcome.status == "completed":
-                return self._attach_env_reward(outcome.sample, outcome.env_reward), True
-            if outcome.status == "suspended":
-                return outcome.sample, False
-            if outcome.status == "failed":
-                return self._attach_env_reward(outcome.sample, float("nan")), True
-            raise ValueError(f"unknown harness outcome status: {outcome.status!r}")
+                result = self._attach_env_reward(outcome.sample, outcome.env_reward)
+            elif outcome.status == "suspended":
+                result = outcome.sample
+            elif outcome.status == "failed":
+                result = self._attach_env_reward(outcome.sample, float("nan"))
+            else:
+                raise ValueError(f"unknown harness outcome status: {outcome.status!r}")
+            return self._stamp_outcome(result, outcome.status)
         except Exception as exc:  # noqa: BLE001 — harness bug; the partial trace is lost, the drain survives
             logger.warning("AgenticRolloutEngine: harness outcome failed, marking failed: %s", exc, exc_info=True)
-            return self._attach_env_reward(task, float("nan")), True
+            return self._stamp_outcome(self._attach_env_reward(sample, float("nan")), "failed")
+
+    @staticmethod
+    def _stamp_outcome(sample: Sample, status: str) -> Sample:
+        if not sample.parts:
+            return sample
+        last = _part_with_field(sample.parts[-1], "harness_status", status)
+        return sample.with_parts([*sample.parts[:-1], last])
 
     @staticmethod
     def _attach_env_reward(sample: Sample, reward: Optional[float]) -> Sample:
@@ -399,9 +413,10 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             out, self._checkpointed = self._checkpointed, []
         return out
 
-    def set_stopping(self) -> None:
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def set_stopping(self, stopping: bool = True) -> None:
         """Signal the drain + in-flight ``_run_one``s to checkpoint at the next turn boundary."""
-        self._stopping = True
+        self._stopping = bool(stopping)
 
     def reset_round(self) -> None:
         """Clear the per-drive buffers + stop flag before a new ``submit``/``generate``."""

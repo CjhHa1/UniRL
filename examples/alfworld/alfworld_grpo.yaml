@@ -23,7 +23,8 @@ num_rollouts: 50
 weight_sync_interval: 1
 eval_interval: 0 # agentic eval not implemented (env-driven); keep 0
 
-worker_max_concurrency: 8
+worker_max_concurrency: 10
+per_worker_inflight: 8
 stop: null # ALFWorld actions are free text; rely on per-turn max_new_tokens
 
 adv_normalization_scope: group

@@ -25,7 +25,8 @@ num_rollouts: 200
 weight_sync_interval: 1
 eval_interval: 0
 
-worker_max_concurrency: 8
+worker_max_concurrency: 10
+per_worker_inflight: 8
 stop: ["</tool_call>"]
 
 adv_normalization_scope: group

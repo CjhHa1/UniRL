@@ -47,6 +47,7 @@ def main(cfg: DictConfig) -> None:
         balance_shards=cfg.get("balance_shards", False),
         eval_interval=cfg.get("eval_interval", 0),
         stop=cfg.get("stop"),
+        per_worker_inflight=cfg.get("per_worker_inflight", 8),
     )
     trainer.train(
         num_rollouts=cfg.get("num_rollouts", 100),
