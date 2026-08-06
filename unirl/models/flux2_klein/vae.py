@@ -48,6 +48,7 @@ from .flux2_klein_utils import (
     patchify_latents,
     unpatchify_latents,
 )
+from .image import resize_condition_pils
 
 
 class Flux2KleinVAEDecodeStage(DecodeStage[LatentSegment, Images]):
@@ -161,14 +162,13 @@ class Flux2KleinVAEEncodeStage:
         # consistent token count across a GRPO group needs a fixed size. Using
         # the generation (height, width) satisfies both (recipe sizes are
         # multiples of 16) and matches the edited-image resolution.
-        resized_items = []
-        target_size = (int(height), int(width))
-        for pixels in pixels_list:
-            pixels = pixels.to(device=device, dtype=torch.float32).unsqueeze(0)
-            if tuple(pixels.shape[-2:]) != target_size:
-                pixels = torch.nn.functional.interpolate(pixels, size=target_size, mode="bilinear", align_corners=False)
-            resized_items.append(pixels)
-        pixels = torch.cat(resized_items, dim=0)
+        from torchvision.transforms.functional import pil_to_tensor
+
+        condition_pils = resize_condition_pils(images.to_pils(), height=height, width=width)
+        pixels = torch.stack(
+            [pil_to_tensor(pil).to(dtype=torch.float32).div_(255.0) for pil in condition_pils],
+            dim=0,
+        ).to(device=device)
 
         scaled = pixels * 2.0 - 1.0
 

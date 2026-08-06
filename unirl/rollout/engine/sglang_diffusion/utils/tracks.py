@@ -251,7 +251,7 @@ def _native_sde_logp(
     return log_prob_tensor
 
 
-def stack_decoded_images(
+def pack_decoded_images(
     results: Sequence[RawResult],
     *,
     squeeze_single_frame_4d: bool = True,
@@ -280,7 +280,7 @@ def stack_decoded_images(
             skipped_video = True
         else:
             raise RuntimeError(
-                f"stack_decoded_images: unexpected canonical media rank {canonical.dim()}; want 3 (image) or 4 (video)."
+                f"pack_decoded_images: unexpected canonical media rank {canonical.dim()}; want 3 (image) or 4 (video)."
             )
     if skipped_video:
         logger.warning(
@@ -295,7 +295,7 @@ def stack_decoded_images(
 def stack_decoded_videos(results: Sequence[RawResult]) -> Optional[Videos]:
     """Pack per-result decoded video ``samples`` into a ragged ``Videos`` batch.
 
-    The video counterpart of :func:`stack_decoded_images`. ``decode_sample``
+    The video counterpart of :func:`pack_decoded_images`. ``decode_sample``
     returns canonical channels-first video ``[C, T, H, W]`` (see
     :func:`unirl.rollout.engine.sglang_diffusion.utils.tensors.normalize_media`);
     the :class:`~unirl.types.primitives.Video` primitive — and the video reward
@@ -303,7 +303,7 @@ def stack_decoded_videos(results: Sequence[RawResult]) -> Optional[Videos]:
     — want frame-major ``[T, C, H, W]``, so we permute before packing.
     ``Videos.from_list`` concatenates along T and lets the Batch framework
     compute the per-sample ``cu_frames`` offsets. Each result carries exactly
-    one decoded sample (mirrors :func:`stack_decoded_images`'s one-per-result
+    one decoded sample (mirrors :func:`pack_decoded_images`'s one-per-result
     contract). Returns ``None`` when no recognizable video was produced.
     """
     videos: List[Video] = []
@@ -473,7 +473,7 @@ def fuse_text_conditions(
 __all__ = [
     "derive_timestep_alignment",
     "build_latent_segment",
-    "stack_decoded_images",
+    "pack_decoded_images",
     "stack_decoded_videos",
     "fuse_text_conditions",
 ]

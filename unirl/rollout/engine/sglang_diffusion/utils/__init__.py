@@ -21,7 +21,7 @@ from unirl.rollout.engine.sglang_diffusion.utils.tracks import (
     collect_trajectory_latents,
     derive_timestep_alignment,
     fuse_text_conditions,
-    stack_decoded_images,
+    pack_decoded_images,
     stack_decoded_videos,
     validate_packed_trajectory,
 )
@@ -38,7 +38,7 @@ __all__ = [
     "collect_aux_trajectory_latents",
     "derive_timestep_alignment",
     "fuse_text_conditions",
-    "stack_decoded_images",
+    "pack_decoded_images",
     "stack_decoded_videos",
     "validate_packed_trajectory",
 ]

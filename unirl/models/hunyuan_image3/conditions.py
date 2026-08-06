@@ -242,8 +242,8 @@ class HunyuanImage3DiffusionConditions(Batch):
         cond_vae        : HunyuanImage3VAECondition — per-sample cond VAE payloads
         cond_vit        : ImageEmbedCondition — cond ViT patch embeds + attn
                           mask + spatial_shapes (it2i)
-        cond_timestep   : Tensor — per-cond t values being scattered (it2i;
-                          data, not a destination index)
+        cond_timestep   : Tensor or per-sample list — cond t values being
+                          scattered (it2i; data, not a destination index)
         tokenizer_output: opaque upstream apply_chat_template output, used
                           on step 0 to drive the KV-cache gather-down
     """
@@ -339,8 +339,8 @@ class HunyuanImage3ARConditions(Batch):
                           embeddings → garbage comprehension).
         cond_vit        : ImageEmbedCondition — cond ViT patch embeds + attn
                           mask + spatial_shapes (i2t/it2i)
-        cond_timestep   : Tensor — per-cond t values for the VAE-latent scatter
-                          (clean cond image → t≈0)
+        cond_timestep   : Tensor or per-sample list — cond t values for the
+                          VAE-latent scatter (clean cond image → t≈0)
         tokenizer_output: opaque upstream apply_chat_template output, used
                           on step 0 to derive position_ids from real_pos
                           for right-padded batches

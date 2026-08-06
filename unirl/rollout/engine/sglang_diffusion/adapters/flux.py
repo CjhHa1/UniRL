@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from unirl.config.require import require
+from unirl.models.flux2_klein.image import resize_condition_pils
 from unirl.rollout.engine.sglang_diffusion import utils
 from unirl.rollout.engine.sglang_diffusion.adapters.base import register_adapter
 from unirl.rollout.engine.sglang_diffusion.adapters.image import ImageAdapter
@@ -73,14 +74,11 @@ class Flux2KleinAdapter(ImageAdapter):
         unique_prompts, k = utils.deexpand_prompts_from_groups(prompts, list(gen_part.group_ids))
         pil_images = image_batches[0].to_pils()
         unique_pils = utils.first_per_group(pil_images, list(gen_part.group_ids)) if k > 1 else pil_images
-        target_size = (int(gen_part.sampling_params.width), int(gen_part.sampling_params.height))
-        if any(pil.size != target_size for pil in unique_pils):
-            from PIL import Image as PILImage
-
-            unique_pils = [
-                pil if pil.size == target_size else pil.resize(target_size, PILImage.Resampling.LANCZOS)
-                for pil in unique_pils
-            ]
+        unique_pils = resize_condition_pils(
+            unique_pils,
+            height=int(gen_part.sampling_params.height),
+            width=int(gen_part.sampling_params.width),
+        )
         out: Dict[str, Any] = {
             "prompt": unique_prompts if len(unique_prompts) > 1 else unique_prompts[0],
             "condition_image": unique_pils if len(unique_pils) > 1 else unique_pils[0],

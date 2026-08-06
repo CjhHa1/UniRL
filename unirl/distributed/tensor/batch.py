@@ -134,11 +134,11 @@ def packed_field(**kwargs: Any) -> Any:
     hidden instance state on the ``Batch`` container — the user neither
     declares a sibling cu_seqlens field nor sets one explicitly.
 
-    Construction is via the regular ``@dataclass`` constructor: pass a
-    ``Sequence[Tensor]`` of per-sample tensors and the framework's
-    ``Batch.__post_init__`` packs them and computes cu_seqlens. Multiple
-    ``packed_field``s on the same dataclass must agree on per-sample sizes
-    (they share the single instance-level cu_seqlens).
+    User-facing construction is via :meth:`Batch.pack`: pass a
+    ``Sequence[Tensor]`` of per-sample tensors and it packs them while computing
+    cu_seqlens. The regular dataclass constructor is reserved for already-packed
+    internal values whose cu_seqlens are attached by framework operations.
+    Multiple packed fields must agree on per-sample sizes.
 
     See :class:`Batch` for the auto-pack / propagation contract and
     :attr:`Batch.cu_seqlens` / :attr:`Batch.lengths` for read access
