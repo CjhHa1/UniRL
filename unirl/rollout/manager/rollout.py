@@ -173,6 +173,9 @@ class RolloutManager:
 
     def _batch_group_count(self, sample: "Sample") -> int:
         roots = _roots_of(sample)
+        unstamped = [index for index, part in enumerate(sample.gen_parts()) if part.weight_version is None]
+        if unstamped:
+            raise RuntimeError(f"completed batch rollout has unstamped generated Parts at indices {unstamped}")
         descendants = Counter(sample.root_group_ids(-1))
         malformed = {root: descendants.get(root, 0) for root in roots if descendants.get(root, 0) != self._group_size}
         extra = set(descendants) - set(roots)
