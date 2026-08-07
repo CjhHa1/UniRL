@@ -1,13 +1,4 @@
-"""Batch admission and publication control for async AR and diffusion.
-
-``train_version`` and ``published_version`` count committed optimizer updates.
-Their difference is publication lag; batch staleness instead compares
-``train_version`` with the batch's ``output_version``.
-
-One published snapshot serves ``weight_sync_interval`` batches, so maximum
-batch-entry staleness is ``interval - 1``. The budget excludes the additional
-``num_updates_per_batch - 1`` updates that can occur within the admitted batch.
-"""
+"""Batch admission and weight-publication control for async AR and diffusion; versions count optimizer updates."""
 
 from __future__ import annotations
 
@@ -45,32 +36,25 @@ class AsyncBatchControl:
 
     @property
     def max_staleness(self) -> int:
-        """Maximum batch-entry staleness implied by the publication cadence."""
-
+        """Maximum batch-entry staleness, in rollout batches."""
         return self.weight_sync_interval - 1
 
     @property
     def staleness_budget(self) -> int:
-        """Derived maximum staleness expressed in committed optimizer updates."""
-
+        """``max_staleness`` expressed in optimizer updates."""
         return self.max_staleness * self.num_updates_per_batch
 
     @property
     def publish_lag(self) -> int:
-        """Sync debt: updates the published rollout snapshot trails train by."""
-
         return self.train_version - self.published_version
 
     @property
     def admission_depth(self) -> int:
         """Batches one published rollout snapshot may serve."""
-
         return self.weight_sync_interval
 
     @property
     def publication_due(self) -> bool:
-        """Whether the configured number of batches has consumed this snapshot."""
-
         return self.batches_since_sync >= self.weight_sync_interval
 
     def restore(self, train_version: int) -> None:
@@ -80,7 +64,6 @@ class AsyncBatchControl:
 
     def staleness(self, output_version: int) -> int:
         """Optimizer updates between train and the policy that produced a batch."""
-
         stale = self.train_version - output_version
         if stale < 0:
             raise ValueError(
@@ -147,7 +130,6 @@ def max_publication_gap_batches(
     save_interval: int = 0,
 ) -> int:
     """Maximum publication gap after eval/checkpoint boundaries are applied."""
-
     max_gap = control.admission_depth
     for interval in (eval_interval, save_interval):
         if interval > 0:
@@ -163,7 +145,6 @@ def log_admission_notes(
     save_interval: int = 0,
 ) -> None:
     """Warn when configured admission capacity cannot be fully used."""
-
     max_gap = max_publication_gap_batches(
         control,
         eval_interval=eval_interval,
@@ -204,7 +185,6 @@ def next_hard_boundary(
     save_interval: int = 0,
 ) -> int:
     """Nearest eval/checkpoint/final boundary for launch admission."""
-
     boundary = num_rollouts
     for interval in (eval_interval, save_interval):
         if interval > 0 and trained_batches < num_rollouts:
@@ -214,7 +194,6 @@ def next_hard_boundary(
 
 def unwrap_replicated_int(value: object, *, name: str) -> int:
     """Normalize a BROADCAST return and verify all worker replicas agree."""
-
     if isinstance(value, (list, tuple)):
         if not value or any(not isinstance(item, int) for item in value):
             raise TypeError(f"{name} returned invalid worker values: {value!r}")

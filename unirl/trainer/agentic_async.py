@@ -360,7 +360,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
     ) -> None:
         interval = max(1, weight_sync_interval)
         max_staleness_syncs = self._buffer_max_staleness if self._buffer_max_staleness is not None else 0
-        # Real-version gaps shrink when optimizer steps skip, so eligibility tracks policy movement.
+        # buffer_max_staleness counts weight syncs; the buffer compares optimizer-update versions.
         self._buffer_staleness_budget_updates = max_staleness_syncs * interval * self._num_updates_per_batch
 
         start_rollout = self.maybe_load_checkpoint(load_dir, num_rollouts=num_rollouts)

@@ -1,11 +1,9 @@
 # @package _global_
 # BAGEL-7B-MoT x PickScore x LoRA — vLLM-Omni rollout GRPO recipe.
 #
-# Async sibling of bagel_trainside_lora.yaml. Generation runs on a separate
-# vLLM-Omni slab and receives LoRA updates through RemoteLoraWeightSync.
+# Async sibling of bagel_trainside_lora.yaml: generation runs on its own vLLM-Omni slab, LoRA pushed by RemoteLoraWeightSync.
 #
-# BAGEL-specific scheduler, sigma, latent, and conditioning handling lives in
-# unirl/rollout/engine/vllm_omni/{adapters,pipelines}/bagel.*.
+# BAGEL scheduler/sigma/latent/conditioning handling lives in unirl/rollout/engine/vllm_omni/{adapters,pipelines}/bagel.*.
 #
 # 16 prompts/rollout, 16 samples/prompt, 2 optimizer updates/rollout, cfg=1.
 #
@@ -27,14 +25,8 @@ workers_per_device: 1
 layout: separate
 train_fraction: 0.5            # 4 train GPUs + 4 rollout GPUs on an 8-GPU pool
 
-# ---- async control ----
-# Keep max_inflight=1 so a new generation cannot block reap-time transfer.
-# Overlap requires weight_sync_interval >= 2.
-#
-# Interval 12 publishes every 12 batches (24 updates) and permits 11-batch
-# entry staleness. Lower it if the rollout-anchored ratio becomes unstable.
-max_inflight: 1
-weight_sync_interval: 12
+max_inflight: 1                # must stay 1: a queued generation blocks the reap-time cross-slab transfer
+weight_sync_interval: 12       # rollout batches per snapshot (11-batch max staleness); lower if the ratio destabilizes
 
 logging:
   report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)

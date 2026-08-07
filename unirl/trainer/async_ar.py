@@ -1,16 +1,4 @@
-"""Async autoregressive RL over separate train and rollout GPU slabs.
-
-The rollout engine stays resident while training runs on a disjoint slab.
-``NCCLWeightSync`` publishes weights across the slab boundary.
-
-* ``max_inflight`` caps concurrent generations.
-* ``weight_sync_interval`` — how many rollout batches one published snapshot
-  serves; maximum batch-entry staleness is ``interval - 1``.
-
-The single-threaded driver reaps before launching and quiesces before every
-weight update. It calls ``BaseTrainer.__init__`` directly because ``ARTrainer``
-constructs a colocated layout.
-"""
+"""Async autoregressive RL over separate train and rollout GPU slabs, with the rollout engine resident."""
 
 import inspect
 import logging
@@ -96,6 +84,7 @@ class AsyncARTrainer(ARTrainer):
             rollout_cfg=rollout_cfg,
             stack_cfg=stack_cfg,
         )
+        # Skips ARTrainer.__init__: it opens the colocate placement block we replace with two slabs.
         BaseTrainer.__init__(self, cfg=cfg, logging_cfg=logging_cfg)
 
         self.batch_size = batch_size
@@ -301,8 +290,7 @@ class AsyncARTrainer(ARTrainer):
                 ),
             },
         )
-        # Reported here rather than in __init__: save_interval only arrives with
-        # the train call, and it clamps the configured publication interval.
+        # Not in __init__: save_interval arrives with train() and clamps the publication interval.
         log_admission_notes(
             self._control,
             max_inflight=self._max_inflight,
@@ -382,15 +370,7 @@ class AsyncARTrainer(ARTrainer):
         num_rollouts: int,
         hard_boundary: int,
     ) -> RolloutBatch:
-        """Reap, launch, and consume one completion-order FIFO train batch.
-
-        Reaping first is what buys the overlap: admission counts the generation
-        being reaped as still in flight otherwise, so at ``max_inflight=1`` the
-        one slot is never free when slots are computed and no successor is ever
-        launched — the loop degenerates to launch, wait, train with an empty
-        pool no matter how large the staleness budget is.
-        """
-
+        """Reap, launch, and consume one FIFO train batch; reaping first frees the slot admission needs to overlap."""
         engine = self._async_engine
         while True:
             engine.poll()

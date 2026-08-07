@@ -1,19 +1,4 @@
-"""Async diffusion RL over separate train and rollout GPU slabs.
-
-This is the diffusion counterpart of
-:class:`~unirl.trainer.async_ar.AsyncARTrainer`, reusing ``DiffusionTrainer``'s
-separate layout, evaluation, checkpointing, and weight-sync wiring.
-
-``weight_sync_interval`` controls how many batches each snapshot serves.
-``max_inflight`` must remain ``1`` because generation and reap-time transfer use
-the same rollout workers.
-
-``_next_rollout_batch`` polls (reaps) BEFORE topping up launches, which is what makes the
-overlap fast here: reaping a generation pulls its trajectory segment off the
-rollout slab (the reward's cross-slab localize, an NCCL send issued on the
-rollout workers); launching first can block that transfer. Weight sync and
-teardown quiesce the engine.
-"""
+"""Async diffusion RL over separate train and rollout GPU slabs — the diffusion counterpart of ``AsyncARTrainer``."""
 
 from __future__ import annotations
 
@@ -159,8 +144,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
                 "train_fraction": self._train_fraction,
             },
         )
-        # Reported here rather than in __init__: save_interval only arrives with
-        # the train call, and it clamps the configured publication interval.
+        # Not in __init__: save_interval arrives with train() and clamps the publication interval.
         log_admission_notes(
             self._control,
             max_inflight=self._max_inflight,
@@ -241,12 +225,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         num_rollouts: int,
         hard_boundary: int,
     ) -> RolloutBatch:
-        """Reap, launch, and consume one completion-order FIFO train batch.
-
-        Polls BEFORE topping up: reaping pulls the trajectory segment off the
-        rollout slab, so it must not queue behind a freshly launched generation,
-        and the post-reap launch is what overlaps this step (module docstring).
-        """
+        """Reap, launch, consume one FIFO train batch; reaping first keeps the cross-slab segment transfer unqueued."""
         engine = self._async_engine
         while True:
             engine.poll()

@@ -17,8 +17,7 @@ Extra config knobs vs the colocate recipe:
     must both be integers, AND ``batch_size * samples_per_prompt`` must be divisible
     by each slab size (DP_SCATTER divisibility).
   * ``max_inflight`` — concurrent generations (resource/overlap limit).
-  * ``weight_sync_interval`` — rollout batches served by one published rollout
-    snapshot; maximum batch-entry staleness is the interval minus 1.
+  * ``weight_sync_interval`` — rollout batches one published snapshot serves; max staleness is interval - 1.
 """
 
 from __future__ import annotations

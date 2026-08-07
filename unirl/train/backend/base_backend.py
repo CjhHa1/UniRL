@@ -378,7 +378,6 @@ class BaseFSDP2Backend(Remote):
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def get_optimizer_step_count(self) -> int:
         """Return the authoritative number of committed optimizer updates."""
-
         return self._optimizer_step_count
 
     @property

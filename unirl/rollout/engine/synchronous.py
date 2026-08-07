@@ -160,7 +160,6 @@ class SyncRolloutEngine(BaseRolloutEngine, ABC):
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def set_version(self, train_version: int) -> None:
         """Set the committed-update version after a full weight publication."""
-
         if train_version < 0:
             raise ValueError(f"train_version must be >= 0, got {train_version}")
         self._version = train_version

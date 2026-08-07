@@ -1,12 +1,4 @@
-"""Driver-side async rollout engines.
-
-Dispatch is non-blocking through ``Handle.launch_nowait``; trainer loops own
-admission and reap/launch ordering.
-
-``AsyncBatchRolloutEngine`` consumes atomic FIFO batches tagged with
-``output_version``. ``AsyncAgenticRolloutEngine`` buffers completed groups by
-their oldest generated Part's output version.
-"""
+"""Driver-side async rollout engines: ``Handle.launch_nowait`` dispatch; trainer loops own admission and ordering."""
 
 from __future__ import annotations
 
@@ -55,12 +47,7 @@ class VersionedBuffer(Generic[T]):
         current_version: Optional[int] = None,
         staleness_budget: Optional[int] = None,
     ) -> Optional[List[T]]:
-        """Pop the ``n`` freshest eligible payloads, carrying leftovers forward.
-
-        Over-stale items are evicted first (retrievable via :meth:`pop_evicted`),
-        then remaining items are sorted by version and ``gen_id``, newest first.
-        Returns ``None`` without consuming when fewer than ``n`` remain.
-        """
+        """Pop the ``n`` newest eligible payloads, evicting over-stale ones; ``None`` (no consumption) if short."""
         if staleness_budget is not None and current_version is not None:
             kept: List[Tuple[T, int, int]] = []
             for item in self._items:
@@ -225,17 +212,7 @@ class InflightPool:
 
 
 class AsyncBatchRolloutEngine:
-    """Batch-granular async engine over a ``SyncRolloutEngine`` slab Handle.
-
-    One generation must produce exactly ``groups_per_batch`` groups and enters a
-    completion-order FIFO atomically. ``output_version`` is captured at launch
-    from the exact train snapshot currently synced to the rollout engine, so
-    ``staleness_budget`` is compared in committed optimizer updates — the caller
-    resolves it from a batch count before passing it down.
-
-    ``quiesce()`` (drain everything) is MANDATORY before a weight sync, eval, or
-    checkpoint: a weight + KV update corrupts an in-flight generation.
-    """
+    """Batch-granular async engine over a ``SyncRolloutEngine`` slab Handle; one generation is one atomic FIFO batch."""
 
     def __init__(
         self,
@@ -267,7 +244,6 @@ class AsyncBatchRolloutEngine:
 
     def submit(self, sample: "Sample", *, output_version: int) -> int:
         """Launch one generation under the supplied output policy version."""
-
         return self._pool.launch(sample, output_version=output_version)
 
     def poll(self) -> int:
@@ -285,6 +261,7 @@ class AsyncBatchRolloutEngine:
         )
 
     def quiesce(self) -> None:
+        """Drain every in-flight generation; MANDATORY before a weight sync, eval, or checkpoint."""
         self._pool.drain_all(self._on_complete)
 
     def wait_oldest(self) -> None:
@@ -374,12 +351,7 @@ class AsyncAgenticRolloutEngine:
         return self._version
 
     def sync_weights(self, weight_sync: Any, *, train_version: int) -> None:
-        """Push train weights and align worker provenance with ``train_version``.
-
-        The only sanctioned weight-push path pairs the push with the worker
-        version assignment. Raises while a drive is active; a joined
-        ``finalize_if_drained`` or ``quiesce`` ends the drive.
-        """
+        """Push train weights and set worker provenance to ``train_version``; raises while a drive is active."""
         if self._drive_live:
             raise RuntimeError("sync_weights with a drive active; finalize or quiesce() first")
         weight_sync.sync()
