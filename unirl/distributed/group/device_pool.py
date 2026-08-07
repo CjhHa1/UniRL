@@ -16,6 +16,7 @@ PlacementGroup bundles reserve CPU quota for all slots upfront.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional, Set
 
@@ -160,6 +161,13 @@ class DevicePool:
 
     def _spawn_worker(self, device_id: int, slot: int, env_vars: dict = None) -> ray.actor.ActorHandle:
         """Spawn a Worker actor and register it in internal mappings."""
+        env_vars = dict(env_vars or {})
+        # Ray actor runtime_env may not preserve the raylet's dynamic-loader
+        # path. Propagate it explicitly so CUDA forward-compat libraries selected
+        # by the launcher remain selected in every GPU Worker, including lazy
+        # colocated slots.
+        if ld_library_path := os.environ.get("LD_LIBRARY_PATH"):
+            env_vars.setdefault("LD_LIBRARY_PATH", ld_library_path)
         if self.transport_kind in ("transfer_queue", "tq") and self.tq_handoff is None:
             raise RuntimeError(
                 "transport_kind='transfer_queue' requires tq_handoff "
