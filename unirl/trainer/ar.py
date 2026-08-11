@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 _ROLLOUT_SHUTDOWN_TIMEOUT_S = 60.0
 
 
+def _allowed_ar_input_primitives(pipeline_cfg: DictConfig) -> set[str]:
+    """Return the prompt primitives accepted by an AR pipeline."""
+    allowed = {"text", "image", "video"}
+    if "qwen3_omni" in str(pipeline_cfg.get("_target_", "")):
+        allowed.add("media")
+    return allowed
+
+
 class ARTrainer(BaseTrainer):
     """Autoregressive (VLM / LLM) RL trainer: rollout + train colocated.
 
@@ -77,10 +85,7 @@ class ARTrainer(BaseTrainer):
         # ``media`` (URI-backed MediaRefs) is an Omni prompt-input channel.
         # Keep other AR models on the decoded image/video contract so a miswired
         # dataset fails at request build instead of silently dropping media.
-        self._allowed_input_primitives = {"text", "image", "video"}
-        pipeline_target = str(pipeline_cfg.get("_target_", ""))
-        if "qwen3_omni" in pipeline_target:
-            self._allowed_input_primitives.add("media")
+        self._allowed_input_primitives = _allowed_ar_input_primitives(pipeline_cfg)
         self.batch_size = batch_size
         self.adv_normalization_scope = adv_normalization_scope
         self.normalize_adv_by_std = normalize_adv_by_std
