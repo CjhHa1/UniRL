@@ -19,8 +19,6 @@ from unirl.distributed.tensor.ref import (
     cat_rows,
     hydrate,
     map_tree,
-    ref_is_required,
-    ref_store_keys,
 )
 from unirl.distributed.tensor.transport import (
     TensorTransport,
@@ -48,8 +46,6 @@ __all__ = [
     "mean_field",
     "min_field",
     "packed_field",
-    "ref_is_required",
-    "ref_store_keys",
     "shared_field",
     "sum_field",
 ]

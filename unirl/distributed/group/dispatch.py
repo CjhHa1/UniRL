@@ -19,18 +19,19 @@ DP-aware dispatch (DP_SCATTER, DP_SCATTER_HEAD):
 Partial localization (``@distributed(reads=...)`` / ``(skips=...)``):
   - A method may declare which subtrees of its arguments it actually reads
     (whitelist) or which it provably does not (blacklist)
-  - required_store_keys turns that into the per-shard mask the controller's
-    localize and the worker's fetch both honor, so unread refs never move
+  - required_store_keys turns that into a per-shard mask; the controller sends
+    the post-localization mask to the worker, so unread refs never move or fetch
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from enum import Enum, auto
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, TypeAlias
 
 from unirl.distributed.tensor.pytree import pytree_cat, pytree_chunk
-from unirl.distributed.tensor.ref import TensorRef, ref_store_keys
+from unirl.distributed.tensor.ref import TensorRef, ref_is_required, ref_store_keys
 from unirl.distributed.utils import Broadcast, collect_leaves
 
 if TYPE_CHECKING:
@@ -283,10 +284,10 @@ def required_store_keys(
     under-localizing would hand the method a ``TensorRef`` where it wants a
     tensor.
 
-    Both the controller (``Handle``, deciding what to NCCL) and the worker
-    (``Worker.call``, deciding what to fetch) call this on the SAME shard, so a
-    selector must be pure. An empty shard (``DP_SCATTER_HEAD`` gives non-head
-    ranks no args) needs nothing.
+    ``Handle`` evaluates the selector before localization to decide what to move,
+    then remaps the selected refs onto the localized shard and sends that mask to
+    ``Worker.call``. An empty shard (``DP_SCATTER_HEAD`` gives non-head ranks no
+    args) needs nothing.
     """
     if not has_partial_localization(config):
         return None
@@ -296,23 +297,47 @@ def required_store_keys(
     if reads_fn is not None:
         return _subtree_store_keys(reads_fn, args, kwargs)
 
-    # Blacklist. Identity, not keys, decides which refs are inside the skipped
-    # subtrees; a selector that hands back a VIEW instead of the tree's own ref
-    # matches nothing and degrades to full localization rather than withholding a
-    # tensor. Keys claimed by any ref OUTSIDE those subtrees stay required, which
-    # is what makes the subtraction alias-safe.
-    skipped_refs = {id(ref) for ref in collect_leaves(skips_fn(*args, **kwargs), TensorRef)}
+    # Blacklist. Identity plus occurrence counts decides which refs are inside the
+    # skipped subtrees. A selector that hands back a VIEW instead of the tree's own
+    # ref matches nothing and degrades to full localization. If one ref object is
+    # aliased both inside and outside the skipped subtree, the unmatched occurrence
+    # keeps its key required.
+    all_refs = collect_leaves(args, TensorRef) + collect_leaves(kwargs, TensorRef)
+    skipped_refs = collect_leaves(skips_fn(*args, **kwargs), TensorRef)
+    all_counts = Counter(id(ref) for ref in all_refs)
+    skipped_counts = Counter(id(ref) for ref in skipped_refs)
     everything: Set[str] = set()
     skipped: Set[str] = set()
     claimed_elsewhere: Set[str] = set()
-    for ref in collect_leaves(args, TensorRef) + collect_leaves(kwargs, TensorRef):
+    for ref in all_refs:
         keys = ref_store_keys(ref)
         everything |= keys
-        if id(ref) in skipped_refs:
+        ref_id = id(ref)
+        if skipped_counts[ref_id]:
             skipped |= keys
-        else:
+        if all_counts[ref_id] > skipped_counts[ref_id]:
             claimed_elsewhere |= keys
     return everything - (skipped - claimed_elsewhere)
+
+
+def remap_required_store_keys(
+    required: Set[str],
+    before_args: Tuple[Any, ...],
+    before_kwargs: Dict[str, Any],
+    after_args: Tuple[Any, ...],
+    after_kwargs: Dict[str, Any],
+) -> Set[str]:
+    """Translate a pre-localization mask onto structurally identical localized refs."""
+    before_refs = collect_leaves(before_args, TensorRef) + collect_leaves(before_kwargs, TensorRef)
+    after_refs = collect_leaves(after_args, TensorRef) + collect_leaves(after_kwargs, TensorRef)
+    if len(before_refs) != len(after_refs):
+        raise RuntimeError("TensorTransport.localize changed the TensorRef tree structure")
+
+    remapped: Set[str] = set()
+    for before, after in zip(before_refs, after_refs):
+        if ref_is_required(before, required):
+            remapped |= ref_store_keys(after)
+    return remapped
 
 
 # ── @distributed decorator ──
@@ -347,10 +372,8 @@ def distributed(
       and only wants a known-dead payload held back. Safer against schema
       growth: a field nobody named is still localized.
 
-    A selector must be a pure function of the arguments — the controller and the
-    worker each call it on their own copy of the shard and must reach the same
-    answer. Declaring both is a config error. Incompatible with
-    ``enable_grad()``: an unlocalized input has no worker-side grad leaf.
+    Declaring both is a config error. Partial localization is incompatible with
+    ``enable_grad()`` because an unlocalized input has no worker-side grad leaf.
 
     Usage:
         class DiffusionRemote(Remote):

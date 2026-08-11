@@ -46,7 +46,7 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack import TrainStepResult, _build_micro_batch_slices
-from unirl.train.stack.base import _aggregate_update_results, _train_skips
+from unirl.train.stack.base import _aggregate_update_results
 from unirl.train.stack.planner.types import _positive_int, _update_ranges
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
@@ -55,15 +55,14 @@ from unirl.utils.misc import aggregate_numeric_metrics
 logger = logging.getLogger(__name__)
 
 
-def _lineage_skips(sample: Sample, **kwargs) -> list:
-    """:func:`_train_skips` over a whole lineage — this stack is dispatched a Sample.
+def _lineage_skips(sample: Sample, **_) -> list:
+    """Decoded payloads this whole-lineage training call never reads.
 
-    Load-bearing here rather than merely defensive: unlike ``TrainStack``'s
-    selective ``_align_track_to_model``, ``train_track`` below calls
-    ``Part.to_device`` on each gen Part, which is recursive and would haul a
-    surviving decoded payload onto the GPU.
+    Unlike the ordinary ``TrainStack`` path, this call receives the root input
+    Part as well as generated Parts, so the root's decoded input can still be
+    present after ``BaseTrainer._drop_decoded`` clears generated outputs.
     """
-    return [_train_skips(part, **kwargs) for part in sample.parts]
+    return [part.primitives for part in sample.parts]
 
 
 class UnifiedModelTrainStack(Remote):

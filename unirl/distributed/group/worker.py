@@ -16,22 +16,21 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 import ray
 import torch
 from torch import Tensor
 
-from unirl.distributed.group.dispatch import DISTRIBUTED_CONFIG_ATTR, required_store_keys
 from unirl.distributed.group.remote import RankInfo, Remote
 from unirl.distributed.tensor import (
     TensorRef,
     TensorTransport,
     TensorTransportRuntime,
     map_tree,
-    ref_is_required,
 )
 from unirl.distributed.tensor.factory import build_transport
+from unirl.distributed.tensor.ref import ref_is_required
 from unirl.distributed.utils import collect_leaves
 
 logger = logging.getLogger(__name__)
@@ -269,7 +268,16 @@ class Worker:
         """Read back rank_info (may have been modified by initialize)."""
         return self._roles[role_name].rank_info
 
-    def call(self, role_name: str, method_name: str, args: tuple, kwargs: dict, grad_mode: bool = False, call_id=None):
+    def call(
+        self,
+        role_name: str,
+        method_name: str,
+        args: tuple,
+        kwargs: dict,
+        grad_mode: bool = False,
+        call_id=None,
+        required: Optional[Set[str]] = None,
+    ):
         """Generic RPC entry point.
 
         Resolves inputs (TensorRef → Tensor via transport.get_batch) and packs
@@ -282,15 +290,13 @@ class Worker:
           - output tensors are saved (before detach) for backward.
         Saved under role._grad_inputs[call_id] / role._grad_outputs[call_id].
 
-        A method declaring ``@distributed(reads=...)`` / ``(skips=...)`` resolves
-        only the refs its selector leaves in the mask; the rest stay ``TensorRef``
-        and pass through into the result untouched (the controller never made them
-        local, so fetching them here would fail). ``put_batch`` below only packs
-        real tensors, so a passed-through ref is returned exactly as it arrived.
+        ``required`` is the controller-computed partial-localization mask. Refs
+        outside it stay ``TensorRef`` and pass through into the result untouched
+        (the controller never made them local, so fetching them here would fail).
+        ``put_batch`` below only packs real tensors, so a passed-through ref is
+        returned exactly as it arrived.
         """
         role = self._roles[role_name]
-        config = getattr(getattr(type(role), method_name, None), DISTRIBUTED_CONFIG_ATTR, None)
-        required = required_store_keys(config, args, kwargs)
 
         # Resolve: collect the TensorRef leaves this call needs (tree order),
         # batch-fetch, substitute. Keys are positional indices so get_batch
