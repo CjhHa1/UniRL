@@ -49,24 +49,25 @@ class RolloutManager:
         self._pool.add(list(tasks))
 
     def collect(self, n: int, *, current_version: int) -> List[List["Sample"]]:
-        self._ensure_open()
-        n = int(n)
-        if n <= 0:
-            raise ValueError(f"collect count must be positive; got {n}")
-        current_version = int(current_version)
-        if current_version < 0:
-            raise ValueError(f"current_version must be non-negative; got {current_version}")
-
+        n, current_version = self._validate_collect(n, current_version)
         try:
             while True:
-                self._route(self._resolve(self._pool.take_completed(block=False)), allow_suspended=False)
-                self._filter_complete(current_version)
-                selected = self._complete.take(n)
+                selected = self._collect_ready(n, current_version=current_version)
                 if selected is not None:
                     return selected
                 if not self._pool.live:
                     raise RuntimeError(f"needed {n} rollout groups, collected {self._complete.group_count}")
                 self._route(self._resolve(self._pool.take_completed(block=True)), allow_suspended=False)
+        except BaseException as exc:
+            self._poison(exc)
+            raise
+
+    def collect_ready(self, n: int, *, current_version: int) -> Optional[List[List["Sample"]]]:
+        """Return a complete batch if one is ready without waiting for remote work."""
+
+        n, current_version = self._validate_collect(n, current_version)
+        try:
+            return self._collect_ready(n, current_version=current_version)
         except BaseException as exc:
             self._poison(exc)
             raise
@@ -160,6 +161,21 @@ class RolloutManager:
 
     def _resolve(self, units: List[Any]) -> List[tuple[int, "Sample"]]:
         return [(unit.sequence, unit.pending.result()) for unit in units]
+
+    def _collect_ready(self, n: int, *, current_version: int) -> Optional[List[List["Sample"]]]:
+        self._route(self._resolve(self._pool.take_completed(block=False)), allow_suspended=False)
+        self._filter_complete(current_version)
+        return self._complete.take(n)
+
+    def _validate_collect(self, n: int, current_version: int) -> tuple[int, int]:
+        self._ensure_open()
+        n = int(n)
+        if n <= 0:
+            raise ValueError(f"collect count must be positive; got {n}")
+        current_version = int(current_version)
+        if current_version < 0:
+            raise ValueError(f"current_version must be non-negative; got {current_version}")
+        return n, current_version
 
     def _route(self, results: List[tuple[int, "Sample"]], *, allow_suspended: bool) -> List["Sample"]:
         terminal_trajectories = []

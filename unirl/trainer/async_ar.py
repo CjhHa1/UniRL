@@ -71,6 +71,9 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
         train_fraction: float = 0.5,
         max_inflight: int = 1,
         weight_sync_interval: int = 1,
+        async_control_mode: str = "unified",
+        max_pending_generations: Optional[int] = None,
+        controller_timeout_s: float = 3600.0,
     ) -> None:
         validate_qwen3_5_training_contract(
             pipeline_cfg=pipeline_cfg,
@@ -109,6 +112,20 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
         self._train_fraction = float(train_fraction)
         self._max_inflight = max(1, int(max_inflight))
         self._weight_sync_interval = int(weight_sync_interval)
+        self._async_control_mode = str(async_control_mode).strip().lower()
+        if self._async_control_mode not in {"unified", "dual"}:
+            raise ValueError(f"async_control_mode must be 'unified' or 'dual', got {async_control_mode!r}")
+        self._max_pending_generations = (
+            self._max_inflight + 1 if max_pending_generations is None else int(max_pending_generations)
+        )
+        if self._async_control_mode == "dual" and self._max_pending_generations < self._max_inflight:
+            raise ValueError(
+                f"max_pending_generations must be >= max_inflight, "
+                f"got {self._max_pending_generations} < {self._max_inflight}"
+            )
+        self._controller_timeout_s = float(controller_timeout_s)
+        if self._controller_timeout_s <= 0:
+            raise ValueError(f"controller_timeout_s must be > 0, got {controller_timeout_s}")
         self._num_updates_per_batch = int(stack_cfg.get("num_updates_per_batch", 1))
         if self._weight_sync_interval < 1:
             raise ValueError(f"weight_sync_interval must be >= 1, got {self._weight_sync_interval}")
@@ -160,7 +177,7 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
 
     def _prepare_rollout(self, *, sync_weights: bool) -> bool:
         """Sync a resident separate-slab engine without colocate handoffs."""
-        if sync_weights:
+        if sync_weights and self._async_control_mode != "dual":
             self._sync_rollout(require_empty=True)
         return False
 
@@ -264,7 +281,13 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
         )
 
     def _async_wandb_extra(self) -> Dict[str, object]:
-        return {"adv_normalization_scope": self.adv_normalization_scope}
+        extra = {
+            "adv_normalization_scope": self.adv_normalization_scope,
+            "async_control_mode": self._async_control_mode,
+        }
+        if self._async_control_mode == "dual":
+            extra["max_pending_generations"] = self._max_pending_generations
+        return extra
 
     def _boundary_evaluate(self, rollout_id: int, *, initial: bool) -> None:
         self.evaluate(rollout_id=-1 if initial else rollout_id)

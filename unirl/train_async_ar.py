@@ -19,6 +19,9 @@ Extra config knobs vs the colocate recipe:
   * ``max_inflight`` — concurrent generations (resource/overlap limit).
   * ``weight_sync_interval`` — trained batches between publications; also derives
     the default output-version lag filter.
+  * ``async_control_mode`` — ``unified`` keeps rollout admission in the training
+    loop; ``dual`` runs an independent bounded rollout producer.
+  * ``max_pending_generations`` — dual-mode cap on in-flight plus ready generations.
 """
 
 from __future__ import annotations
@@ -57,6 +60,9 @@ def main(cfg: DictConfig) -> None:
         train_fraction=float(cfg.get("train_fraction", 0.5)),
         max_inflight=int(cfg.get("max_inflight", 1)),
         weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
+        async_control_mode=str(cfg.get("async_control_mode", "unified")),
+        max_pending_generations=cfg.get("max_pending_generations"),
+        controller_timeout_s=float(cfg.get("controller_timeout_s", 3600.0)),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

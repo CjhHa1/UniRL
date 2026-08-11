@@ -26,7 +26,13 @@ num_rollouts: 800
 # train-bound, lower for generation-bound workloads (mind DIVISIBILITY above).
 train_fraction: 0.5
 
+# ``unified`` launches from the training loop. ``dual`` keeps a bounded
+# generation queue full on an independent producer thread. Dual overlap needs
+# weight_sync_interval >= 2.
+async_control_mode: unified
 max_inflight: 1          # concurrent generations
+max_pending_generations: null # dual mode: inflight + completed; defaults to max_inflight + 1
+controller_timeout_s: 3600
 weight_sync_interval: 1  # trained batches per publication; also configures the output-version lag filter
 
 # AIME eval every 10 rollouts + a pre-train baseline (rollout -1).
