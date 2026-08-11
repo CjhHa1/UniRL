@@ -62,10 +62,10 @@ wrong objective.
   siblings, and applies the configured filter. Async batch trainers own training
   progress and publication cadence; the manager owns the published rollout version
   and preserves completed generations as FIFO batch chunks. `AgenticTrainer` collects
-  one complete barrier batch per step. Async AR can additionally put the same
-  manager behind a `ContinuousRolloutProducer`; that thread owns launch/collection
-  while the training thread scores and trains, then transfers ownership only at a
-  quiescent publication or durable boundary.
+  one complete barrier batch per step. Async AR dual mode prequeues bounded work
+  into the same manager, so its existing progress thread keeps generation active
+  while the training thread scores and trains. Publication and durable boundaries
+  still quiesce that single manager before proceeding.
 
 **Extending it:** a new single-turn engine adds `engine/<name>/config.py` (a
 `BaseEngineConfig` whose `make_engine(**deps)` lazily imports and builds it) and

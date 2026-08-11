@@ -6,14 +6,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from unirl.rollout.manager import (
-    ContinuousRolloutProducer,
-    ProducerSnapshot,
-    RolloutManager,
-    boundary_launch_slots,
-    keep_within_lag,
-    next_hard_boundary,
-)
+from unirl.rollout.manager import RolloutManager, keep_within_lag
 from unirl.trainer.base import unwrap_replicated_int
 from unirl.types.sampling import total_samples_per_prompt
 
@@ -21,6 +14,42 @@ if TYPE_CHECKING:
     from unirl.types.sample import Sample
 
 logger = logging.getLogger(__name__)
+
+
+def next_hard_boundary(
+    trained_batches: int,
+    *,
+    num_rollouts: int,
+    eval_interval: int = 0,
+    save_interval: int = 0,
+) -> int:
+    boundary = num_rollouts
+    for interval in (eval_interval, save_interval):
+        if interval > 0 and trained_batches < num_rollouts:
+            boundary = min(boundary, ((trained_batches // interval) + 1) * interval)
+    return boundary
+
+
+def boundary_launch_slots(
+    *,
+    inflight_count: int,
+    ready_count: int,
+    max_inflight: int,
+    trained_batches: int,
+    num_rollouts: int,
+    hard_boundary: int,
+    batches_since_sync: int,
+    weight_sync_interval: int,
+    max_pending: Optional[int] = None,
+    leased_count: int = 0,
+) -> int:
+    """Generations admissible before the next publication or durable boundary."""
+    freshness = weight_sync_interval - batches_since_sync
+    allowed = min(freshness, min(num_rollouts, hard_boundary) - trained_batches)
+    manager_outstanding = inflight_count + ready_count
+    version_outstanding = manager_outstanding + leased_count
+    capacity = max_inflight - inflight_count if max_pending is None else max_pending - manager_outstanding
+    return max(0, min(capacity, allowed - version_outstanding))
 
 
 def rollout_version_metrics(
@@ -94,8 +123,9 @@ class AsyncRolloutTrainerMixin:
     ``_max_inflight``/``_weight_sync_interval``/``_num_updates_per_batch``
     knobs) plus the ``_async_wandb_extra`` / ``_boundary_evaluate`` hooks.
     Unified mode admits work from this loop. Dual mode gives admission and
-    collection to ``ContinuousRolloutProducer`` while this same loop scores and
-    trains. ``RolloutManager`` remains the sole scheduler and publication owner.
+    collection extra queue capacity so ``RolloutPool`` can keep generation
+    active while this same loop scores and trains. ``RolloutManager`` remains
+    the sole scheduler and publication owner.
     """
 
     def _async_wandb_extra(self) -> Dict[str, object]:
@@ -154,62 +184,35 @@ class AsyncRolloutTrainerMixin:
             filter_fn=keep_within_lag(staleness_budget),
         )
         dual_control = getattr(self, "_async_control_mode", "unified") == "dual"
-        producer: Optional[ContinuousRolloutProducer] = None
-        if not dual_control:
-            self._next_generation_id = start_rollout
+        max_pending = self._max_pending_generations if dual_control else None
+        self._next_generation_id = start_rollout
 
         if resumed or self.eval_interval > 0:
             self._sync_rollout(force=True, require_empty=True)
         if self.eval_interval > 0:
             self._boundary_evaluate(start_rollout, initial=True)
 
-        if dual_control:
-            producer = ContinuousRolloutProducer(
-                self._rollout_manager,
-                build_sample=self._build_async_sample,
-                batch_size=self.batch_size,
-                num_rollouts=num_rollouts,
-                start_rollout=start_rollout,
-                current_version=self._train_version,
-                max_inflight=self._max_inflight,
-                max_pending_generations=self._max_pending_generations,
-                weight_sync_interval=self._weight_sync_interval,
-                save_interval=save_interval,
-                eval_interval=self.eval_interval,
-                timeout_s=self._controller_timeout_s,
-            )
-            producer.start()
-
-        caught_error: Optional[BaseException] = None
         try:
             for rollout_id in range(start_rollout, num_rollouts):
                 t0 = time.perf_counter()
-                producer_metrics: Dict[str, float] = {}
-                if producer is None:
-                    hard_boundary = next_hard_boundary(
-                        rollout_id,
-                        num_rollouts=num_rollouts,
-                        eval_interval=self.eval_interval,
-                        save_interval=save_interval,
-                    )
-                    sample, output_version = self._next_rollout_batch(
-                        rollout_id,
-                        num_rollouts=num_rollouts,
-                        hard_boundary=hard_boundary,
-                    )
-                else:
-                    groups, queue_wait_s = producer.take_next()
-                    completed, gen_id, output_version = combine_rollout_chunks(groups)
-                    sample = self._score_completed(gen_id, completed)
-                    snapshot = producer.snapshot()
-                    producer_metrics = self._producer_metrics(snapshot, queue_wait_s=queue_wait_s)
+                hard_boundary = next_hard_boundary(
+                    rollout_id,
+                    num_rollouts=num_rollouts,
+                    eval_interval=self.eval_interval,
+                    save_interval=save_interval,
+                )
+                sample, output_version = self._next_rollout_batch(
+                    rollout_id,
+                    num_rollouts=num_rollouts,
+                    hard_boundary=hard_boundary,
+                    max_pending=max_pending,
+                )
 
                 version_metrics = rollout_version_metrics(
                     train_version=self._train_version,
                     output_version=output_version,
                     num_updates_per_batch=self._num_updates_per_batch,
                 )
-                version_metrics.update(producer_metrics)
                 training_progress = rollout_id / max(1, num_rollouts - 1)
                 result, mean_reward = self._advantage_and_train(
                     sample,
@@ -218,8 +221,6 @@ class AsyncRolloutTrainerMixin:
                     t0=t0,
                     extra_metrics=version_metrics,
                 )
-                if producer is not None:
-                    producer.set_current_version(self._train_version)
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
 
                 step = rollout_id + 1
@@ -227,31 +228,10 @@ class AsyncRolloutTrainerMixin:
                 eval_due = self.eval_interval > 0 and step % self.eval_interval == 0
                 save_due = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
                 sync_due = step < num_rollouts and self._batches_since_sync >= self._weight_sync_interval
-                if producer is None and (eval_due or save_due or sync_due):
+                if eval_due or save_due or sync_due:
                     self._sync_rollout(require_empty=eval_due or save_due)
-                elif producer is not None and (eval_due or save_due or sync_due or final_due):
-                    reasons = [
-                        name
-                        for name, due in (
-                            ("weight_sync", sync_due),
-                            ("eval", eval_due),
-                            ("checkpoint", save_due),
-                            ("final", final_due),
-                        )
-                        if due
-                    ]
-                    producer.pause_and_drain(
-                        "+".join(reasons),
-                        require_empty=eval_due or save_due or final_due,
-                    )
-                    if (
-                        eval_due or save_due or sync_due
-                    ) and self._rollout_manager.published_version != self._train_version:
-                        producer.publish(self.weight_sync, output_version=self._train_version)
-                    if eval_due or save_due or sync_due:
-                        self._batches_since_sync = 0
 
-                if producer is None and final_due and not self._rollout_manager.empty:
+                if final_due and not self._rollout_manager.empty:
                     raise RuntimeError("final rollout boundary requires an empty RolloutManager")
 
                 if eval_due:
@@ -264,49 +244,11 @@ class AsyncRolloutTrainerMixin:
                         save_dir=save_dir,
                         save_mode=save_mode,
                     )
-                if producer is not None and not final_due and (eval_due or save_due or sync_due):
-                    producer.resume(
-                        current_version=self._train_version,
-                        reset_sync_window=True,
-                    )
-        except BaseException as exc:
-            caught_error = exc
-            raise
         finally:
-            producer_stopped = producer is None
             try:
-                if producer is not None:
-                    try:
-                        if caught_error is None:
-                            producer.stop()
-                        else:
-                            producer.stop(raise_on_error=False)
-                    except BaseException:
-                        if caught_error is not None:
-                            logger.exception("Failed to stop rollout producer after training error")
-                        else:
-                            raise
-                    finally:
-                        producer_stopped = not producer.thread_alive
+                self._rollout_manager.close()
             finally:
-                try:
-                    if producer_stopped:
-                        self._rollout_manager.close()
-                    else:
-                        logger.error("Skipping RolloutManager.close because the producer thread is still alive")
-                finally:
-                    self._finish_wandb()
-
-    @staticmethod
-    def _producer_metrics(snapshot: ProducerSnapshot, *, queue_wait_s: float) -> Dict[str, float]:
-        return {
-            "async/producer_inflight": float(snapshot.inflight),
-            "async/producer_queue": float(snapshot.completed_queue),
-            "async/producer_queue_wait_s": queue_wait_s,
-            "async/producer_launched": float(snapshot.launched),
-            "async/producer_completed": float(snapshot.completed),
-            "async/producer_wait_s": snapshot.producer_wait_s,
-        }
+                self._finish_wandb()
 
     def _sync_rollout(self, *, force: bool = False, require_empty: bool = False) -> None:
         manager = self._rollout_manager
@@ -332,6 +274,7 @@ class AsyncRolloutTrainerMixin:
         *,
         num_rollouts: int,
         hard_boundary: int,
+        max_pending: Optional[int],
     ) -> Tuple["Sample", int]:
         manager = self._rollout_manager
         inflight_count, ready_count = manager.counts
@@ -345,26 +288,28 @@ class AsyncRolloutTrainerMixin:
                 hard_boundary=hard_boundary,
                 batches_since_sync=self._batches_since_sync,
                 weight_sync_interval=self._weight_sync_interval,
+                max_pending=max_pending,
             )
             self._submit_generations(slots)
 
         groups = manager.collect(self.batch_size, current_version=self._train_version)
         completed, gen_id, output_version = combine_rollout_chunks(groups)
-        scored = self._score_completed(gen_id, completed)
 
         inflight_count, ready_count = manager.counts
         slots = boundary_launch_slots(
             inflight_count=inflight_count,
-            ready_count=ready_count + 1,
+            ready_count=ready_count,
             max_inflight=self._max_inflight,
             trained_batches=rollout_id,
             num_rollouts=num_rollouts,
             hard_boundary=hard_boundary,
             batches_since_sync=self._batches_since_sync,
             weight_sync_interval=self._weight_sync_interval,
+            max_pending=max_pending,
+            leased_count=1,
         )
         self._submit_generations(slots)
-        return scored, output_version
+        return self._score_completed(gen_id, completed), output_version
 
     def _submit_generations(self, count: int) -> None:
         for _ in range(count):

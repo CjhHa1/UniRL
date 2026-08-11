@@ -73,7 +73,6 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
         weight_sync_interval: int = 1,
         async_control_mode: str = "unified",
         max_pending_generations: Optional[int] = None,
-        controller_timeout_s: float = 3600.0,
     ) -> None:
         validate_qwen3_5_training_contract(
             pipeline_cfg=pipeline_cfg,
@@ -119,14 +118,8 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
         self._max_pending_generations = (
             self._max_inflight + 1 if max_pending_generations is None else int(max_pending_generations)
         )
-        if self._async_control_mode == "dual" and self._max_pending_generations < self._max_inflight:
-            raise ValueError(
-                f"max_pending_generations must be >= max_inflight, "
-                f"got {self._max_pending_generations} < {self._max_inflight}"
-            )
-        self._controller_timeout_s = float(controller_timeout_s)
-        if self._controller_timeout_s <= 0:
-            raise ValueError(f"controller_timeout_s must be > 0, got {controller_timeout_s}")
+        if self._async_control_mode == "dual" and self._max_pending_generations < 1:
+            raise ValueError(f"max_pending_generations must be >= 1 in dual mode, got {self._max_pending_generations}")
         self._num_updates_per_batch = int(stack_cfg.get("num_updates_per_batch", 1))
         if self._weight_sync_interval < 1:
             raise ValueError(f"weight_sync_interval must be >= 1, got {self._weight_sync_interval}")
@@ -178,7 +171,7 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
 
     def _prepare_rollout(self, *, sync_weights: bool) -> bool:
         """Sync a resident separate-slab engine without colocate handoffs."""
-        if sync_weights and self._async_control_mode != "dual":
+        if sync_weights:
             self._sync_rollout(require_empty=True)
         return False
 
