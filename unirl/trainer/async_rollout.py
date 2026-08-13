@@ -42,7 +42,7 @@ def boundary_launch_slots(
     weight_sync_interval: int,
     leased_count: int = 0,
 ) -> int:
-    """Generations admissible before the next publication or durable boundary."""
+    """Generations admissible now, bounded by concurrency, remaining batches, and the sync window."""
     freshness = weight_sync_interval - batches_since_sync
     allowed = min(freshness, min(num_rollouts, hard_boundary) - trained_batches)
     return max(
@@ -117,18 +117,7 @@ def _rollout_id(sample: "Sample") -> int:
 
 
 class AsyncRolloutTrainerMixin:
-    """One async batch loop shared by ``AsyncARTrainer`` and ``AsyncDiffusionTrainer``.
-
-    The host trainer supplies the domain surface (``_build_request_sample``,
-    ``_drop_decoded``, ``_advantage_and_train``, checkpoint/wandb helpers, the
-    ``reward``/``backend``/``rollout``/``weight_sync`` remotes, and the
-    ``_max_inflight``/``_weight_sync_interval``/``_num_updates_per_batch``
-    knobs) plus the ``_async_wandb_extra`` / ``_boundary_evaluate`` hooks.
-    AR hosts may refill immediately after collecting a batch so ``RolloutPool``
-    overlaps the next allowed generation with scoring and training. Diffusion
-    hosts keep score-before-refill ordering for cross-slab transfer safety.
-    ``RolloutManager`` remains the sole scheduler and publication owner.
-    """
+    """One async batch loop shared by ``AsyncARTrainer`` and ``AsyncDiffusionTrainer``."""
 
     def _async_wandb_extra(self) -> Dict[str, object]:
         """Trainer-specific keys merged into the wandb run config."""

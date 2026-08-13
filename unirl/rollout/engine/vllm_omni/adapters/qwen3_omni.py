@@ -8,8 +8,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from unirl.config.require import require
-from unirl.models.qwen3_omni.media import omni_processor_media_kwargs, prepare_omni_media
-from unirl.models.types.conversations import build_omni_messages
+from unirl.models.qwen3_omni.media import build_omni_messages, omni_processor_media_kwargs, prepare_omni_media
 from unirl.rollout.engine.vllm_omni.adapters.base import ModelAdapter, register_adapter
 from unirl.rollout.engine.vllm_omni.adapters.hi3 import Hi3TextOutputAdapter
 from unirl.rollout.engine.vllm_omni.backends import (
@@ -38,12 +37,7 @@ def _compress_qwen3_omni_prompt_ids(
     audio_eos_token_id: int,
     use_audio_in_video: bool,
 ) -> List[int]:
-    """Undo HF multimodal expansion before vLLM processes the raw media.
-
-    This mirrors vLLM's
-    ``Qwen3OmniMoeThinkerMultiModalProcessor._get_raw_input_ids``. Replay
-    keeps the original expanded IDs; only the IDs sent to vLLM are compressed.
-    """
+    """Undo HF multimodal expansion before vLLM processes the raw media."""
     result = list(token_ids)
     if use_audio_in_video:
         while True:

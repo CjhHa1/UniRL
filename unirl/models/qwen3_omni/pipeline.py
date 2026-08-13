@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from unirl.models.types.conversations import build_omni_messages
 from unirl.models.types.pipeline import Pipeline
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample, Turn
@@ -15,16 +14,11 @@ from .bundle import Qwen3OmniBundle
 from .chat_template import Qwen3OmniChatTemplateStage
 from .conditions import Qwen3OmniARConditions
 from .config import Qwen3OmniPipelineConfig
+from .media import build_omni_messages
 
 
 class Qwen3OmniPipeline(Pipeline):
-    """Qwen3-Omni thinker generation pipeline: ``Sample → Sample``.
-
-    The input Sample carries a pre-forked AR frontier. Role-aware text and
-    optional image, audio, or video prompt turns are rendered from the
-    frontier's ancestor chain. The generated text, behavior log-probs, and
-    exact processor conditions are written back for per-turn replay.
-    """
+    """Qwen3-Omni thinker generation pipeline: ``Sample → Sample``."""
 
     # URI-backed MediaRefs are an Omni prompt-input channel; the AR trainers
     # read this declaration (unirl.trainer.ar.ar_preflight) instead of
