@@ -26,12 +26,7 @@ num_rollouts: 800
 # train-bound, lower for generation-bound workloads (mind DIVISIBILITY above).
 train_fraction: 0.5
 
-# ``unified`` admits only active generations. ``dual`` prequeues bounded work
-# for RolloutPool's existing dispatch thread. Dual overlap needs
-# weight_sync_interval >= 2.
-async_control_mode: unified
-max_inflight: 1          # concurrent generations
-max_pending_generations: null # dual mode: queued + active + ready; defaults to max_inflight + 1
+max_inflight: 1          # concurrent generation calls
 weight_sync_interval: 1  # trained batches per publication; also configures the output-version lag filter
 
 # AIME eval every 10 rollouts + a pre-train baseline (rollout -1).
