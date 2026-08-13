@@ -15,9 +15,8 @@ from omegaconf import DictConfig
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
-from unirl.models.qwen3_5.validation import validate_qwen3_5_training_contract
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.ar import ARTrainer, _allowed_ar_input_primitives
+from unirl.trainer.ar import ARTrainer, ar_preflight
 from unirl.trainer.async_rollout import AsyncRolloutTrainerMixin, training_version_metrics
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.sample import Sample
@@ -72,7 +71,7 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
         max_inflight: int = 1,
         weight_sync_interval: int = 1,
     ) -> None:
-        validate_qwen3_5_training_contract(
+        self._allowed_input_primitives = ar_preflight(
             pipeline_cfg=pipeline_cfg,
             backend_cfg=backend_cfg,
             rollout_cfg=rollout_cfg,
@@ -80,7 +79,6 @@ class AsyncARTrainer(AsyncRolloutTrainerMixin, ARTrainer):
         )
         # Skips ARTrainer.__init__: it opens the colocate placement block we replace with two slabs.
         BaseTrainer.__init__(self, cfg=cfg, logging_cfg=logging_cfg)
-        self._allowed_input_primitives = _allowed_ar_input_primitives(pipeline_cfg)
 
         self.batch_size = batch_size
         self.adv_normalization_scope = adv_normalization_scope
