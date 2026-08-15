@@ -99,13 +99,19 @@ class SGLangBackend:
         *,
         local_mode: bool,
     ) -> "SGLangBackend":
-        """Filter intent against ServerArgs, build the generator, return the backend."""
+        """Resolve ServerArgs and model PipelineConfig intent, then build the generator."""
         rt = _import_sglang_runtime()
-        allowed = {f.name for f in dataclasses.fields(rt["ServerArgs"])}
-        server_kwargs = {k: v for k, v in server_intent.items() if k in allowed}
+        server_args_cls = rt["ServerArgs"]
+        # from_dict routes model-specific intent such as guidance and flow shift into PipelineConfig.
+        from_dict = getattr(server_args_cls, "from_dict", None)
+        if callable(from_dict):
+            server_args = from_dict(dict(server_intent))
+        else:
+            allowed = {f.name for f in dataclasses.fields(server_args_cls)}
+            server_kwargs = {k: v for k, v in server_intent.items() if k in allowed}
+            server_args = server_args_cls.from_kwargs(**server_kwargs)
 
-        disable_autocast = server_kwargs.get("disable_autocast")
-        server_args = rt["ServerArgs"].from_kwargs(**server_kwargs)
+        disable_autocast = server_intent.get("disable_autocast")
         if disable_autocast is not None:
             server_args.disable_autocast = disable_autocast
 
