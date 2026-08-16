@@ -1,4 +1,4 @@
-"""HunyuanVideo-1.0 diffusion — 5D latents ``[B, C, T_lat, H_lat, W_lat]``; timestep and guidance both ``* 1000``."""
+"""HunyuanVideo-1.0 diffusion — 5D latents ``[B, C, T_lat, H_lat, W_lat]``; ``timestep = sigma * 1000``."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class HunyuanVideoDiffusionStep(DiffusionStep[HunyuanVideoBundle, HunyuanVideoCo
         *,
         guidance_scale: float,
     ) -> torch.Tensor:
-        """Transformer forward on ``sample [B, C, T_lat, H_lat, W_lat]``; guidance is ``scale * 1000``, no CFG."""
+        """Transformer forward on ``sample [B, C, T_lat, H_lat, W_lat]``; guidance rides a ``[B]`` tensor, no CFG."""
         text_llama = conditions.text_llama
         pooled_clip = conditions.pooled_clip
         if text_llama is None or text_llama.embeds is None:
@@ -62,8 +62,7 @@ class HunyuanVideoDiffusionStep(DiffusionStep[HunyuanVideoBundle, HunyuanVideoCo
             timestep = sigma
         timestep = timestep.to(device=device, dtype=dtype) * self.TIMESTEP_SCALE
 
-        # Same 1000x embedding as official HunyuanVideo and SGLang DenoisingStage.
-        guidance = torch.full((batch_size,), guidance_scale, device=device, dtype=dtype) * self.TIMESTEP_SCALE
+        guidance = torch.full((batch_size,), guidance_scale, device=device, dtype=dtype)
 
         hidden_states = sample.to(dtype)
 
@@ -247,7 +246,7 @@ class HunyuanVideoDiffusionStage(DiffusionStage[HunyuanVideoConditions]):
         denoise_seed_keys: Optional[List[str]] = None,
         denoise_base_seed: int = 0,
     ) -> LatentSegment:
-        """Run HunyuanVideo-1.0 T2V sampling with optional deterministic per-step SDE generators."""
+        """Run full HunyuanVideo-1.0 T2V sampling."""
         from unirl.sde.noise import generate_latents
 
         if conditions.text_llama is None or conditions.text_llama.embeds is None:
@@ -255,11 +254,6 @@ class HunyuanVideoDiffusionStage(DiffusionStage[HunyuanVideoConditions]):
         prompt_embeds = conditions.text_llama.embeds
         device = prompt_embeds.device
         batch_size = int(prompt_embeds.shape[0])
-        if denoise_seed_keys is not None and len(denoise_seed_keys) != batch_size:
-            raise ValueError(
-                "HunyuanVideoDiffusionStage.diffuse: denoise_seed_keys length "
-                f"{len(denoise_seed_keys)} != batch size {batch_size}"
-            )
         T = int(params.num_inference_steps)
         if int(schedule.shape[0]) != T + 1:
             raise ValueError(f"HunyuanVideoDiffusionStage.diffuse: schedule length {schedule.shape[0]} != T+1={T + 1}")
@@ -322,7 +316,7 @@ class HunyuanVideoDiffusionStage(DiffusionStage[HunyuanVideoConditions]):
                 make_denoise_step_generators(
                     base_seed=int(denoise_base_seed),
                     step_index=i,
-                    sample_ids=[str(key) for key in denoise_seed_keys],
+                    sample_ids=denoise_seed_keys,
                 )
                 if step_eta > 0.0 and denoise_seed_keys is not None
                 else None

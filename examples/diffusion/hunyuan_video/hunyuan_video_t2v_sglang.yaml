@@ -69,7 +69,6 @@ backend:
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
-    # Keep LoRA optimizer masters in fp32 while forward compute stays bf16.
     master_dtype: fp32
     cpu_offload: false
     mixed_precision: true
@@ -122,12 +121,8 @@ rollout:
     tp_size: 1
     local_mode: true
     engine_kwargs:
-      # SGLang ignores request guidance_scale and reads Hunyuan's transformer
-      # guidance from PipelineConfig, then multiplies by 1000 (same as trainside).
-      # Default embedded_cfg_scale=6 would emit 6000 instead of recipe 1.0 -> 1000.
+      # Hunyuan guidance is PipelineConfig.embedded_cfg_scale, not request guidance_scale.
       embedded_cfg_scale: ${sampling.guidance_scale}
-      # Pin scheduler shift to the recipe. UniRL-shipped sigmas remain the
-      # schedule source of truth; without this, Hunyuan's PipelineConfig default is 7.
       flow_shift: ${model_config.shift}
   model_config: ${model_config}
   strategy: ${strategy}

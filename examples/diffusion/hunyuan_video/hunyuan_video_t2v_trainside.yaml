@@ -67,7 +67,6 @@ backend:
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
-    # Keep LoRA optimizer masters in fp32 while forward compute stays bf16.
     master_dtype: fp32
     cpu_offload: false
     mixed_precision: true

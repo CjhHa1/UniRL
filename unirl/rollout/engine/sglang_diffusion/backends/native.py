@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -101,22 +100,8 @@ class SGLangBackend:
     ) -> "SGLangBackend":
         """Resolve ServerArgs and model PipelineConfig intent, then build the generator."""
         rt = _import_sglang_runtime()
-        server_args_cls = rt["ServerArgs"]
-        # Global ServerArgs resolver for every model family. from_dict keeps
-        # PipelineConfig fields that live in server_intent / engine_kwargs
-        # (Hunyuan embedded_cfg_scale, flow_shift, ...). Filtering to ServerArgs
-        # fields first then calling from_kwargs drops those keys silently.
-        from_dict = getattr(server_args_cls, "from_dict", None)
-        if callable(from_dict):
-            server_args = from_dict(dict(server_intent))
-        else:
-            allowed = {f.name for f in dataclasses.fields(server_args_cls)}
-            server_kwargs = {k: v for k, v in server_intent.items() if k in allowed}
-            server_args = server_args_cls.from_kwargs(**server_kwargs)
-
-        disable_autocast = server_intent.get("disable_autocast")
-        if disable_autocast is not None:
-            server_args.disable_autocast = disable_autocast
+        # from_dict keeps PipelineConfig keys; filtering to ServerArgs fields drops them.
+        server_args = rt["ServerArgs"].from_dict(dict(server_intent))
 
         generator = rt["DiffGenerator"].from_pretrained(
             server_args=server_args,
