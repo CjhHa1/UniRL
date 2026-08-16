@@ -1,4 +1,4 @@
-"""HunyuanVideo-1.0 diffusion — 5D latents ``[B, C, T_lat, H_lat, W_lat]``; ``timestep = sigma * 1000``."""
+"""HunyuanVideo-1.0 diffusion — 5D latents ``[B, C, T_lat, H_lat, W_lat]``; timestep and guidance both ``* 1000``."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class HunyuanVideoDiffusionStep(DiffusionStep[HunyuanVideoBundle, HunyuanVideoCo
         *,
         guidance_scale: float,
     ) -> torch.Tensor:
-        """Transformer forward on ``sample [B, C, T_lat, H_lat, W_lat]``; guidance rides a ``[B]`` tensor, no CFG."""
+        """Transformer forward on ``sample [B, C, T_lat, H_lat, W_lat]``; guidance is ``scale * 1000``, no CFG."""
         text_llama = conditions.text_llama
         pooled_clip = conditions.pooled_clip
         if text_llama is None or text_llama.embeds is None:
@@ -62,7 +62,8 @@ class HunyuanVideoDiffusionStep(DiffusionStep[HunyuanVideoBundle, HunyuanVideoCo
             timestep = sigma
         timestep = timestep.to(device=device, dtype=dtype) * self.TIMESTEP_SCALE
 
-        guidance = torch.full((batch_size,), guidance_scale, device=device, dtype=dtype)
+        # Same 1000x embedding as official HunyuanVideo and SGLang DenoisingStage.
+        guidance = torch.full((batch_size,), guidance_scale, device=device, dtype=dtype) * self.TIMESTEP_SCALE
 
         hidden_states = sample.to(dtype)
 

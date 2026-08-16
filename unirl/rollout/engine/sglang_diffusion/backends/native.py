@@ -102,7 +102,10 @@ class SGLangBackend:
         """Resolve ServerArgs and model PipelineConfig intent, then build the generator."""
         rt = _import_sglang_runtime()
         server_args_cls = rt["ServerArgs"]
-        # from_dict routes model-specific intent such as guidance and flow shift into PipelineConfig.
+        # Global ServerArgs resolver for every model family. from_dict keeps
+        # PipelineConfig fields that live in server_intent / engine_kwargs
+        # (Hunyuan embedded_cfg_scale, flow_shift, ...). Filtering to ServerArgs
+        # fields first then calling from_kwargs drops those keys silently.
         from_dict = getattr(server_args_cls, "from_dict", None)
         if callable(from_dict):
             server_args = from_dict(dict(server_intent))
