@@ -1,12 +1,4 @@
-"""Contrastive rollout selection for Sol-RL-style diffusion training.
-
-The selector is deliberately independent from the rollout engine: it operates on
-an already-scored generation :class:`~unirl.types.sample.Part` and returns row
-indices in prompt-group order.  Keeping the original sample ids is load-bearing:
-the ids key UniRL's deterministic initial-noise recipe, so selecting rows (rather
-than rebuilding ``0..K-1`` children) makes the BF16 regeneration reuse exactly
-the scout candidates' :math:`x_T`.
-"""
+"""Contrastive rollout selection for Sol-RL-style diffusion training."""
 
 from __future__ import annotations
 
@@ -22,13 +14,7 @@ from unirl.types.sample import Part
 
 @dataclass(frozen=True)
 class ContrastiveRolloutConfig:
-    """Driver-owned two-stage rollout controls.
-
-    ``naive`` samples the full-step BF16 candidate pool and trains the selected
-    rows directly. ``scout_regen`` uses the separately configured scout pool only
-    as a ranking proxy, then regenerates the selected initial noises with the main
-    sampling config before training.
-    """
+    """Configure driver-owned two-stage rollout selection."""
 
     mode: str = "scout_regen"
     top_k: int = 8
@@ -81,13 +67,7 @@ def build_contrastive_config(value: Any) -> ContrastiveRolloutConfig | None:
 
 
 def select_top_bottom_indices(part: Part, *, top_k: int, bottom_k: int) -> torch.Tensor:
-    """Return deterministic top/bottom reward rows for every prompt group.
-
-    Groups must be contiguous and uniform, as produced by :meth:`Part.fork`.
-    Stable sorts make ties deterministic by retaining the original candidate
-    order.  Output stays group-contiguous (top rows followed by bottom rows),
-    preserving :meth:`Part.compute_advantages`' reshape invariant.
-    """
+    """Return deterministic top/bottom reward rows for every prompt group."""
 
     if part.rewards is None:
         raise ValueError("select_top_bottom_indices requires a scored Part.")
