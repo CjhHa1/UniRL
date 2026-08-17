@@ -11,12 +11,7 @@ from unirl.rollout.engine.base import BaseEngineConfig
 
 @dataclass
 class NativeSD3EngineConfig(BaseEngineConfig):
-    """A plain PyTorch SD3 pipeline owned by each rollout worker.
-
-    The engine exists for rapidly refreshed RL policies: it receives merged BF16
-    EMA weights over UniRL's existing NCCL full-weight channel and optionally
-    executes selected ``Linear`` layers with Hopper E4M3 FP8 during scout calls.
-    """
+    """Configure one worker-owned native SD3 rollout pipeline."""
 
     forward_batch_size: Optional[int] = None
     fp8_enabled: bool = True
