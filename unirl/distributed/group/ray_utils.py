@@ -42,12 +42,7 @@ def inspect_ready_actor_results(
     role_name: str,
     method_name: str,
 ) -> bool:
-    """Non-blocking probe: True iff all ranks succeeded; raise on a ready failure.
-
-    Peers still running (for example stuck in NCCL) stay pending. A rank that has
-    already failed is surfaced immediately so ``PendingHandleCall.ready`` /
-    ``RolloutPool`` do not wait for those peers.
-    """
+    """True iff every rank succeeded; raise on a ready failure without waiting for peers."""
     ordered_refs = list(refs)
     if not ordered_refs:
         return True
@@ -81,16 +76,7 @@ def get_actor_results(
     method_name: str,
     timeout: Optional[float] = None,
 ) -> List[Any]:
-    """Collect actor task refs in completion order while returning rank order.
-
-    A list passed directly to ``ray.get`` waits for every ref before surfacing a
-    rank-local failure. Polling one completion at a time lets the controller
-    poison the pool as soon as the first failed actor task becomes observable.
-
-    ``timeout`` bounds the whole gather, matching ``ray.get(refs, timeout=)``:
-    on expiry it raises ``GetTimeoutError`` and leaves the pool unpoisoned, since
-    a slow peer is not yet an observed rank failure.
-    """
+    """Collect refs in completion order, returning rank order; poison the pool on the first failure."""
     ordered_refs = list(refs)
     if not ordered_refs:
         return []
