@@ -251,12 +251,7 @@ class PendingHandleCall:
         self._value: Any = None
 
     def ready(self) -> bool:
-        """True once every worker succeeded. Raises on a ready rank-local error.
-
-        A failed rank is surfaced immediately even if peers are still pending
-        (for example stuck in NCCL). ``RolloutPool`` polls this path, so waiting
-        for every ref would hide the original error behind those peers.
-        """
+        """True when every rank succeeded; raise immediately on a ready rank-local error."""
         return inspect_ready_actor_results(
             self._refs,
             pool=self._handle.pool,
