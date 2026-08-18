@@ -1,4 +1,12 @@
-"""Build the local jsonl that ``qwen3_drpo_4b_base_dapo_sglang`` trains on.
+"""Build the local jsonl that ``qwen3_drpo_4b_base_dapo_sglang`` trains on."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+
+_HELP = """Build the local jsonl that ``qwen3_drpo_4b_base_dapo_sglang`` trains on.
 
 The AR data loader (``unirl/data/data_source.py``) reads a **local** jsonl of
 ``{"prompt": <str>, "metadata": {"answer": <str>}}`` records — it does not accept
@@ -10,7 +18,7 @@ that format so the recipe is reproducible without any private cache:
   - eval  : AIME 2024 + AIME 2025 (the paper's avg@16 benchmark), concatenated.
 
 Usage:
-  python scripts/prepare_dapo_math.py --out-dir data/dapo_math
+  python -m unirl.utils.prepare_dapo_math --out-dir data/dapo_math
   # → data/dapo_math/train.jsonl  (+ aime_eval.jsonl)
 
   DATA_PATH=data/dapo_math/train.jsonl EVAL_DATA_PATH=data/dapo_math/aime_eval.jsonl \
@@ -20,12 +28,6 @@ The HF ids below are sensible defaults; override with the flags if your source
 differs. The extractor handles the common verl RL schema (``prompt`` chat list +
 ``reward_model.ground_truth``) with fallbacks for plain problem/answer columns.
 """
-
-from __future__ import annotations
-
-import argparse
-import json
-import os
 
 BOXED_SUFFIX = "\n\nLet's think step by step and output the final answer within \\boxed{}."
 
@@ -60,13 +62,7 @@ def _extract_answer(row: dict) -> str | None:
 
 
 def _dedup_key(row: dict, prompt: str, answer: str) -> tuple[str, ...]:
-    """Return a stable identity for replicated source rows.
-
-    The public DAPO-Math-17k train split is materialized as 100 repeats of the
-    same 17,917 source ids.  Prefer that source id so distinct records with the
-    same prompt are preserved; schema-pruned fallbacks use the converted record
-    itself.
-    """
+    """Return a stable identity for replicated source rows."""
     extra_info = row.get("extra_info")
     if isinstance(extra_info, dict):
         for field in ("index", "id", "idx"):
@@ -119,7 +115,7 @@ def _convert(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-dir", default="data/dapo_math", help="output directory for the jsonl files")
     ap.add_argument("--dapo-hf", default="BytedTsinghua-SIA/DAPO-Math-17k", help="HF id for the train set")
     ap.add_argument("--dapo-split", default="train")

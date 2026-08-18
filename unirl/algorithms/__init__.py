@@ -1,14 +1,13 @@
-"""unirl stage-driven algorithms.
-
-Public surface for the ``models`` training contract.
-"""
+"""unirl stage-driven algorithms."""
 
 from __future__ import annotations
 
 from .bagel_flow_unigrpo import BagelFlowUniGRPO
 from .base import AlgorithmStepResult, StageAlgorithm
+from .cosmos3_sft import Cosmos3JointFlowMatchSFT
 from .cppo import CPPO, CPPOConfig
 from .diffusionnft import DiffusionNFT, DiffusionNFTConfig
+from .diffusionopd import DiffusionOPD, TeacherSpec
 from .dppo import DPPO, DPPOConfig
 from .drpo import DRPO, DRPOConfig
 from .flowdppo import FlowDPPO, FlowDPPOConfig
@@ -29,6 +28,7 @@ __all__ = [
     "PPOConfig",
     "CPPO",
     "CPPOConfig",
+    "Cosmos3JointFlowMatchSFT",
     "DPPO",
     "DPPOConfig",
     "DRPO",
@@ -39,6 +39,8 @@ __all__ = [
     "FlowGRPOConfig",
     "DiffusionNFT",
     "DiffusionNFTConfig",
+    "DiffusionOPD",
+    "TeacherSpec",
     "FlowDPPO",
     "FlowDPPOConfig",
     "StageAlgorithm",
