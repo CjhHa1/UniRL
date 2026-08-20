@@ -40,6 +40,7 @@ All in `runtime.py` unless noted.
 | --- | --- | --- |
 | `wrap_mp_process_for_children` | Re-installs the bundle inside every spawn child. **Must run first** | the rest of the bundle is empty |
 | `patch_dit_lora_loader` / `patch_ar_lora_loader` | Stock `DiffusionLoRAManager._load_adapter` loads only from a file path; RL pushes freshly-trained adapter tensors without a disk round-trip (`OmniTensorLoRARequest`). Lifted verbatim from verl-omni | vllm-omni's LoRA managers accept tensor-bag requests natively |
+| `patch_dit_hi3_lora_weights` | Resolves HI3 DiT `transformer.layers.*` wrappers against PEFT `model.layers.*` keys and converts GQA-interleaved fused-QKV LoRA-B rows to vLLM's packed `[q, k, v]` slices | [vllm-omni #6411](https://github.com/vllm-project/vllm-omni/issues/6411) is fixed and the pinned release includes it |
 | `patch_fp32_skip` | Punica kernels hard-assert dtype; HI3's MoE router gate is fp32, so non-fp16/bf16 layers must be skipped for LoRA wrapping | vllm's `from_layer` skips unsupported dtypes itself |
 | `patch_lora_request_passthrough` | `Omni.generate` never forwards `lora_request`, needed by the HI3 AR-prelude stage. Verified still absent at upstream main (~v0.22.0rc1); `AsyncOmniEngine.add_request` has accepted the kwarg all along, so a small upstream PR forwarding it would retire this | vllm-omni upstreams the kwarg (then the `ar_lora_passthrough` gate drops too) |
 | `patch_per_request_ar_seed` | One `SamplingParams` is shared across requests, so a GRPO group's N requests collapse to identical tokens | vllm-omni stops sharing one `SamplingParams` |
@@ -50,6 +51,25 @@ All in `runtime.py` unless noted.
 | `compat_tokenizer` (module) | HI3's `__init__` looks up `<img_ratio_36>` and computes `ratio_36 + 1`; the Base checkpoint ships ratio tokens 0-32 only → `TypeError: … 'NoneType' and 'int'`. Both the slow **and** fast tokenizer classes must be patched, not the shared base. The module import *is* the install trigger (it is the `HI3ARWorkerExtension` qualname target). Upstream ≥ v0.20.0 raises a clean `ValueError` instead — a better error, but the Base ckpt still needs this 0-fallback to work | Base-ckpt support is dropped (Instruct ships the tokens) |
 | `compat_hi3_lora` (module) | vllm 0.20 expects a flat `list[tuple[str, str, int, str]]` from `get_expert_mapping`; HI3 returns a 2-tuple, so `process_packed_modules_mapping` trips `ValueError: too many values to unpack` at boot under `enable_lora` | vllm handles the 2-tuple / HI3 returns the flat list |
 | `compat_qwen3_omni` (module) | Compatibility helpers for Qwen3-Omni on the pinned runtime | the pin carries them |
+
+## HI3 DiT LoRA namespace and layout
+
+HI3 is the only supported pipeline that sends one PEFT adapter to two engines
+with different module namespaces. The AR engine consumes `model.layers.*`,
+while the DiT manager registers the same projections as
+`transformer.layers.*`. Its stock lookup removes `transformer.` and asks for
+`layers.*`, which matches neither representation. The patch therefore retries
+the `model.layers.*` alias only when the manager owns a
+`HunyuanImage3Pipeline`; other diffusion pipelines retain the stock lookup
+unchanged.
+
+HI3's fused `qkv_proj` checkpoint rows are GQA-interleaved per KV head: each
+group contains its query heads followed by one K and one V head. The base-model
+loader converts that representation to contiguous `[q; k; v]` blocks, but the
+LoRA path does not. `_deinterleave_fused_qkv_lora_b` mirrors the base loader's
+reshape and split before returning `PackedLoRALayerWeights`. If the layer
+metadata cannot prove that layout, the patch raises instead of installing a
+known-invalid adapter.
 
 ## Gotchas
 

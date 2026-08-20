@@ -226,21 +226,18 @@ def patch_dit_lora_loader() -> None:
 
 
 def _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer):
-    """Split HI3's GQA-interleaved fused qkv ``lora_b`` into ``[q, k, v]`` slices.
-
-    Checkpoint rows are GQA-interleaved — per KV head, ``q_size // k_size`` query
-    slices then one K and one V — while vLLM's base weight is block ``[q; k; v]``
-    after ``_split_qkv_weight``, so ``lora_b`` must mirror that reshape-split or
-    every delta lands on the wrong output rows. Returns ``None`` when the layout
-    cannot be recognised.
-    """
+    """Split HI3's GQA-interleaved fused QKV LoRA-B into ``[q, k, v]`` slices."""
     if len(output_sizes) != 3:
         return None
     head_size = getattr(base_layer, "head_size", None)
     num_kv_heads = getattr(base_layer, "total_num_kv_heads", None)
-    if head_size is None or num_kv_heads is None:
+    if not isinstance(head_size, int) or head_size <= 0:
         return None
-    q_size, k_size, _v = output_sizes
+    if not isinstance(num_kv_heads, int) or num_kv_heads <= 0:
+        return None
+    q_size, k_size, v_size = output_sizes
+    if k_size <= 0 or v_size != k_size:
+        return None
     groups = q_size // k_size
     if groups * k_size != q_size or k_size != num_kv_heads * head_size:
         return None
@@ -253,92 +250,59 @@ def _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer):
     return [q_b.reshape(-1, rank), k_b.reshape(-1, rank), v_b.reshape(-1, rank)]
 
 
-def patch_dit_hi3_lora_module_alias() -> None:
-    """Resolve HI3 DiT LoRA lookups against the checkpoint's module namespace.
+def patch_dit_hi3_lora_weights() -> None:
+    """Resolve and safely repack HI3 DiT LoRA weights."""
+    try:
+        from vllm_omni.diffusion.models.hunyuan_image3.pipeline_hunyuan_image3 import (
+            HunyuanImage3Pipeline,
+        )
+    except (ImportError, AttributeError):
+        return
 
-    vLLM-Omni registers the HI3 DiT wrappers as ``transformer.layers.*`` while
-    PEFT stores the same projections as ``model.layers.*``; the stock lookup
-    strips ``transformer.`` and asks for a bare ``layers.*`` that matches neither.
-    Only HI3 — the other diffusion backbones are the top-level model, so their
-    vLLM module names already match PEFT's.
-    """
     original = DiffusionLoRAManager._get_lora_weights
-    if getattr(original, "_diffrl_hi3_module_alias", False):
+    if getattr(original, "_diffrl_hi3_lora_weights", False):
         return
 
     def wrapped(self, lora_model, full_module_name, _orig=original):
         weights = _orig(self, lora_model, full_module_name)
-        if weights is not None:
+        if not isinstance(getattr(self, "pipeline", None), HunyuanImage3Pipeline):
             return weights
+
         prefix = "transformer.layers."
-        if not full_module_name.startswith(prefix):
-            return None
-        return lora_model.get_lora("model.layers." + full_module_name[len(prefix) :])
+        if weights is None and full_module_name.startswith(prefix):
+            alias = "model.layers." + full_module_name[len(prefix) :]
+            weights = lora_model.get_lora(alias)
 
-    wrapped._diffrl_hi3_module_alias = True
-    DiffusionLoRAManager._get_lora_weights = wrapped
-
-
-def patch_dit_hi3_fused_qkv_lora_layout() -> None:
-    """Apply the fused-qkv de-interleave on the DiT manager's weight lookup.
-
-    The AR shim hooks ``MergedQKVParallelLinearWithLoRA.set_lora``, which the DiT
-    stage never reaches, so both hooks are needed. Must be installed *after*
-    :func:`patch_dit_hi3_lora_module_alias` — the alias makes the lookup resolve
-    at all, this makes what it resolves correct.
-    """
-    original = DiffusionLoRAManager._get_lora_weights
-    if getattr(original, "_diffrl_hi3_fused_qkv_layout", False):
-        return
-    if not getattr(original, "_diffrl_hi3_module_alias", False):
-        raise RuntimeError(
-            "patch_dit_hi3_fused_qkv_lora_layout must be installed after "
-            "patch_dit_hi3_lora_module_alias. Installed the other way round the "
-            "alias wraps the repack instead of feeding it, and HI3 qkv LoRA is "
-            "silently left in the interleaved layout."
-        )
-
-    warned: set[str] = set()
-
-    def decline(reason: str, module_name: str) -> None:
-        """Report a skipped repack once per distinct reason.
-
-        Returning the interleaved layout is the corruption this patch prevents,
-        so no path may skip quietly.
-        """
-        if reason in warned:
-            return
-        warned.add(reason)
-        logger.warning(
-            "HI3 fused-qkv LoRA repack skipped (%s), first seen on %s; the adapter stays "
-            "in HI3's interleaved layout and attention deltas land on the wrong output rows.",
-            reason,
-            module_name,
-        )
-
-    def wrapped(self, lora_model, full_module_name, _orig=original):
-        weights = _orig(self, lora_model, full_module_name)
-        if weights is None or isinstance(weights, PackedLoRALayerWeights):
+        if weights is None or not full_module_name.endswith(".qkv_proj"):
             return weights
-        if not isinstance(weights, LoRALayerWeights) or not full_module_name.endswith(".qkv_proj"):
+        if isinstance(weights, PackedLoRALayerWeights):
             return weights
 
+        def fail(reason: str) -> None:
+            raise RuntimeError(
+                f"Refusing to install HI3 fused-qkv LoRA for {full_module_name}: {reason}. "
+                "Applying the interleaved tensor would route attention deltas to the wrong output rows."
+            )
+
+        if not isinstance(weights, LoRALayerWeights):
+            fail(f"expected LoRALayerWeights, got {type(weights).__name__}")
         lora_b = weights.lora_b
         if not isinstance(lora_b, torch.Tensor) or lora_b.ndim != 2:
-            decline("lora_b is not a 2-D tensor", full_module_name)
-            return weights
+            fail("lora_b is not a 2-D tensor")
 
         lora_modules = getattr(self, "_lora_modules", None) or {}
         base_layer = getattr(lora_modules.get(full_module_name), "base_layer", None)
         output_sizes = [int(size) for size in (getattr(base_layer, "output_sizes", ()) or ())]
         if not output_sizes or int(lora_b.shape[0]) != sum(output_sizes):
-            decline("base layer exposes no output_sizes matching lora_b's rows", full_module_name)
-            return weights
+            fail("base layer exposes no output_sizes matching lora_b's rows")
 
         slices = _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer)
         if slices is None:
-            decline("GQA layout unrecognised (check head_size/total_num_kv_heads)", full_module_name)
-            return weights
+            fail("GQA layout is unrecognised (check head_size/total_num_kv_heads)")
+
+        scaling = float(getattr(weights, "scaling", 1.0))
+        if scaling != 1.0:
+            slices = [part * scaling for part in slices]
 
         return PackedLoRALayerWeights(
             module_name=weights.module_name,
@@ -349,10 +313,7 @@ def patch_dit_hi3_fused_qkv_lora_layout() -> None:
             scaling=[1.0, 1.0, 1.0],
         )
 
-    wrapped._diffrl_hi3_fused_qkv_layout = True
-    # Carry the alias marker forward so re-invoking either patch stays a no-op
-    # regardless of which one is currently outermost.
-    wrapped._diffrl_hi3_module_alias = True
+    wrapped._diffrl_hi3_lora_weights = True
     DiffusionLoRAManager._get_lora_weights = wrapped
 
 
@@ -695,11 +656,7 @@ class VLLMOmniHijack:
 
         patch_qwen3_omni_thinker_lora()
         patch_dit_lora_loader()
-        # Order matters: the alias makes the HI3 DiT lookup resolve at all, the
-        # repack makes what it resolves correct. Installing them the other way
-        # round leaves qkv interleaved (the repack raises if that is attempted).
-        patch_dit_hi3_lora_module_alias()
-        patch_dit_hi3_fused_qkv_lora_layout()
+        patch_dit_hi3_lora_weights()
         patch_ar_lora_loader()
         patch_ar_merged_lora_fused_tensor()
         patch_fp32_skip()
