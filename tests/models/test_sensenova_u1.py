@@ -34,7 +34,7 @@ def test_data_time_velocity_is_negated_for_sigma_solver() -> None:
         def predict_velocity(self, *args, sample, **kwargs):
             return torch.full_like(sample, 2.0)
 
-    state = torch.zeros(1, 2, 3)
+    state = torch.zeros(1, 2, 3, dtype=torch.bfloat16)
     next_state, log_prob, _ = ConstantVelocityStep().step_with_logp(
         None,
         None,
@@ -49,4 +49,5 @@ def test_data_time_velocity_is_negated_for_sigma_solver() -> None:
     # Upstream integrates dx/dt=2 over dt=0.5. The framework integrates over
     # decreasing sigma, so its noise prediction must be dx/dsigma=-2.
     torch.testing.assert_close(next_state, torch.ones_like(state))
+    assert next_state.dtype == torch.bfloat16
     assert log_prob is None

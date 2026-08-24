@@ -27,7 +27,7 @@ bundle:
     # model in fp32 masters and use bf16 only through mixed-precision compute.
     model_precision: fp32
     autocast_precision: bf16
-    trajectory_precision: fp32
+    trajectory_precision: bf16
     logprob_precision: fp32
     timestep_shift: 3.0
     attention_backend: auto
@@ -131,7 +131,7 @@ sampling:
   seed: 42
   init_same_noise: false
   autocast_precision: bf16
-  trajectory_precision: fp32
+  trajectory_precision: bf16
   logprob_precision: fp32
   scheduler:
     _target_: unirl.sde.index_schedule.AllSDEScheduler

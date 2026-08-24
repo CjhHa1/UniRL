@@ -183,6 +183,16 @@ class SenseNovaU1DiffusionStep:
             params=params,
             step_index=step_index,
         )
+        if float(eta) < 1e-7 and prev_sample is None:
+            # Match upstream t2i_generate exactly on deterministic steps: its
+            # Euler update runs in the trajectory dtype before the next model
+            # call. The generic FlowSDEStrategy promotes state and velocity to
+            # fp32 even when eta=0, which accumulates visible drift over 50
+            # BF16 inference steps.
+            data_time = 1.0 - sigma.to(device=sample.device)
+            next_data_time = 1.0 - sigma_next.to(device=sample.device)
+            next_sample = sample + (next_data_time - data_time) * velocity
+            return next_sample, None, None
         return strategy.denoise(
             noise_pred=-velocity,
             sample=sample,
