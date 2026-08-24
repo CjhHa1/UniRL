@@ -22,7 +22,10 @@ bundle:
   config:
     _target_: unirl.models.sensenova_u1.config.SenseNovaU1PipelineConfig
     pretrained_model_ckpt_path: ${oc.env:SENSENOVA_U1_PATH,sensenova/SenseNova-U1.5-8B-MoT-Preview}
-    model_precision: bf16
+    # Qwen3DecoderLayer interleaves frozen und and trainable gen parameters.
+    # FSDP2 requires one original dtype per shard group, so keep the complete
+    # model in fp32 masters and use bf16 only through mixed-precision compute.
+    model_precision: fp32
     autocast_precision: bf16
     trajectory_precision: fp32
     logprob_precision: fp32
