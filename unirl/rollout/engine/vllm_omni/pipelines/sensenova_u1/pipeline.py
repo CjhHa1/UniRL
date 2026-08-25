@@ -51,7 +51,9 @@ def _cache_row_to_cpu(cache: Any, row: int, batch_size: int) -> Any:
 def _capture_conditions(caches: Dict[str, Any], p: SimpleNamespace) -> Dict[str, List[Any]]:
     """Materialize the worker's prefix caches in the trainer replay format."""
     batch_size = int(p.batch_size)
-    use_cfg = float(p.cfg_scale) > 1.0
+    use_cfg = float(p.cfg_scale) > 1.0 and "uncond" in caches
+    if float(p.cfg_scale) > 1.0 and "img_cond" not in caches and "uncond" not in caches:
+        raise RuntimeError("SenseNova T2I CFG requested an unconditional branch, but the worker returned no cache.")
     condition_caches = [_cache_row_to_cpu(caches["cond"], row, batch_size) for row in range(batch_size)]
     if use_cfg:
         uncondition_caches = [_cache_row_to_cpu(caches["uncond"], row, batch_size) for row in range(batch_size)]
