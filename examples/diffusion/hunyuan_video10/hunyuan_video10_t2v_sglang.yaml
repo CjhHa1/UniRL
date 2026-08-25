@@ -29,7 +29,7 @@ logging:
 
 # Shared by the trainside replay pipeline and the SGLang rollout engine.
 model_config:
-  _target_: unirl.models.hunyuan_video.config.HunyuanVideoPipelineConfig
+  _target_: unirl.models.hunyuan_video10.config.HunyuanVideo10PipelineConfig
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,hunyuanvideo-community/HunyuanVideo}
   model_precision: bf16
   vae_use_tiling: true
@@ -45,11 +45,11 @@ strategy:
   _target_: unirl.sde.kernels.FlowSDEStrategy
 
 bundle:
-  _target_: unirl.models.hunyuan_video.bundle.HunyuanVideoBundle.from_config
+  _target_: unirl.models.hunyuan_video10.bundle.HunyuanVideo10Bundle.from_config
   config: ${model_config}
 
 pipeline:
-  _target_: unirl.models.hunyuan_video.pipeline.HunyuanVideoPipeline
+  _target_: unirl.models.hunyuan_video10.pipeline.HunyuanVideo10Pipeline
   shift: ${model_config.shift}
   hidden_state_skip_layer: ${model_config.hidden_state_skip_layer}
   autocast_precision: ${model_config.autocast_precision}
@@ -113,7 +113,7 @@ rollout:
   _target_: unirl.rollout.engine.sglang_diffusion.engine.SGLangDiffusionRolloutEngine
   config:
     _target_: unirl.rollout.engine.sglang_diffusion.config.SGLangDiffusionEngineConfig
-    model_family: hunyuan_video
+    model_family: hunyuan_video10
     populate_conditions: true
     init_same_noise: ${sampling.init_same_noise}
     forward_batch_size: 1
@@ -148,7 +148,7 @@ algorithm:
   old_logp_source: rollout
   conditions_cls:
     _target_: hydra.utils.get_class
-    path: unirl.models.hunyuan_video.conditions.HunyuanVideoConditions
+    path: unirl.models.hunyuan_video10.conditions.HunyuanVideo10Conditions
   params: ${sampling}
 
 stack:

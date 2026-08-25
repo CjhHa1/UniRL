@@ -25,9 +25,9 @@ logging:
   tags: [hunyuan_video10, t2v, grpo, trainside, lora-r64, v2]
 
 bundle:
-  _target_: unirl.models.hunyuan_video.bundle.HunyuanVideoBundle.from_config
+  _target_: unirl.models.hunyuan_video10.bundle.HunyuanVideo10Bundle.from_config
   config:
-    _target_: unirl.models.hunyuan_video.config.HunyuanVideoPipelineConfig
+    _target_: unirl.models.hunyuan_video10.config.HunyuanVideo10PipelineConfig
     pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,hunyuanvideo-community/HunyuanVideo}
     model_precision: bf16
     vae_use_tiling: true
@@ -35,7 +35,7 @@ bundle:
     hidden_state_skip_layer: 2
 
 pipeline:
-  _target_: unirl.models.hunyuan_video.pipeline.HunyuanVideoPipeline
+  _target_: unirl.models.hunyuan_video10.pipeline.HunyuanVideo10Pipeline
   shift: 5.0
   hidden_state_skip_layer: ${bundle.config.hidden_state_skip_layer}
   autocast_precision: bf16
@@ -132,7 +132,7 @@ algorithm:
   clip_schedule: constant
   conditions_cls:
     _target_: hydra.utils.get_class
-    path: unirl.models.hunyuan_video.conditions.HunyuanVideoConditions
+    path: unirl.models.hunyuan_video10.conditions.HunyuanVideo10Conditions
   params: ${sampling}
 
 stack:
