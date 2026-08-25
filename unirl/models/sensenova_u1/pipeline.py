@@ -38,7 +38,7 @@ class SenseNovaU1Pipeline(Pipeline):
         strategy: Optional[StepStrategy] = None,
         shift: float = 3.0,
         autocast_precision: str = "bf16",
-        trajectory_precision: str = "fp32",
+        trajectory_precision: str = "bf16",
         logprob_precision: str = "fp32",
     ) -> None:
         super().__init__()
@@ -145,23 +145,30 @@ class SenseNovaU1Pipeline(Pipeline):
         uncondition_caches = []
         condition_indexes = []
         uncondition_indexes = []
+        prefix_cache = {}
         with torch.no_grad(), self._autocast_ctx():
             for index, prompt in enumerate(texts.texts):
-                cache, image_indexes = self._build_prefix(
-                    str(prompt),
-                    conditional=True,
-                    image_shape=image_shape,
-                )
+                condition_key = ("condition", str(prompt), tuple(image_shape))
+                if condition_key not in prefix_cache:
+                    prefix_cache[condition_key] = self._build_prefix(
+                        str(prompt),
+                        conditional=True,
+                        image_shape=image_shape,
+                    )
+                cache, image_indexes = prefix_cache[condition_key]
                 condition_caches.append(cache)
                 condition_indexes.append(image_indexes)
 
                 if float(guidance_scale) > 1.0:
                     negative = negatives.texts[index] if negatives is not None else ""
-                    cache, image_indexes = self._build_prefix(
-                        str(negative),
-                        conditional=False,
-                        image_shape=image_shape,
-                    )
+                    uncondition_key = ("uncondition", str(negative), tuple(image_shape))
+                    if uncondition_key not in prefix_cache:
+                        prefix_cache[uncondition_key] = self._build_prefix(
+                            str(negative),
+                            conditional=False,
+                            image_shape=image_shape,
+                        )
+                    cache, image_indexes = prefix_cache[uncondition_key]
                 else:
                     cache, image_indexes = None, None
                 uncondition_caches.append(cache)

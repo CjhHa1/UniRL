@@ -36,6 +36,7 @@ class SenseNovaU1DiffusionParams(DiffusionSamplingParams):
     cfg_norm: str = "none"
     cfg_interval: Tuple[float, float] = (0.0, 1.0)
     t_eps: float = 0.02
+    trajectory_precision: str = "bf16"
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -78,6 +79,36 @@ class SenseNovaU1DiffusionStep:
         denominator = torch.sum(negative.square(), dim=1, keepdim=True) + 1e-8
         return numerator / denominator
 
+    def _apply_cfg(
+        self,
+        condition_velocity: torch.Tensor,
+        uncondition_velocity: torch.Tensor,
+        *,
+        guidance: float,
+        cfg_norm: str,
+        step_index: int,
+    ) -> torch.Tensor:
+        """Combine upstream conditional and unconditional velocity predictions."""
+        if cfg_norm == "cfg_zero_star":
+            if int(step_index) == 0:
+                return torch.zeros_like(condition_velocity)
+            alpha = self._optimized_scale(condition_velocity, uncondition_velocity).to(condition_velocity.dtype)
+            alpha = alpha.reshape(-1, 1, 1)
+            return uncondition_velocity * alpha + guidance * (condition_velocity - uncondition_velocity * alpha)
+
+        velocity = uncondition_velocity + guidance * (condition_velocity - uncondition_velocity)
+        if cfg_norm in {"global", "channel"}:
+            device_type = condition_velocity.device.type
+            if device_type == "mps":
+                device_type = "cpu"
+            norm_dims = (1, 2) if cfg_norm == "global" else -1
+            with torch.autocast(device_type=device_type, enabled=False):
+                condition_norm = torch.norm(condition_velocity, dim=norm_dims, keepdim=True)
+                guided_norm = torch.norm(velocity, dim=norm_dims, keepdim=True)
+                scale = (condition_norm / (guided_norm + 1e-8)).clamp(0.0, 1.0)
+            velocity = velocity * scale.to(velocity.dtype)
+        return velocity
+
     def predict_velocity(
         self,
         bundle: SenseNovaU1Bundle,
@@ -110,7 +141,11 @@ class SenseNovaU1DiffusionStep:
         sigma = sigma.to(device=device, dtype=torch.float32)
         data_time = 1.0 - sigma
         noise_scale = resolve_noise_scale(model, image_shape)
-        condition_velocity = bundle.transformer(
+        lo, hi = (float(v) for v in params.cfg_interval)
+        use_cfg = (
+            float(params.guidance_scale) > 1.0 and uncondition_cache is not None and lo <= float(data_time.item()) <= hi
+        )
+        prediction = bundle.transformer(
             "predict_velocity",
             normalized_pixels=normalized_pixels,
             packed_pixels=sample,
@@ -119,45 +154,19 @@ class SenseNovaU1DiffusionStep:
             data_time=data_time,
             image_shape=image_shape,
             noise_scale=noise_scale,
-            t_eps=float(params.t_eps),
-        )
-
-        lo, hi = (float(v) for v in params.cfg_interval)
-        use_cfg = (
-            float(params.guidance_scale) > 1.0 and uncondition_cache is not None and lo <= float(data_time.item()) <= hi
+            uncondition_image_indexes=uncondition_indexes if use_cfg else None,
+            uncondition_prefix_cache=uncondition_cache if use_cfg else None,
         )
         if not use_cfg:
-            return condition_velocity
-
-        uncondition_velocity = bundle.transformer(
-            "predict_velocity",
-            normalized_pixels=normalized_pixels,
-            packed_pixels=sample,
-            image_indexes=uncondition_indexes,
-            prefix_cache=uncondition_cache,
-            data_time=data_time,
-            image_shape=image_shape,
-            noise_scale=noise_scale,
-            t_eps=float(params.t_eps),
+            return prediction
+        condition_velocity, uncondition_velocity = prediction
+        return self._apply_cfg(
+            condition_velocity,
+            uncondition_velocity,
+            guidance=float(params.guidance_scale),
+            cfg_norm=params.cfg_norm,
+            step_index=step_index,
         )
-        guidance = float(params.guidance_scale)
-        if params.cfg_norm == "cfg_zero_star":
-            if int(step_index) == 0:
-                return torch.zeros_like(condition_velocity)
-            alpha = self._optimized_scale(condition_velocity, uncondition_velocity).to(condition_velocity.dtype)
-            alpha = alpha.reshape(-1, 1, 1)
-            return uncondition_velocity * alpha + guidance * (condition_velocity - uncondition_velocity * alpha)
-
-        velocity = uncondition_velocity + guidance * (condition_velocity - uncondition_velocity)
-        if params.cfg_norm == "global":
-            condition_norm = torch.linalg.vector_norm(condition_velocity.flatten(1), dim=1).reshape(-1, 1, 1)
-            guided_norm = torch.linalg.vector_norm(velocity.flatten(1), dim=1).reshape(-1, 1, 1)
-            velocity = velocity * (condition_norm / (guided_norm + 1e-8)).clamp(0.0, 1.0)
-        elif params.cfg_norm == "channel":
-            condition_norm = torch.linalg.vector_norm(condition_velocity, dim=-1, keepdim=True)
-            guided_norm = torch.linalg.vector_norm(velocity, dim=-1, keepdim=True)
-            velocity = velocity * (condition_norm / (guided_norm + 1e-8)).clamp(0.0, 1.0)
-        return velocity
 
     def step_with_logp(
         self,
@@ -183,7 +192,7 @@ class SenseNovaU1DiffusionStep:
             params=params,
             step_index=step_index,
         )
-        if float(eta) < 1e-7 and prev_sample is None:
+        if float(eta) < 1e-7 and prev_sample is None and isinstance(strategy, FlowSDEStrategy):
             # Match upstream t2i_generate exactly on deterministic steps: its
             # Euler update runs in the trajectory dtype before the next model
             # call. The generic FlowSDEStrategy promotes state and velocity to
@@ -193,15 +202,24 @@ class SenseNovaU1DiffusionStep:
             next_data_time = 1.0 - sigma_next.to(device=sample.device)
             next_sample = sample + (next_data_time - data_time) * velocity
             return next_sample, None, None
-        return strategy.denoise(
-            noise_pred=-velocity,
-            sample=sample,
+        noise_scale = resolve_noise_scale(bundle.model, tuple(conditions.image_shapes[0]))
+        unit_sample = sample / noise_scale
+        unit_velocity = velocity / noise_scale
+        unit_prev_sample = None if prev_sample is None else prev_sample / noise_scale
+        next_sample, log_prob, prev_mean = strategy.denoise(
+            noise_pred=-unit_velocity,
+            sample=unit_sample,
             sigma=sigma,
             sigma_next=sigma_next,
             eta=float(eta),
-            prev_sample=prev_sample,
+            prev_sample=unit_prev_sample,
             sigma_max=float(sigma_max),
             step_index=int(step_index),
+        )
+        return (
+            next_sample * noise_scale,
+            log_prob,
+            None if prev_mean is None else prev_mean * noise_scale,
         )
 
 
@@ -215,7 +233,7 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
         step: Optional[SenseNovaU1DiffusionStep] = None,
         strategy: Optional[StepStrategy] = None,
         autocast_precision: str = "bf16",
-        trajectory_precision: str = "fp32",
+        trajectory_precision: str = "bf16",
         logprob_precision: str = "fp32",
     ) -> None:
         self.model = model
@@ -233,17 +251,13 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
             return torch.autocast("cpu", torch.bfloat16)
         return nullcontext()
 
+    def _configure_t_eps(self, params: SenseNovaU1DiffusionParams) -> None:
+        """Apply the request-level inference clamp once before model forwards."""
+        self.model.model.config.t_eps = float(params.t_eps)
+
     @staticmethod
     def _single_conditions(conditions: SenseNovaU1Conditions, index: int) -> SenseNovaU1Conditions:
-        prompt, cond_cache, uncond_cache, cond_indexes, uncond_indexes, image_shape = conditions.single(index)
-        return SenseNovaU1Conditions(
-            prompts=[prompt],
-            condition_caches=[cond_cache],
-            uncondition_caches=[uncond_cache],
-            condition_image_indexes=[cond_indexes],
-            uncondition_image_indexes=[uncond_indexes],
-            image_shapes=[image_shape],
-        )
+        return conditions.slice(index, index + 1)
 
     def _diffuse_one(
         self,
@@ -268,6 +282,11 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
         state = initial_latents.to(device=device, dtype=self.trajectory_dtype) * noise_scale
 
         sde_set: Set[int] = set(int(i) for i in (params.sde_indices or []))
+        require(
+            not sde_set or float(params.eta) > 0.0,
+            "SenseNovaU1DiffusionStage: sde_indices are non-empty but eta=0, "
+            "so rollout would emit no transition log-probabilities.",
+        )
         needed = set(compute_trajectory_positions(sde_set, total_steps))
         needed.add(total_steps)
         stored: List[Tuple[int, torch.Tensor]] = []
@@ -317,6 +336,7 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
         initial_latents: Optional[torch.Tensor] = None,
     ) -> LatentSegment:
         """Sample each prompt independently to keep prefix caches batch-local."""
+        self._configure_t_eps(params)
         conditions.validate()
         device = torch.device(self.model.device)
         pixel_patch = int(self.model.model.patch_size) * int(1 / float(self.model.model.downsample_ratio))
@@ -362,22 +382,7 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
         ]
         if len(segments) == 1:
             return segments[0]
-        return LatentSegment(
-            latents=torch.cat([segment.latents for segment in segments], dim=0),
-            sigmas=segments[0].sigmas,
-            indices=segments[0].indices,
-            sde_logp=(
-                torch.cat([segment.sde_logp for segment in segments], dim=0)
-                if segments[0].sde_logp is not None
-                else None
-            ),
-            sde_means=(
-                torch.cat([segment.sde_means for segment in segments], dim=0)
-                if segments[0].sde_means is not None
-                else None
-            ),
-            sde_indices=segments[0].sde_indices,
-        )
+        return LatentSegment.concat(segments)
 
     def replay(
         self,
@@ -388,6 +393,7 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Recompute SDE transition likelihoods with gradients."""
+        self._configure_t_eps(params)
         if segment.sde_indices is None or segment.latents is None or segment.sigmas is None:
             raise ValueError("SenseNovaU1DiffusionStage.replay requires segment SDE indices, latents, and sigmas.")
         conditions.validate()
@@ -450,6 +456,7 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
         params: SenseNovaU1DiffusionParams,
     ) -> torch.Tensor:
         """Return the framework sigma-time velocity ``dx/dsigma``."""
+        self._configure_t_eps(params)
         with self._autocast_ctx():
             return -self.step.predict_velocity(
                 self.model,
@@ -457,7 +464,9 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
                 sample=sample,
                 sigma=sigma,
                 params=params,
-                step_index=0,
+                # This API has no schedule index. Treat it as a non-initial
+                # prediction so CFG-Zero* does not incorrectly zero every call.
+                step_index=-1,
             )
 
     def trainable_module(self) -> torch.nn.Module:

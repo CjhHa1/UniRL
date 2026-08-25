@@ -27,7 +27,7 @@ class SenseNovaU1PipelineConfig:
     device: Any = None
 
     autocast_precision: str = "bf16"
-    trajectory_precision: str = "fp32"
+    trajectory_precision: str = "bf16"
     logprob_precision: str = "fp32"
 
     timestep_shift: float = 3.0

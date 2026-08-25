@@ -2,12 +2,38 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Tuple
+
+import torch
 
 from unirl.config.require import require
 from unirl.distributed.tensor.batch import concat_field
 from unirl.types.conditions.base import Condition, Modality
+
+
+def _cache_tensors(cache: Any):
+    """Yield tensor attributes stored by Transformers cache layers."""
+    for layer in getattr(cache, "layers", ()):
+        for name in ("keys", "values", "flash_k_cache", "flash_v_cache"):
+            value = getattr(layer, name, None)
+            if isinstance(value, torch.Tensor):
+                yield layer, name, value
+
+
+def _move_cache(cache: Any, device: str | torch.device) -> Any:
+    """Move a Transformers cache without aliasing the source across devices."""
+    if cache is None:
+        return None
+    target = torch.device(device)
+    tensors = list(_cache_tensors(cache))
+    if all(value.device == target for _, _, value in tensors):
+        return cache
+    moved = copy.deepcopy(cache)
+    for layer, name, value in _cache_tensors(moved):
+        setattr(layer, name, value.to(target))
+    return moved
 
 
 @dataclass
@@ -71,6 +97,13 @@ class SenseNovaU1Conditions(Condition):
         """Write conditions into a generated Part."""
         self.validate()
         return {"sensenova_u1": self}
+
+    def to_device(self, device: str | torch.device) -> "SenseNovaU1Conditions":
+        """Move image indexes and opaque prefix KV caches together."""
+        moved = super().to_device(device)
+        moved.condition_caches = [_move_cache(cache, device) for cache in moved.condition_caches]
+        moved.uncondition_caches = [_move_cache(cache, device) for cache in moved.uncondition_caches]
+        return moved
 
 
 __all__ = ["SenseNovaU1Conditions"]

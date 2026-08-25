@@ -19,8 +19,6 @@ from .vendor.neo_unify.transformers_compat import pretrained_dtype_kwargs
 
 logger = logging.getLogger(__name__)
 
-SENSENOVA_U1_FSDP_BLOCK_CLASS = "Qwen3DecoderLayer"
-
 
 def _set_generation_trainability(model: nn.Module, *, enabled: bool) -> int:
     """Freeze the shared/understanding path and optionally unfreeze the image branch."""
@@ -73,8 +71,9 @@ class SenseNovaU1TrainableModel(nn.Module):
         data_time: torch.Tensor,
         image_shape: tuple[int, int],
         noise_scale: float,
-        t_eps: float,
-    ) -> torch.Tensor:
+        uncondition_image_indexes: Optional[torch.Tensor] = None,
+        uncondition_prefix_cache: Any = None,
+    ) -> Any:
         model = self.model
         height, width = (int(v) for v in image_shape)
         patch = int(model.patch_size)
@@ -100,8 +99,7 @@ class SenseNovaU1TrainableModel(nn.Module):
             )
         image_embeds = image_embeds + timestep_embeddings
 
-        model.config.t_eps = float(t_eps)
-        return model._t2i_predict_v(
+        condition_velocity = model._t2i_predict_v(
             image_embeds,
             image_indexes,
             {"full_attention": None},
@@ -112,6 +110,20 @@ class SenseNovaU1TrainableModel(nn.Module):
             timestep_embeddings=timestep_embeddings,
             image_size=(width, height),
         )
+        if uncondition_prefix_cache is None:
+            return condition_velocity
+        uncondition_velocity = model._t2i_predict_v(
+            image_embeds,
+            uncondition_image_indexes,
+            {"full_attention": None},
+            uncondition_prefix_cache,
+            data_time,
+            packed_pixels,
+            image_token_num=image_tokens,
+            timestep_embeddings=timestep_embeddings,
+            image_size=(width, height),
+        )
+        return condition_velocity, uncondition_velocity
 
 
 class SenseNovaU1Bundle(Bundle):
@@ -216,7 +228,6 @@ class SenseNovaU1Bundle(Bundle):
 
 
 __all__ = [
-    "SENSENOVA_U1_FSDP_BLOCK_CLASS",
     "SenseNovaU1Bundle",
     "SenseNovaU1TrainableModel",
 ]

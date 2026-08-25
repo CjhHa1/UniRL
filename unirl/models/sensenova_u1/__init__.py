@@ -1,6 +1,6 @@
 """SenseNova-U1.5 NEO-Unify pixel-flow support."""
 
-from .bundle import SENSENOVA_U1_FSDP_BLOCK_CLASS, SenseNovaU1Bundle
+from .bundle import SenseNovaU1Bundle
 from .conditions import SenseNovaU1Conditions
 from .config import SENSENOVA_U1_GEN_LORA_TARGETS, SenseNovaU1PipelineConfig
 from .diffusion import (
@@ -11,7 +11,6 @@ from .diffusion import (
 from .pipeline import SenseNovaU1Pipeline
 
 __all__ = [
-    "SENSENOVA_U1_FSDP_BLOCK_CLASS",
     "SENSENOVA_U1_GEN_LORA_TARGETS",
     "SenseNovaU1Bundle",
     "SenseNovaU1Conditions",
