@@ -13,6 +13,9 @@ from unirl.rollout.engine.vllm_omni.adapters.sensenova_u1 import (
     SenseNovaU1OutputAdapter,
     SenseNovaU1T2IAdapter,
 )
+from unirl.rollout.engine.vllm_omni.pipelines.sensenova_u1.weight_names import (
+    missing_weight_sync_names,
+)
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample
 
@@ -118,11 +121,12 @@ def test_sensenova_output_adapter_flattens_grouped_images_and_prefix_caches() ->
             final_output_type="image",
             stage_id=0,
             images=[Image.new("RGB", (64, 32)), Image.new("RGB", (64, 32))],
-            trajectory_latents=torch.zeros(2, 5, 1, 1),
+            trajectory_latents=torch.zeros(2, 4, 1, 1),
             trajectory_timesteps=params.sigmas,
             trajectory_log_probs=torch.zeros(2, 2),
             custom_output={
                 "sde_step_indices": [1, 3],
+                "trajectory_indices": [1, 2, 3, 4],
                 "sensenova_u1_capture": capture,
             },
         )
@@ -138,3 +142,23 @@ def test_sensenova_output_adapter_flattens_grouped_images_and_prefix_caches() ->
     assert conditions.image_shapes == [(32, 64)] * 4
     assert len(frontier.primitives["image"]) == 4
     assert frontier.segment.latents.shape[0] == 4
+    assert frontier.segment.indices.tolist() == [1, 2, 3, 4]
+
+
+def test_sensenova_weight_sync_names_cover_fused_worker_layout() -> None:
+    parameter_names = {
+        "language_model.model.layers.0.self_attn.qkv_proj_mot_gen.weight",
+        "language_model.model.layers.0.mlp_mot_gen.gate_up_proj.weight",
+        "fm_modules.fm_head.conv1.weight",
+    }
+    incoming = [
+        "language_model.model.layers.0.self_attn.q_proj_mot_gen.weight",
+        "language_model.model.layers.0.self_attn.k_proj_mot_gen.weight",
+        "language_model.model.layers.0.self_attn.v_proj_mot_gen.weight",
+        "language_model.model.layers.0.mlp_mot_gen.gate_proj.weight",
+        "language_model.model.layers.0.mlp_mot_gen.up_proj.weight",
+        "fm_modules.fm_head.conv1.weight",
+    ]
+
+    assert missing_weight_sync_names(incoming, parameter_names) == []
+    assert missing_weight_sync_names([*incoming, "unknown.weight"], parameter_names) == ["unknown.weight"]

@@ -22,7 +22,11 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import (
     resolve_request_noise,
 )
+from unirl.rollout.engine.vllm_omni.pipelines.sensenova_u1.weight_names import (
+    missing_weight_sync_names,
+)
 from unirl.sde.kernels import FlowSDEStrategy
+from unirl.types.sampling import compute_trajectory_positions
 from unirl.utils.dtypes import parse_torch_dtype
 
 
@@ -54,12 +58,17 @@ def _capture_conditions(caches: Dict[str, Any], p: SimpleNamespace) -> Dict[str,
     use_cfg = float(p.cfg_scale) > 1.0 and "uncond" in caches
     if float(p.cfg_scale) > 1.0 and "img_cond" not in caches and "uncond" not in caches:
         raise RuntimeError("SenseNova T2I CFG requested an unconditional branch, but the worker returned no cache.")
-    condition_caches = [_cache_row_to_cpu(caches["cond"], row, batch_size) for row in range(batch_size)]
+    # One engine request contains multiple outputs of the same prompt. Prefix
+    # caches and indexes are therefore identical expanded views; copy them once
+    # and preserve aliases so pickle sends one payload per prompt group.
+    condition_cache = _cache_row_to_cpu(caches["cond"], 0, batch_size)
+    condition_index = caches["idx_cond"].detach().to("cpu").clone()
+    condition_caches = [condition_cache] * batch_size
     if use_cfg:
-        uncondition_caches = [_cache_row_to_cpu(caches["uncond"], row, batch_size) for row in range(batch_size)]
-        uncondition_indexes: List[Optional[torch.Tensor]] = [
-            caches["idx_uncond"].detach().to("cpu").clone() for _ in range(batch_size)
-        ]
+        uncondition_cache = _cache_row_to_cpu(caches["uncond"], 0, batch_size)
+        uncondition_index = caches["idx_uncond"].detach().to("cpu").clone()
+        uncondition_caches = [uncondition_cache] * batch_size
+        uncondition_indexes: List[Optional[torch.Tensor]] = [uncondition_index] * batch_size
     else:
         uncondition_caches = [None] * batch_size
         uncondition_indexes = [None] * batch_size
@@ -68,7 +77,7 @@ def _capture_conditions(caches: Dict[str, Any], p: SimpleNamespace) -> Dict[str,
         "prompts": [str(p.prompt)] * batch_size,
         "condition_caches": condition_caches,
         "uncondition_caches": uncondition_caches,
-        "condition_image_indexes": [caches["idx_cond"].detach().to("cpu").clone() for _ in range(batch_size)],
+        "condition_image_indexes": [condition_index] * batch_size,
         "uncondition_image_indexes": uncondition_indexes,
         "image_shapes": [(int(p.image_size[1]), int(p.image_size[0]))] * batch_size,
     }
@@ -132,6 +141,16 @@ class RLSenseNovaU1Pipeline(SenseNovaU1Pipeline):
             ns.image_prediction = ns.image_prediction.to(dtype=p.trajectory_dtype)
         return ns
 
+    def validate_weight_sync_names(self, weights: List[tuple[str, torch.Tensor]]) -> None:
+        """Reject full-weight buckets containing names this pipeline would skip."""
+        parameter_names = set(dict(self.named_parameters()))
+        missing = missing_weight_sync_names((name for name, _ in weights), parameter_names)
+        if missing:
+            sample = ", ".join(missing[:5])
+            raise RuntimeError(
+                f"SenseNova full-weight sync would silently skip {len(missing)} parameter(s); first names: [{sample}]"
+            )
+
     def _run_denoising_loop(
         self,
         ns: SimpleNamespace,
@@ -150,7 +169,13 @@ class RLSenseNovaU1Pipeline(SenseNovaU1Pipeline):
         if sde_indices and p.eta <= 0.0:
             raise ValueError("RLSenseNovaU1Pipeline: non-empty sde_indices require eta > 0.")
 
-        trajectory = [_patchify(image_prediction, self.patch_size * merge_size).detach().clone()]
+        trajectory_positions = set(compute_trajectory_positions(set(sde_indices), int(p.num_steps)))
+        trajectory_positions.add(int(p.num_steps))
+        stored_positions: List[int] = []
+        trajectory: List[torch.Tensor] = []
+        if 0 in trajectory_positions:
+            stored_positions.append(0)
+            trajectory.append(_patchify(image_prediction, self.patch_size * merge_size).detach().clone())
         log_probs: List[torch.Tensor] = []
         generator = torch.Generator(self.device).manual_seed(int(p.sde_seed))
 
@@ -205,7 +230,9 @@ class RLSenseNovaU1Pipeline(SenseNovaU1Pipeline):
                 z = z + (t_next - t) * velocity
 
             z = z.to(dtype=p.trajectory_dtype)
-            trajectory.append(z.detach().clone())
+            if step_i + 1 in trajectory_positions:
+                stored_positions.append(step_i + 1)
+                trajectory.append(z.detach().clone())
             image_prediction = _unpatchify(
                 z,
                 self.patch_size * merge_size,
@@ -220,6 +247,7 @@ class RLSenseNovaU1Pipeline(SenseNovaU1Pipeline):
         images = _to_pil(image_prediction)
         custom_output: Dict[str, Any] = {
             "sde_step_indices": list(sorted(sde_indices)),
+            "trajectory_indices": stored_positions,
             "sensenova_u1_capture": _capture_conditions(caches, p),
         }
         if think_text:

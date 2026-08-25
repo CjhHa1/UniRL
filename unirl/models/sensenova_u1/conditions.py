@@ -36,6 +36,21 @@ def _move_cache(cache: Any, device: str | torch.device) -> Any:
     return moved
 
 
+def _move_shared_caches(caches: List[Any], device: str | torch.device) -> List[Any]:
+    """Move each distinct cache once while preserving same-prompt aliases."""
+    memo: Dict[int, Any] = {}
+    moved: List[Any] = []
+    for cache in caches:
+        if cache is None:
+            moved.append(None)
+            continue
+        key = id(cache)
+        if key not in memo:
+            memo[key] = _move_cache(cache, device)
+        moved.append(memo[key])
+    return moved
+
+
 @dataclass
 class SenseNovaU1Conditions(Condition):
     """Frozen text-prefix caches and spatial metadata, one entry per sample."""
@@ -101,8 +116,8 @@ class SenseNovaU1Conditions(Condition):
     def to_device(self, device: str | torch.device) -> "SenseNovaU1Conditions":
         """Move image indexes and opaque prefix KV caches together."""
         moved = super().to_device(device)
-        moved.condition_caches = [_move_cache(cache, device) for cache in moved.condition_caches]
-        moved.uncondition_caches = [_move_cache(cache, device) for cache in moved.uncondition_caches]
+        moved.condition_caches = _move_shared_caches(moved.condition_caches, device)
+        moved.uncondition_caches = _move_shared_caches(moved.uncondition_caches, device)
         return moved
 
 

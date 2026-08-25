@@ -147,19 +147,21 @@ def test_condition_cache_moves_with_indexes() -> None:
             )
         ]
     )
+    indexes = torch.zeros(3, 1, dtype=torch.long)
     conditions = SenseNovaU1Conditions(
-        prompts=["prompt"],
-        condition_caches=[cache],
-        uncondition_caches=[None],
-        condition_image_indexes=[torch.zeros(3, 1, dtype=torch.long)],
-        uncondition_image_indexes=[None],
-        image_shapes=[(32, 32)],
+        prompts=["prompt", "prompt"],
+        condition_caches=[cache, cache],
+        uncondition_caches=[None, None],
+        condition_image_indexes=[indexes, indexes],
+        uncondition_image_indexes=[None, None],
+        image_shapes=[(32, 32), (32, 32)],
     )
 
     moved = conditions.to_device("meta")
 
     assert moved.condition_caches[0].layers[0].keys.device.type == "meta"
     assert moved.condition_caches[0].layers[0].values.device.type == "meta"
+    assert moved.condition_caches[0] is moved.condition_caches[1]
     assert moved.condition_image_indexes[0].device.type == "meta"
     assert cache.layers[0].keys.device.type == "cpu"
 
