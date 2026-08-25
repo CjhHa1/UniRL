@@ -11,6 +11,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.sd3.pipeline_sd3 import StableDiffusion3Pipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from unirl.rollout.engine.vllm_omni.pipelines._shared.flow_match_sde_scheduler import (
     FlowMatchSDEDiscreteScheduler,
@@ -21,12 +22,17 @@ from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import (
     inject_latents,
     make_sde_scheduler,
     resolve_request_noise,
-    stamp_custom_output,
+    single_request,
+    stamp_capture,
 )
 
 
 class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
     """SD3.5 pipeline with the RL interception protocol installed."""
+
+    # Upstream SD3 opts into request batching; RL rollout does not — see
+    # ``single_request``. The engine enforces max_num_seqs=1 in return.
+    supports_request_batch = False
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
@@ -145,22 +151,30 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
 
     def _harvest_conditioning(self, out: DiffusionOutput) -> None:
         if self._captured_conditioning is not None:
-            stamp_custom_output(out, "text_capture", self._captured_conditioning)
+            stamp_capture(out, "text_capture", self._captured_conditioning)
 
-    def forward(self, req: OmniDiffusionRequest, **kwargs) -> DiffusionOutput:
+    def forward(self, req: DiffusionRequestBatch, **kwargs) -> list[DiffusionOutput]:
+        """Single-request batch in, one-element list out.
+
+        Upstream's ``forward`` became batched in vllm-omni 0.26 and returns
+        ``list[DiffusionOutput]``; ``supports_request_batch = False`` keeps the
+        batch at one so the arm/harvest pair stays per-request.
+        """
+        one = single_request(req, caller="RLStableDiffusion3Pipeline.forward")
         self._install_sde_scheduler()
         self._install_conditioning_tap()
         self._install_t5_truncation_workaround()
 
-        self._arm_sde(req)
-        self._arm_initial_noise(req)
+        self._arm_sde(one)
+        self._arm_initial_noise(one)
         self._arm_conditioning_tap()
 
-        out = super().forward(req, **kwargs)
+        outs = super().forward(req, **kwargs)
 
+        out = outs[0]
         self._harvest_trajectory(out)
         self._harvest_conditioning(out)
-        return out
+        return outs
 
 
 __all__ = ["RLStableDiffusion3Pipeline"]

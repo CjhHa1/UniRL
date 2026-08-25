@@ -26,15 +26,84 @@ def detach_cpu_pair(p: Any) -> Any:
     return p
 
 
-def stamp_custom_output(out: Any, key: str, value: Any) -> None:
-    """Write onto ``DiffusionOutput.custom_output``."""
-    if out.custom_output is None:
-        out.custom_output = {}
-    out.custom_output[key] = value
+#: Metadata group namespacing every unirl capture. vllm-omni validates only
+#: its own groups (video/audio/actions/transfer/text/common) and tolerates
+#: unknown ones, so a private group cannot collide with upstream.
+CAPTURE_GROUP = "unirl"
 
 
-def drain_trajectory_into(out: Any, scheduler: Any) -> None:
-    """Harvest the SDE scheduler's recordings; ``trajectory_timesteps`` is the true ``[0, 1]`` sigma schedule."""
+def single_request(req: Any, *, caller: str) -> Any:
+    """The one request of a ``DiffusionRequestBatch``.
+
+    vllm-omni 0.26 made ``forward`` take a batch unconditionally, so every RL
+    pipeline is handed a ``DiffusionRequestBatch`` even on the single-request
+    path. The RL pipelines all declare ``supports_request_batch = False``,
+    which makes the engine reject ``max_num_seqs > 1`` at boot and guarantees
+    this batch holds exactly one request — the invariant per-request
+    trajectory capture depends on. Assert it rather than trust it.
+    """
+    requests = getattr(req, "requests", None)
+    if requests is None:
+        return req
+    if len(requests) != 1:
+        raise RuntimeError(
+            f"{caller}: expected a single-request batch (supports_request_batch=False), got {len(requests)}. "
+            "Set max_num_seqs=1 on this stage."
+        )
+    return requests[0]
+
+
+def stamp_capture(out: Any, key: str, value: Any, *, payload_key: str = "image") -> None:
+    """Export a capture on ``DiffusionOutput.output``'s metadata envelope.
+
+    vllm-omni 0.26 deleted ``DiffusionOutput.custom_output`` (#4922) and moved
+    pipeline-specific payloads onto the output envelope
+    ``{"payload": ..., "metadata": ...}``; the metadata reaches the driver as
+    ``OmniRequestOutput.multimodal_output["metadata"]``. Upstream migrated its
+    own RL-with-logprob pipeline this exact way in the same commit.
+
+    Upstream pipelines return a bare tensor in ``output``, so the first stamp
+    wraps it into the envelope under ``payload_key`` (``"video"`` for hv15).
+    That wrap is what ``unirl_postprocess_shim`` unwraps before handing the
+    tensor to the model's own postprocess, which is tensor-only for every
+    family except Qwen-Image.
+    """
+    envelope = out.output
+    if not (isinstance(envelope, dict) and isinstance(envelope.get("payload"), dict)):
+        envelope = {"payload": {payload_key: envelope}}
+        out.output = envelope
+    metadata = envelope.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        raise RuntimeError(f"stamp_capture: output['metadata'] must be a dict, got {type(metadata).__name__}")
+    metadata.setdefault(CAPTURE_GROUP, {})[key] = value
+
+
+def read_captures(result: Any) -> Dict[str, Any]:
+    """Driver-side inverse of :func:`stamp_capture`.
+
+    Reads the unirl group out of ``OmniRequestOutput.multimodal_output``,
+    which is where vllm-omni deposits the envelope's metadata.
+    """
+    mm = getattr(result, "multimodal_output", None) or {}
+    if not isinstance(mm, dict):
+        return {}
+    metadata = mm.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return {}
+    captures = metadata.get(CAPTURE_GROUP) or {}
+    return captures if isinstance(captures, dict) else {}
+
+
+def drain_trajectory_into(out: Any, scheduler: Any, *, payload_key: str = "image") -> None:
+    """Harvest the SDE scheduler's per-request recordings onto the wire.
+
+    ``trajectory_timesteps`` carries the **true [0, 1] sigma schedule** —
+    what the driver reads back as ``LatentSegment.sigmas`` and what replay
+    indexes per step. The original 1000-scale per-step timesteps are dropped
+    (trivially regenerable from σ). The real sparse SDE step ids ride
+    ``custom_output["sde_step_indices"]`` so the response layer can echo
+    them as the segment's ``sde_indices``.
+    """
     traj = scheduler.drain_trajectory()
     if traj is None:
         return
@@ -42,7 +111,7 @@ def drain_trajectory_into(out: Any, scheduler: Any) -> None:
     out.trajectory_latents = latents
     out.trajectory_timesteps = sigmas
     out.trajectory_log_probs = log_probs
-    stamp_custom_output(out, "sde_step_indices", scheduler.last_sde_step_indices)
+    stamp_capture(out, "sde_step_indices", scheduler.last_sde_step_indices, payload_key=payload_key)
 
 
 def _grouped_span(idx: int, spp: int) -> tuple[int, int]:
@@ -120,12 +189,15 @@ def make_sde_scheduler(upstream_config: Any, *, eta: float = 0.0) -> FlowMatchSD
 
 
 __all__ = [
+    "CAPTURE_GROUP",
     "detach_cpu",
     "detach_cpu_pair",
     "drain_trajectory_into",
     "_grouped_span",
     "inject_latents",
     "make_sde_scheduler",
+    "read_captures",
     "resolve_request_noise",
-    "stamp_custom_output",
+    "single_request",
+    "stamp_capture",
 ]
