@@ -11,7 +11,7 @@
 # Layout: 1 node × 8 GPUs, all colocated; no weight sync section.
 #
 # Launch (1 node x 8 GPUs):
-#   bash examples/run_experiment_single_node.sh diffusion/hunyuan_video/hunyuan_video10_t2v_trainside
+#   bash examples/run_experiment_single_node.sh diffusion/hunyuan_video10/hunyuan_video10_t2v_trainside
 
 num_devices: 8
 batch_size: 8                # prompts_per_rollout for the validated 1x8-GPU run
@@ -22,7 +22,7 @@ logging:
   project_name: ${oc.env:WANDB_PROJECT,unirl-grpo-t2v}
   run_name: hunyuan_video10_t2v_trainside
   entity: ${oc.env:WANDB_ENTITY,null}
-  tags: [hunyuan_video, t2v, grpo, trainside, lora-r64, v2]
+  tags: [hunyuan_video10, t2v, grpo, trainside, lora-r64, v2]
 
 bundle:
   _target_: unirl.models.hunyuan_video.bundle.HunyuanVideoBundle.from_config

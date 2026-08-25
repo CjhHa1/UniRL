@@ -10,7 +10,7 @@
 # merged transformer. This avoids the known online-SGLang-LoRA delta mismatch.
 #
 # Launch (1 node x 8 GPUs):
-#   bash examples/run_experiment_single_node.sh diffusion/hunyuan_video/hunyuan_video10_t2v_sglang
+#   bash examples/run_experiment_single_node.sh diffusion/hunyuan_video10/hunyuan_video10_t2v_sglang
 
 num_devices: 8
 batch_size: 8
@@ -22,7 +22,7 @@ logging:
   project_name: ${oc.env:WANDB_PROJECT,unirl-grpo-t2v}
   run_name: ${oc.env:WANDB_RUN_NAME,hunyuan_video10_t2v_sglang}
   entity: ${oc.env:WANDB_ENTITY,null}
-  tags: [hunyuan_video, t2v, grpo, sglang, loramerge, lora-r64, v2]
+  tags: [hunyuan_video10, t2v, grpo, sglang, loramerge, lora-r64, v2]
   log_media: false
   media_max_items: 8
   media_log_interval: 1
