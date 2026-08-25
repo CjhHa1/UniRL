@@ -580,9 +580,11 @@ def patch_hi3_flow_alignment() -> None:
     except (ImportError, AttributeError):
         return
 
-    _ImageKVCacheManager = _trans.ImageKVCacheManager
-    _DecoderLayer = _trans.HunyuanImage3DecoderLayer
+    _ImageKVCacheManager = getattr(_trans, "ImageKVCacheManager", None)
+    _DecoderLayer = getattr(_trans, "HunyuanImage3DecoderLayer", None)
 
+    if _ImageKVCacheManager is None or _DecoderLayer is None:
+        return
     if not hasattr(_ImageKVCacheManager, "_save_image_kv_caches"):
         return
 
