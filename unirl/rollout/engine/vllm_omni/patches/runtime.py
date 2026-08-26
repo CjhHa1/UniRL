@@ -549,7 +549,32 @@ def patch_per_request_ar_seed() -> None:
 
 
 def patch_master_port_unstrip() -> None:
-    """Keep ``master_port`` alive through ``AsyncOmniEngine._strip_single_engine_args``."""
+    """Keep ``master_port`` alive through ``AsyncOmniEngine._strip_single_engine_args``.
+
+    At the v0.20.0 pin the ``stage_configs_path`` route strips parent
+    ``EngineArgs`` fields (including ``master_port``) from the kwargs that
+    become ``base_engine_args`` for the per-stage YAML merge
+    (``async_omni_engine.py:1558``), and the post-resolution injection loop
+    only re-adds ``enable_sleep_mode`` / ``lora_path`` / ``lora_scale``.
+    Net effect: the engine-reserved per-replica master-port base NEVER
+    reaches ``OmniDiffusionConfig``, so every stage settles from the shared
+    ``(None or 30005) + random(0, 100)`` window with only the 37-stride
+    bind-check scan for collision avoidance (``diffusion/data.py:578``).
+    Eight colocated replicas race that window; fast-booting models (SD3.5)
+    happened to win, slow-booting ones (Qwen-Image, ~35s weight load) lose
+    the check-to-bind TOCTOU and die with ``DistNetworkError ... port:
+    30005, code: -98`` (LIN-382 qwen probe, 2026-06-07).
+
+    Re-attach the caller's ``master_port`` to the stripped dict so the
+    existing ``load_stage_configs_from_yaml`` ``base_engine_args`` merge
+    lands it per stage. Stage-YAML keys still win (none of ours define
+    ``master_port``); the settle scan stays as the TOCTOU fallback.
+
+    STILL NEEDED at v0.27.0rc1: #3803 only changed the settling math. The
+    strip itself remains, because ``master_port`` is a vllm ``EngineArgs``
+    field and is absent from ``_PARENT_ARGS_KEEP``. The env ``MASTER_PORT``
+    now outranks the kwarg, which the boot seam handles separately.
+    """
     try:
         from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 
@@ -571,84 +596,6 @@ def patch_master_port_unstrip() -> None:
         pass
 
 
-def patch_hi3_flow_alignment() -> None:
-    """Port of vllm-omni eed27812 to v0.20.0's older KV-cache API; silent skip on any other version."""
-    try:
-        from vllm_omni.diffusion.models.hunyuan_image3 import (
-            hunyuan_image3_transformer as _trans,
-        )
-    except (ImportError, AttributeError):
-        return
-
-    _ImageKVCacheManager = _trans.ImageKVCacheManager
-    _DecoderLayer = _trans.HunyuanImage3DecoderLayer
-
-    if not hasattr(_ImageKVCacheManager, "_save_image_kv_caches"):
-        return
-
-    import threading as _threading
-
-    _tls = _threading.local()
-
-    _orig_save = _ImageKVCacheManager._save_image_kv_caches
-    if not getattr(_orig_save, "_diffrl_hi3_flow_aligned", False):
-
-        def _patched_save_image_kv_caches(self, key, value, seq_len):
-            assert key.shape[1] == seq_len, f"first-step q_len({key.shape[1]}) != seq_len({seq_len})"
-            self.image_kv_cache_map = (key.contiguous(), value.contiguous())
-
-        _patched_save_image_kv_caches._diffrl_hi3_flow_aligned = True  # type: ignore[attr-defined]
-        _ImageKVCacheManager._save_image_kv_caches = _patched_save_image_kv_caches
-
-    _orig_update = _ImageKVCacheManager._update_image_kv_caches
-    if not getattr(_orig_update, "_diffrl_hi3_flow_aligned", False):
-
-        def _patched_update_image_kv_caches(self, key, value, seq_len, position_ids=None):
-            cached_key, cached_value = self.image_kv_cache_map
-            bs, q_len = key.shape[0], key.shape[1]
-            if position_ids is None:
-                position_ids = getattr(_tls, "position_ids", None)
-            assert cached_key.dim() == 4, (
-                f"patch_hi3_flow_alignment expects a 4-D cache from the patched "
-                f"_save_image_kv_caches; got dim={cached_key.dim()}."
-            )
-            assert position_ids is not None and position_ids.shape == (bs, q_len), (
-                f"position_ids missing or wrong shape: {None if position_ids is None else tuple(position_ids.shape)} "
-                f"!= ({bs}, {q_len})"
-            )
-            result_k = cached_key.clone()
-            result_v = cached_value.clone()
-            for b in range(bs):
-                result_k[b].index_copy_(0, position_ids[b], key[b])
-                result_v[b].index_copy_(0, position_ids[b], value[b])
-            return result_k.contiguous(), result_v.contiguous()
-
-        _patched_update_image_kv_caches._diffrl_hi3_flow_aligned = True  # type: ignore[attr-defined]
-        _ImageKVCacheManager._update_image_kv_caches = _patched_update_image_kv_caches
-
-    _orig_decoder = _DecoderLayer.forward
-    if not getattr(_orig_decoder, "_diffrl_hi3_flow_aligned", False):
-
-        def _patched_decoder_forward(
-            self,
-            hidden_states,
-            attention_mask=None,
-            position_ids=None,
-            *args,
-            _orig=_orig_decoder,
-            **kwargs,
-        ):
-            _prev = getattr(_tls, "position_ids", None)
-            _tls.position_ids = position_ids
-            try:
-                return _orig(self, hidden_states, attention_mask, position_ids, *args, **kwargs)
-            finally:
-                _tls.position_ids = _prev
-
-        _patched_decoder_forward._diffrl_hi3_flow_aligned = True  # type: ignore[attr-defined]
-        _DecoderLayer.forward = _patched_decoder_forward
-
-
 class VLLMOmniHijack:
     """Monkey-patches vllm-omni internals to support in-memory LoRA tensors."""
 
@@ -665,7 +612,6 @@ class VLLMOmniHijack:
         patch_lora_request_passthrough()
         patch_per_request_ar_seed()
         patch_sigmas_passthrough()
-        patch_hi3_flow_alignment()
         patch_master_port_unstrip()
         patch_moe_workspace_pool()
 
@@ -673,7 +619,6 @@ class VLLMOmniHijack:
 __all__ = [
     "OmniTensorLoRARequest",
     "VLLMOmniHijack",
-    "patch_hi3_flow_alignment",
     "patch_per_request_ar_seed",
     "patch_sigmas_passthrough",
 ]

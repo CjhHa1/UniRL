@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import contextmanager
 from pprint import pformat
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -93,6 +94,26 @@ def _assemble_omni_kwargs(intent: Dict[str, Any]) -> Dict[str, Any]:
     return omni_kwargs
 
 
+@contextmanager
+def _master_port_env_yielded(active: bool):
+    """Drop ``MASTER_PORT`` from the env so an injected ``master_port`` is honored.
+
+    Since #3803 (v0.21.0rc2) vllm-omni's ``_resolve_master_port`` ranks the env
+    var *above* the explicit kwarg, and the trainer's DevicePool bakes its own
+    group's ``MASTER_PORT`` into every spawned process — so leaving it set makes
+    every stage settle from the training port instead of our reserved base. The
+    trainer still needs it afterwards, hence the restore.
+    """
+    saved = os.environ.pop("MASTER_PORT", None) if active else None
+    if saved is not None:
+        logger.info("VLLM-Omni boot: withheld MASTER_PORT=%s so the injected master_port wins", saved)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.environ["MASTER_PORT"] = saved
+
+
 class VLLMOmniBackend:
     """The native ``Backend`` impl over the ``Omni`` orchestrator."""
 
@@ -159,11 +180,12 @@ class VLLMOmniBackend:
             try:
                 if lock_file is not None:
                     fcntl.flock(lock_file, fcntl.LOCK_EX)
-                omni = rt["Omni"](
-                    model=str(intent["model_path"]),
-                    stage_configs_path=yaml_path,
-                    **omni_kwargs,
-                )
+                with _master_port_env_yielded("master_port" in omni_kwargs):
+                    omni = rt["Omni"](
+                        model=str(intent["model_path"]),
+                        stage_configs_path=yaml_path,
+                        **omni_kwargs,
+                    )
             finally:
                 if lock_file is not None:
                     fcntl.flock(lock_file, fcntl.LOCK_UN)
