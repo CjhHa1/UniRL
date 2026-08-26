@@ -68,15 +68,7 @@ _VIDEO_PROCESSOR = None
 
 
 def _video_frames_from_captures(diff_out: Any) -> List[Any]:
-    """Recover a video sample's PIL frames from the decoded-video tensor the RL
-    pipeline stamped onto the unirl metadata group as ``rl_decoded_video``.
-
-    The engine decodes video to PIL frames, but those don't survive the engine
-    worker->client wire (only tensors carried on the output envelope's
-    metadata / trajectory_*
-    cross). The hv15 RL pipeline stamps the decoded tensor ``[B, C, F, H, W]``
-    (``B == 1`` per request) so we can rebuild the frames here for the reward.
-    """
+    """Recover a video sample's PIL frames from the captured ``rl_decoded_video`` tensor."""
     vid = read_captures(diff_out).get("rl_decoded_video")
     if vid is None or not torch.is_tensor(vid):
         return []
@@ -128,25 +120,7 @@ def build_image_segment(
     *,
     expected_sigmas: Optional[torch.Tensor] = None,
 ) -> Any:
-    """Build ``LatentSegment`` from the DiT stage's per-request outputs.
-
-    Each per-prompt result carries its own ``trajectory_latents`` /
-    ``trajectory_log_probs`` (``[1, T+1, ...]`` / ``[1, K]`` — with
-    ``runtime.max_inflight=1`` they are NOT shared refs to a full-batch
-    tensor); concatenate across outputs to recover ``[B, T+1, ...]`` /
-    ``[B, K]``. ``sigmas`` / ``indices`` / ``sde_indices`` are sample-shared,
-    read off the first output:
-
-    - ``sigmas`` from ``trajectory_timesteps`` — the field name reads
-      "timesteps" but the ``RL*Pipeline.forward`` overwrites its contents with
-      the true [0, 1] σ schedule (``[T+1]``); do not "fix" the misnomer.
-      Verified against ``expected_sigmas`` (the engine-pinned diffusion params)
-      via :func:`verify_engine_used_sigmas` so a broken wire surfaces here.
-    - ``sde_logp`` from ``trajectory_log_probs`` ``[B, K]`` (K = SDE-gated
-      step count; can be < T for sparse SDE, 0 for NFT/forward-process).
-    - ``indices`` — dense ``arange(T+1)`` storage slots; ``sde_indices`` — the
-      sparse step ids echoed via the unirl metadata group's ``sde_step_indices``.
-    """
+    """Build ``LatentSegment`` from the DiT stage's per-request outputs."""
     per_latents: List[torch.Tensor] = []
     per_log_probs: List[torch.Tensor] = []
     for diff_out in diff_outputs:

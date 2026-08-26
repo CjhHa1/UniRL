@@ -75,19 +75,7 @@ def _build_prompt_entries(
 
 
 def hi3_fused_conditions(diff_outputs: List[OmniRawResult], *, modality: str) -> Dict[str, Any]:
-    """The HI3 DiT replay conditions — concat the ``fused_mm_capture`` dicts.
-
-    Reads the unirl metadata group's ``fused_mm_capture`` — written by
-    ``RLHunyuanImage3Pipeline`` after intercepting
-    ``prepare_inputs_for_generation``. For think_recaption mode different
-    prompts produce different AR output lengths → different ``L`` per
-    capture; right-pad shorter sequences to ``max_L`` (pad 0 for input_ids,
-    False for masks) so the dim-0 concat works. t2i scope: the it2i
-    ``cond_*`` fields stay unpopulated. ``rope_cache`` is deliberately NOT
-    shipped: the engine's rope tables use vllm-omni's own layout and are not
-    compatible with the HF-side replay forward — replay rebuilds rope
-    natively from ``gen_image_mask`` (see ``models/hunyuan_image3/diffusion.py``).
-    """
+    """The HI3 DiT replay conditions — concat the ``fused_mm_capture`` dicts."""
     captures = [read_captures(d).get("fused_mm_capture") for d in diff_outputs]
     if any(c is None for c in captures):
         raise RuntimeError(

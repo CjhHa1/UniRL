@@ -97,10 +97,7 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         self._captured_conditioning = None
 
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
-        """Initial-noise injection point (consume-once; upstream signature:
-        ``(batch_size, height, width, num_frames, dtype, device, generator,
-        latents)`` — the slots are read off that signature, which sd3's no
-        longer matches)."""
+        """Initial-noise injection point (consume-once); same dtype@4 / device@5 / latents@7 slots as SD3."""
         upstream = super().prepare_latents
         noise = self._pending_initial_noise
         if noise is not None:
@@ -138,11 +135,7 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
             stamp_capture(out, "text_capture", self._captured_conditioning, payload_key=_PAYLOAD_KEY)
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
-        """Single-request batch in, single output out — see ``single_request``.
-
-        HunyuanVideo 1.5 is non-batching upstream, so its ``forward`` already
-        returns one ``DiffusionOutput`` for the batch.
-        """
+        """Single-request batch in, single output out — see ``single_request``."""
         one = single_request(req, caller="RLHunyuanVideo15Pipeline.forward")
         self._install_sde_scheduler()
         self._install_conditioning_tap()

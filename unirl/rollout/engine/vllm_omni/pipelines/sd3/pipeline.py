@@ -137,14 +137,7 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
     # run-phase interception — upstream-called name, cannot be renamed
 
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
-        """Initial-noise injection point: bypass upstream RNG when the driver
-        supplied an x_T. Upstream only calls ``randn_tensor`` when its
-        ``latents`` arg is ``None``; slotting our tensor in skips the draw
-        and leaves the body unchanged. (No diffusers-style
-        ``init_noise_sigma`` scaling — Flow-Match noise is unit-variance at
-        t=1, so the tensor IS the start-of-denoise state.) Consume-once:
-        a CFG-driven second call falls back to upstream behavior.
-        """
+        """Initial-noise injection point: bypass upstream RNG when the driver supplied an x_T."""
         upstream = super().prepare_latents
         noise = self._pending_initial_noise
         if noise is not None:
@@ -161,12 +154,7 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
             stamp_capture(out, "text_capture", self._captured_conditioning)
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> list[DiffusionOutput]:
-        """Single-request batch in, one-element list out.
-
-        Upstream's ``forward`` became batched in vllm-omni 0.26 and returns
-        ``list[DiffusionOutput]``; ``supports_request_batch = False`` keeps the
-        batch at one so the arm/harvest pair stays per-request.
-        """
+        """Single-request batch in, one-element list out."""
         one = single_request(req, caller="RLStableDiffusion3Pipeline.forward")
         self._install_sde_scheduler()
         self._install_conditioning_tap()

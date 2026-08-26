@@ -332,12 +332,7 @@ class RLBagelPipeline(BagelPipeline):
         drain_trajectory_into(out, self._sde_scheduler)
 
     def _is_batchable_t2i(self, req: DiffusionRequestBatch) -> bool:
-        """Packed DiT batching: pure text→image at cfg=1 only.
-
-        Reject i2i / text-output modalities (upstream routing) and CFG>1 (needs
-        unreplicated cfg_* branches). Missing CFG keys are NOT 1.0 — upstream
-        defaults absent keys to CFG-ON (4.0 / 1.5).
-        """
+        """Packed DiT batching: pure text→image at cfg=1 only."""
         fp = req.prompts[0] if getattr(req, "prompts", None) else None
         if isinstance(fp, dict):
             modalities = fp.get("modalities") or []
@@ -351,12 +346,7 @@ class RLBagelPipeline(BagelPipeline):
         return extra["cfg_text_scale"] <= 1.0 and extra["cfg_img_scale"] <= 1.0
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
-        """Single-request batch in, single output out — see ``single_request``.
-
-        The ``spp`` branch below is intra-request packing
-        (``num_outputs_per_prompt``), which is unrelated to request batching
-        and stays.
-        """
+        """Single-request batch in, single output out — see ``single_request``."""
         one = single_request(req, caller="RLBagelPipeline.forward")
         self._install_sde_scheduler()
         self._install_noise_tap()
@@ -390,11 +380,7 @@ class RLBagelPipeline(BagelPipeline):
         return out
 
     def _forward_batched(self, req: DiffusionRequestBatch, spp: int, **kwargs) -> DiffusionOutput:
-        """Pack ``spp`` same-prompt images into ONE ``generate_image``.
-
-        Prompt KV is built once and replicated spp×; noise tap packs spp image
-        blocks + driver x_T. Reuse upstream's decode of latents[0]; decode the rest.
-        """
+        """Pack ``spp`` same-prompt images into ONE ``generate_image``."""
         one = single_request(req, caller="RLBagelPipeline._forward_batched")
         self._install_generate_image_tap()
         ds = int(self.bagel.latent_downsample)

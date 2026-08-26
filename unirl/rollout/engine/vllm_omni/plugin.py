@@ -1,12 +1,4 @@
-"""vllm-omni general plugin: teach the model postprocessors about the capture envelope.
-
-vllm-omni 0.26 deleted ``DiffusionOutput.custom_output``, so RL captures now ride
-the output envelope (see ``pipelines._shared.interception.stamp_capture``). Only
-Qwen-Image's postprocess understands that shape; the other four hand whatever they
-get to ``image_processor.postprocess`` and choke on a dict. Registered as a
-``vllm_omni.general_plugins`` entry point because that loads in the stage process,
-the only place the postprocess can be wrapped before the engine resolves it.
-"""
+"""vllm-omni general plugin: teach the model postprocessors about the capture envelope."""
 
 from __future__ import annotations
 

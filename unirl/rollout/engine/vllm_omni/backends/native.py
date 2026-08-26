@@ -42,13 +42,7 @@ def _import_omni_runtime() -> Dict[str, Any]:
 
 
 def _resolve_stage_yaml(name: str, source: str) -> str:
-    """Return the absolute path of the stage-config YAML asset.
-
-    Every YAML ships in ``stage_configs/`` next to this package, including the
-    two AR-only HI3 comprehension configs vendored there once vllm-omni
-    deleted ``model_executor/stage_configs/`` in #3172. The upstream loader
-    requires an absolute path and raises on bare names.
-    """
+    """Return the absolute path of the stage-config YAML asset."""
     if source != "local":
         raise ValueError(
             f"_resolve_stage_yaml: unknown source {source!r} (expected 'local'). "
@@ -96,14 +90,7 @@ def _assemble_omni_kwargs(intent: Dict[str, Any]) -> Dict[str, Any]:
 
 @contextmanager
 def _master_port_env_yielded(active: bool):
-    """Drop ``MASTER_PORT`` from the env so an injected ``master_port`` is honored.
-
-    Since #3803 (v0.21.0rc2) vllm-omni's ``_resolve_master_port`` ranks the env
-    var *above* the explicit kwarg, and the trainer's DevicePool bakes its own
-    group's ``MASTER_PORT`` into every spawned process — so leaving it set makes
-    every stage settle from the training port instead of our reserved base. The
-    trainer still needs it afterwards, hence the restore.
-    """
+    """Drop ``MASTER_PORT`` from the env so an injected ``master_port`` is honored."""
     saved = os.environ.pop("MASTER_PORT", None) if active else None
     if saved is not None:
         logger.info("VLLM-Omni boot: withheld MASTER_PORT=%s so the injected master_port wins", saved)

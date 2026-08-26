@@ -46,7 +46,6 @@ All in `runtime.py` unless noted.
 | `patch_per_request_ar_seed` | One `SamplingParams` is shared across requests, so a GRPO group's N requests collapse to identical tokens | vllm-omni stops sharing one `SamplingParams` |
 | `patch_qwen3_omni_thinker_lora` | Backport of vllm-omni #3915: expose the Thinker LoRA interface, select `thinker_config` during model init, accept the current M-RoPE signature | pin vllm-omni ≥ 0.22 |
 | `patch_sigmas_passthrough` | HI3's DiT `scheduler.set_timesteps` never receives `sampling_params.sigmas` | upstream forwards `sigmas` itself |
-| `patch_hi3_flow_alignment` | Port of upstream `eed27812` to the pinned v0.20.0 KV-cache API | pin ≥ v0.21 — upstream removed the v0.20.0 `ImageKVCacheManager` API, so the patch self-skips there and is dead code once the pin moves |
 | `install_fate_sharing` | `PR_SET_PDEATHSIG` is bound by Linux to the **specific creating thread**, so arming it for children of short-lived init threads kills healthy workers; and a worker inside a CUDA/NCCL call never observes vLLM's `death_pipe` EOF | vllm's own child-reaping is thread-safe |
 | `compat_tokenizer` (module) | HI3's `__init__` looks up `<img_ratio_36>` and computes `ratio_36 + 1`; the Base checkpoint ships ratio tokens 0-32 only → `TypeError: … 'NoneType' and 'int'`. Both the slow **and** fast tokenizer classes must be patched, not the shared base. The module import *is* the install trigger (it is the `HI3ARWorkerExtension` qualname target). Upstream ≥ v0.20.0 raises a clean `ValueError` instead — a better error, but the Base ckpt still needs this 0-fallback to work | Base-ckpt support is dropped (Instruct ships the tokens) |
 | `compat_hi3_lora` (module) | vllm 0.20 expects a flat `list[tuple[str, str, int, str]]` from `get_expert_mapping`; HI3 returns a 2-tuple, so `process_packed_modules_mapping` trips `ValueError: too many values to unpack` at boot under `enable_lora` | vllm handles the 2-tuple / HI3 returns the flat list |
@@ -80,5 +79,3 @@ known-invalid adapter.
   submodules, loaded lazily — `import unirl.rollout.engine.vllm_omni.patches` must
   not pull vllm.
 - **Every patch needs a DELETE-WHEN row.** Without one it is permanent by default.
-- **`patch_hi3_flow_alignment` self-skips on newer pins** — it is dead code, not a
-  live patch, once the pin moves past v0.20.0.

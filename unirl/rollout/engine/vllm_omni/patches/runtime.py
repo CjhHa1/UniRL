@@ -549,32 +549,7 @@ def patch_per_request_ar_seed() -> None:
 
 
 def patch_master_port_unstrip() -> None:
-    """Keep ``master_port`` alive through ``AsyncOmniEngine._strip_single_engine_args``.
-
-    At the v0.20.0 pin the ``stage_configs_path`` route strips parent
-    ``EngineArgs`` fields (including ``master_port``) from the kwargs that
-    become ``base_engine_args`` for the per-stage YAML merge
-    (``async_omni_engine.py:1558``), and the post-resolution injection loop
-    only re-adds ``enable_sleep_mode`` / ``lora_path`` / ``lora_scale``.
-    Net effect: the engine-reserved per-replica master-port base NEVER
-    reaches ``OmniDiffusionConfig``, so every stage settles from the shared
-    ``(None or 30005) + random(0, 100)`` window with only the 37-stride
-    bind-check scan for collision avoidance (``diffusion/data.py:578``).
-    Eight colocated replicas race that window; fast-booting models (SD3.5)
-    happened to win, slow-booting ones (Qwen-Image, ~35s weight load) lose
-    the check-to-bind TOCTOU and die with ``DistNetworkError ... port:
-    30005, code: -98`` (LIN-382 qwen probe, 2026-06-07).
-
-    Re-attach the caller's ``master_port`` to the stripped dict so the
-    existing ``load_stage_configs_from_yaml`` ``base_engine_args`` merge
-    lands it per stage. Stage-YAML keys still win (none of ours define
-    ``master_port``); the settle scan stays as the TOCTOU fallback.
-
-    STILL NEEDED at v0.27.0rc1: #3803 only changed the settling math. The
-    strip itself remains, because ``master_port`` is a vllm ``EngineArgs``
-    field and is absent from ``_PARENT_ARGS_KEEP``. The env ``MASTER_PORT``
-    now outranks the kwarg, which the boot seam handles separately.
-    """
+    """Keep ``master_port`` alive through ``AsyncOmniEngine._strip_single_engine_args``."""
     try:
         from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 

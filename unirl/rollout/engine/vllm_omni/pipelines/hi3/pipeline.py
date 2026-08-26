@@ -1,50 +1,4 @@
-"""RL-aware HunyuanImage3 pipeline subclass.
-
-``forward`` follows the RL interception protocol (see
-``pipelines/_shared/interception.py``): **install** (once) → **arm** (every
-request) → run (upstream) → **harvest**. The interceptions, mapped to
-upstream's stages
-(``vllm_omni/diffusion/models/hunyuan_image3/pipeline_hunyuan_image3.py:300``):
-
-- SDE scheduler swap (behavior policy + dense-trajectory recorder), built
-  with explicit HI3 kwargs and routed through the inner pipeline's
-  ``set_scheduler`` hook (``hunyuan_image3_transformer.py:2547-2548``, which
-  calls ``register_modules`` so the diffusers component graph stays
-  consistent). Installed regardless of eta — ``resp_to_samples`` requires
-  ``segment.latents`` and only this scheduler captures the trajectory.
-- A conditioning **tap** on the transformer's
-  ``prepare_inputs_for_generation``: captures the fused multimodal tensors
-  (``input_ids`` / ``attention_mask`` / ``position_ids`` /
-  ``gen_image_mask`` / ``gen_timestep_scatter_index``) on the **first**
-  per-request call — subsequent steps under KV-cache reuse pass the
-  gathered-down ``L'`` slice which is not what training-side replay needs.
-  ``custom_pos_emb`` is deliberately NOT captured: the engine builds its rope
-  with vllm-omni's own ``build_2d_rope`` n_elem convention ([.., 64] tables),
-  which is not layout-compatible with the HF-side replay forward's
-  ``apply_rotary_pos_emb`` ([.., 128]); replay rebuilds rope natively from
-  ``gen_image_mask`` instead. Read back driver-side as ``conditions["fused"]``
-  for ``HunyuanImage3DiffusionConditions.from_dict``.
-- An initial-noise **injection** wrapping the inner pipeline's
-  ``prepare_latents``: HI3's DiT latent shape is AR-dynamic (only known once
-  upstream resolves ``image_size`` post-AR), so the driver ships a RECIPE
-  (seed + per-sample gids), not a tensor; the injector fills the resolved
-  shape and regenerates byte-identical x_T via ``NoiseRecipe``.
-
-``trajectory_timesteps`` carries the **true [0, 1] sigma schedule** (what
-replay indexes as ``segment.sigmas``); the 1000-scale per-step timesteps are
-dropped (regenerable). Exports ride ``trajectory_*`` + the unirl metadata group
-only — plain runtime attrs on ``DiffusionOutput`` are filtered during the
-worker→parent IPC.
-
-Everything else — system-prompt resolution, AR-bridged
-``ar_generated_text``, it2i conditioning via ``batch_cond_image_info``,
-generator/seed/CFG, the denoise loop itself — is handled by upstream's
-``forward`` at ``pipeline_hunyuan_image3.py:1262-1347``.
-
-This class is loaded inside vLLM-Omni's worker subprocess via
-``custom_pipeline_args.pipeline_class`` injected from our static stage
-configs (``stage_configs/hunyuan_image3_t2i_rl.yaml`` and ``..._it2i_rl.yaml``).
-"""
+"""RL-aware HunyuanImage3 pipeline — ``trajectory_timesteps`` carries the true ``[0, 1]`` sigma schedule."""
 
 from __future__ import annotations
 
@@ -200,11 +154,7 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
             stamp_capture(out, "fused_mm_capture", self._captured_conditioning)
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
-        """Single-request batch in, single output out — see ``single_request``.
-
-        HunyuanImage3 declares ``supports_request_batch = False`` upstream, so
-        its ``forward`` already returns one ``DiffusionOutput`` for the batch.
-        """
+        """Single-request batch in, single output out — see ``single_request``."""
         one = single_request(req, caller="RLHunyuanImage3Pipeline.forward")
         # Installs materialize the inner pipeline; they must precede arming.
         self._install_sde_scheduler()
