@@ -40,6 +40,12 @@ dependencies = [
   "tensordict>=0.5",
 ]
 
+# Loaded by vllm-omni's prepare_engine_environment in every stage process,
+# which is the only place the diffusion postprocess can be wrapped before the
+# engine resolves it. Inert unless vllm-omni is installed.
+[project.entry-points."vllm_omni.general_plugins"]
+unirl_envelope_postprocess = "unirl.rollout.engine.vllm_omni.plugin:register_envelope_postprocess"
+
 [project.optional-dependencies]
 # sglang pinned to the upstream release the UniRL sglang patch package
 # (unirl/rollout/engine/sglang_diffusion/_patches/, LIN-365) is verified against
