@@ -23,6 +23,7 @@ because plugins may be loaded more than once per process.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any, Callable, Dict
 
@@ -67,6 +68,12 @@ def _envelope_aware(func: Callable[..., Any]) -> Callable[..., Any]:
             "metadata": _merge_metadata(dict(normalized.metadata), captures),
         }
 
+    # The engine decides whether to pass ``sampling_params`` with
+    # ``_func_accepts_parameter``, which reads ``inspect.signature`` and treats a
+    # ``**kwargs`` as "accepts anything". Without the ``__wrapped__`` that
+    # ``functools.wraps`` sets, every model's postprocess would look like it
+    # takes ``sampling_params`` and the ones that do not would raise on it.
+    functools.update_wrapper(wrapped, func)
     setattr(wrapped, _PATCH_FLAG, True)
     return wrapped
 
