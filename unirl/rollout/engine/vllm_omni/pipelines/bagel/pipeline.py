@@ -190,8 +190,7 @@ class RLBagelPipeline(BagelPipeline):
             return
 
         original_generate_image = self.bagel.generate_image
-        # vllm-omni 0.27 moved the model's _merge_naive_caches onto the cache
-        # class as NaiveCache.merge; the call shape is unchanged.
+        # vllm-omni 0.27 moved _merge_naive_caches onto the cache as NaiveCache.merge.
         merge_kv_caches = NaiveCache.merge
         pipeline = self
 

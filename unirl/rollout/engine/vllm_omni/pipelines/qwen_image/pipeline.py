@@ -31,8 +31,7 @@ from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import (
 class RLQwenImagePipeline(QwenImagePipeline):
     """Qwen-Image pipeline with the RL interception protocol installed."""
 
-    # Upstream Qwen-Image opts into request batching; RL rollout does not — see
-    # ``single_request``. The engine enforces max_num_seqs=1 in return.
+    # Upstream opts into request batching; RL rollout does not — see ``single_request``.
     supports_request_batch = False
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:

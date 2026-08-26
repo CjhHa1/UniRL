@@ -1,8 +1,5 @@
-# Vendored from vllm-omni's model_executor/stage_configs/hunyuan_image3_i2t.yaml, which
-# upstream deleted in #3172 (gone since v0.21) when HunyuanImage-3 configs moved
-# to deploy/ in a different shape. This is the last upstream revision, with
-# runtime.max_batch_size dropped — 0.27 migrates that key to
-# engine_args.max_num_seqs, which is already set below.
+# Vendored at its last upstream revision; vllm-omni deleted stage_configs/ in #3172,
+# and runtime.max_batch_size has moved to engine_args.max_num_seqs below.
 #
 # Stage config for HunyuanImage-3.0 Image-to-Text (I2T / image understanding).
 # Single LLM stage: AR model reads image + text prompt, generates text output.

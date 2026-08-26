@@ -154,8 +154,7 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         with self._sigma_override(one):
             out = super().forward(req, **kwargs)
 
-        # Read the decoded tensor before the first stamp wraps ``output`` into
-        # the envelope.
+        # Read the decoded tensor before the first stamp wraps ``output``.
         decoded = getattr(out, "output", None)
         if decoded is not None:
             stamp_capture(out, "rl_decoded_video", detach_cpu(decoded), payload_key=_PAYLOAD_KEY)

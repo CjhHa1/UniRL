@@ -224,8 +224,7 @@ elif [ "${PROFILE}" = "sd3-vllm-omni" ] || [ "${PROFILE}" = "qwen-omni" ]; then
     require_torch_flavor "2.13.0+cu130"
     require_dist_version "vllm" "0.27.0"
     require_dist_version "vllm-omni" "0.27.0rc1"
-    # vllm >=0.26 ships CUDA-13 binaries, so this profile needs the same
-    # forward-compat layer ar-drpo does to run on the driver-535 fleet.
+    # vllm >=0.26 is CUDA-13, so this profile needs ar-drpo's forward-compat layer.
     CUDA_COMPAT_DIR="${CUDA_COMPAT_DIR:-}"
     if [ -z "${CUDA_COMPAT_DIR}" ]; then
         for candidate in \

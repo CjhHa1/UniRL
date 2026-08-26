@@ -34,8 +34,7 @@ stage_args:
       devices: "0"
     engine_args:
       model_stage: diffusion
-      # RL rollout declines request-level batching; RLQwenImagePipeline sets
-      # supports_request_batch=False, which requires max_num_seqs=1.
+      # The pipeline sets supports_request_batch=False, which requires this.
       max_num_seqs: 1
       enforce_eager: true
       distributed_executor_backend: "mp"

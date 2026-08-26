@@ -22,10 +22,7 @@ stage_args:
       devices: "0"
     engine_args:
       model_stage: diffusion
-      # RL rollout declines request-level batching: the pipeline fills the GPU
-      # with num_outputs_per_prompt inside one request, and a batch of one keeps
-      # the per-request trajectory capture unambiguous. RLStableDiffusion3Pipeline
-      # sets supports_request_batch=False, which requires max_num_seqs=1.
+      # The pipeline sets supports_request_batch=False, which requires this.
       max_num_seqs: 1
       enforce_eager: true
       distributed_executor_backend: "mp"

@@ -27,9 +27,8 @@ def detach_cpu_pair(p: Any) -> Any:
     return p
 
 
-#: Metadata group namespacing every unirl capture. vllm-omni validates only
-#: its own groups (video/audio/actions/transfer/text/common) and tolerates
-#: unknown ones, so a private group cannot collide with upstream.
+#: Metadata group namespacing every unirl capture; vllm-omni validates only its
+#: own groups and tolerates unknown ones, so this cannot collide with upstream.
 CAPTURE_GROUP = "unirl"
 
 

@@ -1,24 +1,11 @@
 """vllm-omni general plugin: teach the model postprocessors about the capture envelope.
 
-Since vllm-omni 0.26 deleted ``DiffusionOutput.custom_output``, the RL
-pipelines export their captures on the output envelope
-``{"payload": ..., "metadata": ...}`` (see
-``pipelines._shared.interception.stamp_capture``). Only Qwen-Image's
-postprocess understands that shape; SD3, HunyuanVideo 1.5, HunyuanImage3 and
-BAGEL all call ``image_processor.postprocess(images)`` on whatever they are
-handed and would choke on a dict.
-
-This plugin wraps whichever postprocess the registry resolves so it unwraps
-the envelope, hands the model its bare tensor, and re-attaches the captures to
-the result. It runs in the stage process, which is where the postprocess is
-resolved — ``prepare_engine_environment`` loads this group before the
-``DiffusionEngine`` is built, and neither of unirl's other hooks
-(``custom_pipeline_args.pipeline_class``, ``worker_extension_cls``) lands
-there.
-
-Registered as a ``vllm_omni.general_plugins`` entry point, so it applies to
-every stage process without the stage YAMLs opting in. Loading is idempotent
-because plugins may be loaded more than once per process.
+vllm-omni 0.26 deleted ``DiffusionOutput.custom_output``, so RL captures now ride
+the output envelope (see ``pipelines._shared.interception.stamp_capture``). Only
+Qwen-Image's postprocess understands that shape; the other four hand whatever they
+get to ``image_processor.postprocess`` and choke on a dict. Registered as a
+``vllm_omni.general_plugins`` entry point because that loads in the stage process,
+the only place the postprocess can be wrapped before the engine resolves it.
 """
 
 from __future__ import annotations
@@ -52,27 +39,22 @@ def _envelope_aware(func: Callable[..., Any]) -> Callable[..., Any]:
 
         payload = outputs["payload"]
         captures = outputs.get("metadata") or {}
-        # stamp_capture writes exactly one payload key; anything else is a
-        # shape this wrapper did not build and is passed through whole.
+        # stamp_capture writes exactly one payload key; any other shape is not ours.
         raw = next(iter(payload.values())) if len(payload) == 1 else payload
 
         result = func(raw, **kwargs)
         if not captures:
             return result
 
-        # Reuse upstream's own normalization so legacy payload keys (fps,
-        # audio_sample_rate) still become proper metadata groups.
+        # Upstream's normalization turns legacy payload keys into metadata groups.
         normalized = normalize_diffusion_postprocess_output(result)
         return {
             "payload": dict(normalized.outputs),
             "metadata": _merge_metadata(dict(normalized.metadata), captures),
         }
 
-    # The engine decides whether to pass ``sampling_params`` with
-    # ``_func_accepts_parameter``, which reads ``inspect.signature`` and treats a
-    # ``**kwargs`` as "accepts anything". Without the ``__wrapped__`` that
-    # ``functools.wraps`` sets, every model's postprocess would look like it
-    # takes ``sampling_params`` and the ones that do not would raise on it.
+    # The engine picks who gets ``sampling_params`` from ``inspect.signature``, and
+    # reads a bare ``**kwargs`` as accepting it; ``__wrapped__`` keeps that honest.
     functools.update_wrapper(wrapped, func)
     setattr(wrapped, _PATCH_FLAG, True)
     return wrapped

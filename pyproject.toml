@@ -40,9 +40,8 @@ dependencies = [
   "tensordict>=0.5",
 ]
 
-# Loaded by vllm-omni's prepare_engine_environment in every stage process,
-# which is the only place the diffusion postprocess can be wrapped before the
-# engine resolves it. Inert unless vllm-omni is installed.
+# Loaded in every stage process, the only place the diffusion postprocess can be
+# wrapped before the engine resolves it.
 [project.entry-points."vllm_omni.general_plugins"]
 unirl_envelope_postprocess = "unirl.rollout.engine.vllm_omni.plugin:register_envelope_postprocess"
 
@@ -79,22 +78,9 @@ sglang = [
   "flash-linear-attention[conv1d]==0.5.1 ; sys_platform == 'linux'",
   "av>=14.2,<19 ; sys_platform == 'linux'",
 ]
-# CUDA 13 stack, matching the sglang extra. vllm >=0.26 ships CUDA-13 binaries
-# by default and requires a bare `torch==2.13.0`, whose PyPI wheel is itself
-# cu130 (its four nvidia-* deps are all -cu13). Pinning +cu129 here would
-# resolve, since a local version satisfies `==2.13.0`, but would link a CUDA-12
-# torch under a CUDA-13 vllm.
-#
-# vllm 0.27.0 moves the torch anchor 2.11.0 -> 2.13.0 and torchvision
-# 0.26.0 -> 0.28.0; torchaudio stays at 2.11.0 (vllm's own pairing). All three
-# publish +cu130 manylinux_2_28 wheels, as does vllm 0.27.0 itself, so the
-# glibc 2.28 pods take wheels throughout and nothing builds from sdist.
-# vllm-omni is a prerelease here, so installs need --prerelease=allow; its
-# 0.27.0rc1 wheel is py3-none-any, and its one compiled dep (fa3-fwd==0.0.3)
-# ships manylinux_2_24 wheels. No flash-attn on this path at all.
-#
-# Being cu13, this extra needs the same driver-535 forward-compat layer the
-# sglang extra documents above; unlike sglang it does not need glibc>=2.34.
+# CUDA 13: vllm >=0.26 wants a bare `torch==2.13.0` whose wheel is cu130, and a
+# +cu129 pin would resolve anyway, linking a CUDA-12 torch under a CUDA-13 vllm.
+# Prerelease, so installs need --prerelease=allow, plus sglang's compat layer.
 vllm = [
   "vllm==0.27.0 ; sys_platform == 'linux'",
   "vllm-omni==0.27.0rc1 ; sys_platform == 'linux'",
@@ -186,13 +172,8 @@ environments = [
   "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
-# vllm 0.27.0's PyPI wheel is manylinux_2_28, which the glibc 2.28 fleet takes
-# directly — so unlike the 0.20.0 pin, no on-pod sdist build. This section only
-# still matters if a resolution falls back to the sdist: vllm's build-requires
-# omits numpy (CMake configure fails), and the build-env torch must match the
-# runtime +cu130 flavor or the compiled kernels link the wrong CUDA libs.
-# (Plain-string pin instead of match-runtime: bump together with the torch
-# anchor in the vllm extra above.)
+# Only fires if resolution falls back to the sdist: build-requires omits numpy,
+# and the build-env torch must match the runtime flavor.
 [tool.uv.extra-build-dependencies]
 vllm = [
   "numpy",
@@ -201,8 +182,7 @@ vllm = [
 
 # Non-explicit and ahead of the implicit PyPI default: participates in
 # resolution for ALL packages, including the engines' transitive torch pins.
-# Both extras are CUDA 13 now, so cu129 is gone — leaving it ahead of cu130
-# invites a cu12/cu13 mix in unpinned transitive deps.
+# Both extras are cu13, so a cu129 index here would mix flavors in unpinned deps.
 [[tool.uv.index]]
 name = "torch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
