@@ -11,6 +11,7 @@ from vllm_omni.diffusion.models.hunyuan_video.pipeline_hunyuan_video_1_5 import 
     HunyuanVideo15Pipeline,
 )
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from unirl.rollout.engine.vllm_omni.pipelines._shared.flow_match_sde_scheduler import (
     FlowMatchSDEDiscreteScheduler,
@@ -21,8 +22,12 @@ from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import (
     inject_latents,
     make_sde_scheduler,
     resolve_request_noise,
-    stamp_custom_output,
+    single_request,
+    stamp_capture,
 )
+
+#: hv15's final payload is a video tensor, not an image.
+_PAYLOAD_KEY = "video"
 
 
 class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
@@ -122,26 +127,34 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
 
     def _harvest_trajectory(self, out: DiffusionOutput) -> None:
         if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            drain_trajectory_into(out, self.scheduler)
+            drain_trajectory_into(out, self.scheduler, payload_key=_PAYLOAD_KEY)
 
     def _harvest_conditioning(self, out: DiffusionOutput) -> None:
         if self._captured_conditioning is not None:
-            stamp_custom_output(out, "text_capture", self._captured_conditioning)
+            stamp_capture(out, "text_capture", self._captured_conditioning, payload_key=_PAYLOAD_KEY)
 
-    def forward(self, req: OmniDiffusionRequest, **kwargs) -> DiffusionOutput:
+    def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
+        """Single-request batch in, single output out — see ``single_request``.
+
+        HunyuanVideo 1.5 is non-batching upstream, so its ``forward`` already
+        returns one ``DiffusionOutput`` for the batch.
+        """
+        one = single_request(req, caller="RLHunyuanVideo15Pipeline.forward")
         self._install_sde_scheduler()
         self._install_conditioning_tap()
 
-        self._arm_sde(req)
-        self._arm_initial_noise(req)
+        self._arm_sde(one)
+        self._arm_initial_noise(one)
         self._arm_conditioning_tap()
 
-        with self._sigma_override(req):
+        with self._sigma_override(one):
             out = super().forward(req, **kwargs)
 
+        # Read the decoded tensor before the first stamp wraps ``output`` into
+        # the envelope.
         decoded = getattr(out, "output", None)
         if decoded is not None:
-            stamp_custom_output(out, "rl_decoded_video", detach_cpu(decoded))
+            stamp_capture(out, "rl_decoded_video", detach_cpu(decoded), payload_key=_PAYLOAD_KEY)
 
         self._harvest_trajectory(out)
         self._harvest_conditioning(out)

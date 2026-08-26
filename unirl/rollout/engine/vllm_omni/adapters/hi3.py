@@ -16,6 +16,7 @@ from unirl.rollout.engine.vllm_omni.backends import (
     OmniRawResult,
     StageSampling,
 )
+from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import read_captures
 from unirl.rollout.engine.vllm_omni.utils import (
     build_ar_segment,
     collect_dit_outputs,
@@ -74,12 +75,24 @@ def _build_prompt_entries(
 
 
 def hi3_fused_conditions(diff_outputs: List[OmniRawResult], *, modality: str) -> Dict[str, Any]:
-    """The HI3 DiT replay conditions — concat the ``fused_mm_capture`` dicts."""
-    captures = [(getattr(d, "custom_output", None) or {}).get("fused_mm_capture") for d in diff_outputs]
+    """The HI3 DiT replay conditions — concat the ``fused_mm_capture`` dicts.
+
+    Reads the unirl metadata group's ``fused_mm_capture`` — written by
+    ``RLHunyuanImage3Pipeline`` after intercepting
+    ``prepare_inputs_for_generation``. For think_recaption mode different
+    prompts produce different AR output lengths → different ``L`` per
+    capture; right-pad shorter sequences to ``max_L`` (pad 0 for input_ids,
+    False for masks) so the dim-0 concat works. t2i scope: the it2i
+    ``cond_*`` fields stay unpopulated. ``rope_cache`` is deliberately NOT
+    shipped: the engine's rope tables use vllm-omni's own layout and are not
+    compatible with the HF-side replay forward — replay rebuilds rope
+    natively from ``gen_image_mask`` (see ``models/hunyuan_image3/diffusion.py``).
+    """
+    captures = [read_captures(d).get("fused_mm_capture") for d in diff_outputs]
     if any(c is None for c in captures):
         raise RuntimeError(
             f"build_response: HI3 rollout (modality={modality!r}) "
-            "returned no 'fused_mm_capture' on DiffusionOutput.custom_output. "
+            "returned no 'fused_mm_capture' on the output envelope's unirl metadata. "
             "Check that RLHunyuanImage3Pipeline.prepare_inputs_for_generation "
             "hook ran in every DiT worker — the subclass swap may not have "
             "taken effect (verify custom_pipeline_args.pipeline_class in "

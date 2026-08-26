@@ -78,6 +78,19 @@ def stamp_capture(out: Any, key: str, value: Any, *, payload_key: str = "image")
     metadata.setdefault(CAPTURE_GROUP, {})[key] = value
 
 
+def set_payload(out: Any, value: Any, *, payload_key: str = "image") -> None:
+    """Replace the generated payload without dropping stamped captures.
+
+    Assigning ``out.output`` directly after a :func:`stamp_capture` would
+    discard the envelope the captures live on.
+    """
+    envelope = out.output
+    if isinstance(envelope, dict) and isinstance(envelope.get("payload"), dict):
+        envelope["payload"][payload_key] = value
+    else:
+        out.output = value
+
+
 def read_captures(result: Any) -> Dict[str, Any]:
     """Driver-side inverse of :func:`stamp_capture`.
 
@@ -101,7 +114,7 @@ def drain_trajectory_into(out: Any, scheduler: Any, *, payload_key: str = "image
     what the driver reads back as ``LatentSegment.sigmas`` and what replay
     indexes per step. The original 1000-scale per-step timesteps are dropped
     (trivially regenerable from σ). The real sparse SDE step ids ride
-    ``custom_output["sde_step_indices"]`` so the response layer can echo
+    the unirl group's ``sde_step_indices`` so the response layer can echo
     them as the segment's ``sde_indices``.
     """
     traj = scheduler.drain_trajectory()
@@ -198,6 +211,7 @@ __all__ = [
     "make_sde_scheduler",
     "read_captures",
     "resolve_request_noise",
+    "set_payload",
     "single_request",
     "stamp_capture",
 ]
