@@ -138,12 +138,20 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
     # run-phase interception — upstream-called name, cannot be renamed
 
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
-        """Initial-noise injection point: bypass upstream RNG when the driver supplied an x_T."""
+        """Initial-noise injection point: bypass upstream RNG when the driver
+        supplied an x_T. Upstream only calls ``randn_tensor`` when its
+        ``latents`` arg is ``None``; slotting our tensor in skips the draw
+        and leaves the body unchanged. (No diffusers-style
+        ``init_noise_sigma`` scaling — Flow-Match noise is unit-variance at
+        t=1, so the tensor IS the start-of-denoise state.) Consume-once:
+        a CFG-driven second call falls back to upstream behavior.
+        """
+        upstream = super().prepare_latents
         noise = self._pending_initial_noise
         if noise is not None:
-            args, kwargs = inject_latents(args, kwargs, noise)
+            args, kwargs = inject_latents(upstream, args, kwargs, noise)
             self._pending_initial_noise = None
-        return super().prepare_latents(*args, **kwargs)
+        return upstream(*args, **kwargs)
 
     def _harvest_trajectory(self, out: DiffusionOutput) -> None:
         if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):

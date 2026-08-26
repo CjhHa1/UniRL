@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -174,22 +175,46 @@ def resolve_request_noise(req: Any, *, caller: str) -> Optional[torch.Tensor]:
 
 
 def inject_latents(
+    target: Any,
     args: Tuple[Any, ...],
     kwargs: Dict[str, Any],
     noise: torch.Tensor,
-    *,
-    dtype_idx: int = 4,
-    device_idx: int = 5,
-    latents_idx: int = 7,
 ) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-    """Slot a pre-computed x_T into a ``prepare_latents`` call site."""
-    dtype = args[dtype_idx] if len(args) > dtype_idx else kwargs.get("dtype")
-    device = args[device_idx] if len(args) > device_idx else kwargs.get("device")
+    """Slot a pre-computed x_T into a ``prepare_latents`` call site.
+
+    Upstream calls ``prepare_latents`` with **all args positional**, so the
+    slots are read off *target*'s own signature rather than assumed: the three
+    families no longer agree on them. vllm-omni 0.27 dropped ``dtype`` and
+    ``device`` from sd3's signature, moving ``latents`` from slot 7 to 5, while
+    hv15 and qwen-image still carry all three.
+
+    Writing ``kwargs["latents"]`` while ``latents`` is already positional
+    raises ``TypeError: got multiple values for argument 'latents'`` — so
+    replace the positional slot in place, and fall back to the keyword only for
+    partial call shapes. Where the call site still names a dtype/device, the
+    noise is moved onto them first; sd3 does that move itself now.
+    """
+    names = [
+        name
+        for name, p in inspect.signature(target).parameters.items()
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+
+    def _at(name: str) -> Any:
+        if name in names:
+            idx = names.index(name)
+            if len(args) > idx:
+                return args[idx]
+        return kwargs.get(name)
+
+    dtype, device = _at("dtype"), _at("device")
     if dtype is not None:
         noise = noise.to(dtype=dtype)
     if device is not None:
         noise = noise.to(device=device)
-    if len(args) >= latents_idx + 1:
+
+    latents_idx = names.index("latents") if "latents" in names else None
+    if latents_idx is not None and len(args) > latents_idx:
         args = (*args[:latents_idx], noise, *args[latents_idx + 1 :])
     else:
         kwargs = {**kwargs, "latents": noise}

@@ -97,12 +97,16 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         self._captured_conditioning = None
 
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
-        """Initial-noise injection point (consume-once); same dtype@4 / device@5 / latents@7 slots as SD3."""
+        """Initial-noise injection point (consume-once; upstream signature:
+        ``(batch_size, height, width, num_frames, dtype, device, generator,
+        latents)`` — the slots are read off that signature, which sd3's no
+        longer matches)."""
+        upstream = super().prepare_latents
         noise = self._pending_initial_noise
         if noise is not None:
-            args, kwargs = inject_latents(args, kwargs, noise)
+            args, kwargs = inject_latents(upstream, args, kwargs, noise)
             self._pending_initial_noise = None
-        return super().prepare_latents(*args, **kwargs)
+        return upstream(*args, **kwargs)
 
     @contextmanager
     def _sigma_override(self, req: OmniDiffusionRequest) -> Iterator[None]:

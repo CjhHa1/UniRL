@@ -90,12 +90,18 @@ class RLQwenImagePipeline(QwenImagePipeline):
     # run-phase interception — upstream-called name, cannot be renamed
 
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
-        """Initial-noise injection: the driver's ``[B, C, H, W]`` x_T is packed to ``[B, S, C*4]``. Consume-once."""
+        """Initial-noise injection point: bypass upstream RNG when the driver
+        supplied an x_T. Upstream's ``latents is not None`` early-return
+        skips both the RNG draw and the packing, so the driver's spatial
+        ``[B, C, H, W]`` noise is packed here first (the denoise loop runs
+        in the transformer's ``[B, S, C*4]`` patch layout). Consume-once.
+        """
+        upstream = super().prepare_latents
         noise = self._pending_initial_noise
         if noise is not None:
             self._pending_initial_noise = None
-            args, kwargs = inject_latents(args, kwargs, self._pack_pending_noise(noise, args))
-        return super().prepare_latents(*args, **kwargs)
+            args, kwargs = inject_latents(upstream, args, kwargs, self._pack_pending_noise(noise, args))
+        return upstream(*args, **kwargs)
 
     def _pack_pending_noise(self, noise: torch.Tensor, args: tuple) -> torch.Tensor:
         """Spatial ``[B, C, h, w]`` x_T → packed ``[B, S, C*4]``, validated against the call site's grid geometry."""
