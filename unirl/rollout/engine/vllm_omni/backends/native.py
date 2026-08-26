@@ -41,24 +41,23 @@ def _import_omni_runtime() -> Dict[str, Any]:
 
 
 def _resolve_stage_yaml(name: str, source: str) -> str:
-    """Return the absolute path of the stage-config YAML asset."""
-    if source == "local":
-        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        path = os.path.join(here, "stage_configs", name)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"_resolve_stage_yaml: local YAML not found at {path}")
-        return path
-    if source == "upstream":
-        import vllm_omni  # runtime import — sanctioned here only
+    """Return the absolute path of the stage-config YAML asset.
 
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(vllm_omni.__file__)))
-        path = os.path.join(project_root, "vllm_omni", "model_executor", "stage_configs", name)
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"_resolve_stage_yaml: upstream YAML {name!r} not found at {path}. vllm-omni may have moved the file."
-            )
-        return path
-    raise ValueError(f"_resolve_stage_yaml: unknown source {source!r} (expected 'local' or 'upstream')")
+    Every YAML ships in ``stage_configs/`` next to this package, including the
+    two AR-only HI3 comprehension configs vendored there once vllm-omni
+    deleted ``model_executor/stage_configs/`` in #3172. The upstream loader
+    requires an absolute path and raises on bare names.
+    """
+    if source != "local":
+        raise ValueError(
+            f"_resolve_stage_yaml: unknown source {source!r} (expected 'local'). "
+            "vllm-omni has shipped no stage_configs directory since v0.21."
+        )
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(here, "stage_configs", name)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"_resolve_stage_yaml: local YAML not found at {path}")
+    return path
 
 
 def _cfg_get(cfg: Any, key: str, default: Any = None) -> Any:

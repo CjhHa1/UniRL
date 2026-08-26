@@ -594,10 +594,9 @@ class Hi3It2iAdapter(ModelAdapter):
 
 @register_adapter("hi3_i2t")
 class Hi3I2tAdapter(ModelAdapter):
-    """HI3 image+text → AR text (upstream comprehension YAML)."""
+    """HI3 image+text → AR text (vendored comprehension YAML)."""
 
     stage_yaml = "hunyuan_image3_i2t.yaml"
-    stage_yaml_source = "upstream"
     needs_sigmas = False
     ar_lora_passthrough = True
     clear_cuda_visible = True
@@ -630,10 +629,9 @@ class Hi3I2tAdapter(ModelAdapter):
 
 @register_adapter("hi3_t2t")
 class Hi3T2tAdapter(ModelAdapter):
-    """HI3 text → AR text (upstream comprehension YAML)."""
+    """HI3 text → AR text (vendored comprehension YAML)."""
 
     stage_yaml = "hunyuan_image3_t2t.yaml"
-    stage_yaml_source = "upstream"
     needs_sigmas = False
     ar_lora_passthrough = True
     clear_cuda_visible = True
