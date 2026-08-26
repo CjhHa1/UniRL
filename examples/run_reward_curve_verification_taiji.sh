@@ -220,12 +220,31 @@ if [ "${PROFILE}" = "ar-drpo" ]; then
         echo "SGLang JIT compilation requires CUDA 13.0 nvcc; found $(${CUDACXX} --version | tail -1)." >&2
         exit 2
     fi
+elif [ "${PROFILE}" = "sd3-vllm-omni" ] || [ "${PROFILE}" = "qwen-omni" ]; then
+    require_torch_flavor "2.13.0+cu130"
+    require_dist_version "vllm" "0.27.0"
+    require_dist_version "vllm-omni" "0.27.0rc1"
+    # vllm >=0.26 ships CUDA-13 binaries, so this profile needs the same
+    # forward-compat layer ar-drpo does to run on the driver-535 fleet.
+    CUDA_COMPAT_DIR="${CUDA_COMPAT_DIR:-}"
+    if [ -z "${CUDA_COMPAT_DIR}" ]; then
+        for candidate in \
+            "${REPO_ROOT}"/.cuda-compat-13/usr/local/cuda-13.*/compat \
+            /usr/local/cuda-13.*/compat; do
+            if [ -d "${candidate}" ]; then
+                CUDA_COMPAT_DIR="${candidate}"
+                break
+            fi
+        done
+    fi
+    if [ -z "${CUDA_COMPAT_DIR}" ] || [ ! -d "${CUDA_COMPAT_DIR}" ]; then
+        echo "CUDA 13 forward-compat libraries are missing; set CUDA_COMPAT_DIR." >&2
+        exit 2
+    fi
+    export CUDA_COMPAT_DIR
+    export LD_LIBRARY_PATH="${CUDA_COMPAT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 else
     require_torch_flavor "2.11.0+cu129"
-fi
-if [ "${PROFILE}" = "sd3-vllm-omni" ] || [ "${PROFILE}" = "qwen-omni" ]; then
-    require_dist_version "vllm" "0.20.0"
-    require_dist_version "vllm-omni" "0.20.0"
 fi
 
 WANDB_OVERRIDES=(
