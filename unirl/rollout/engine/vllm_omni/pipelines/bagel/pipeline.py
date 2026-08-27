@@ -331,8 +331,8 @@ class RLBagelPipeline(BagelPipeline):
         """Overwrite upstream's trajectory capture with the SDE scheduler's — the ``build_image_segment`` wire."""
         drain_trajectory_into(out, self._sde_scheduler)
 
-    def _is_batchable_t2i(self, req: DiffusionRequestBatch) -> bool:
-        """Packed DiT batching: pure text→image at cfg=1 only."""
+    def _is_batchable_t2i(self, req: OmniDiffusionRequest) -> bool:
+        """Packed DiT batching: pure text→image at cfg=1 only. Expects the unwrapped request."""
         fp = req.prompts[0] if getattr(req, "prompts", None) else None
         if isinstance(fp, dict):
             modalities = fp.get("modalities") or []
@@ -355,7 +355,7 @@ class RLBagelPipeline(BagelPipeline):
 
         spp = getattr(one.sampling_params, "num_outputs_per_prompt", 1)
         if spp > 1:
-            if not self._is_batchable_t2i(req):
+            if not self._is_batchable_t2i(one):
                 raise RuntimeError(
                     f"RLBagelPipeline: num_outputs_per_prompt={spp} requires pure t2i "
                     f"with cfg_text_scale<=1 and cfg_img_scale<=1 present in "

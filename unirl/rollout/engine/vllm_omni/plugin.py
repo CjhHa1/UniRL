@@ -31,8 +31,16 @@ def _envelope_aware(func: Callable[..., Any]) -> Callable[..., Any]:
 
         payload = outputs["payload"]
         captures = outputs.get("metadata") or {}
-        # stamp_capture writes exactly one payload key; any other shape is not ours.
-        raw = next(iter(payload.values())) if len(payload) == 1 else payload
+        # BAGEL's upstream payload also carries ``trajectory``; postprocess the
+        # generated tensor, not the whole payload dict.
+        if "image" in payload:
+            raw = payload["image"]
+        elif "video" in payload:
+            raw = payload["video"]
+        elif len(payload) == 1:
+            raw = next(iter(payload.values()))
+        else:
+            raw = payload
 
         result = func(raw, **kwargs)
         if not captures:
