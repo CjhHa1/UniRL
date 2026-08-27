@@ -78,6 +78,18 @@ def read_captures(result: Any) -> Dict[str, Any]:
     return captures if isinstance(captures, dict) else {}
 
 
+def _override_payload_trajectory(out: Any, *, latents: Any, timesteps: Any, log_probs: Any) -> None:
+    """vllm-omni 0.27's formatter reads ``payload['trajectory']`` first and the attributes only as a fallback."""
+    envelope = getattr(out, "output", None)
+    payload = envelope.get("payload") if isinstance(envelope, dict) else None
+    trajectory = payload.get("trajectory") if isinstance(payload, dict) else None
+    if not isinstance(trajectory, dict):
+        return
+    trajectory["latents"] = latents
+    trajectory["timesteps"] = timesteps
+    trajectory["log_probs"] = log_probs
+
+
 def drain_trajectory_into(out: Any, scheduler: Any, *, payload_key: str = "image") -> None:
     """Harvest the SDE scheduler's recordings; ``trajectory_timesteps`` is the true ``[0, 1]`` sigma schedule."""
     traj = scheduler.drain_trajectory()
@@ -87,6 +99,7 @@ def drain_trajectory_into(out: Any, scheduler: Any, *, payload_key: str = "image
     out.trajectory_latents = latents
     out.trajectory_timesteps = sigmas
     out.trajectory_log_probs = log_probs
+    _override_payload_trajectory(out, latents=latents, timesteps=sigmas, log_probs=log_probs)
     stamp_capture(out, "sde_step_indices", scheduler.last_sde_step_indices, payload_key=payload_key)
 
 
