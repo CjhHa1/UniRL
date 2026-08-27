@@ -14,6 +14,7 @@ from .base import (
     AlgorithmStepResult,
     _grpo_clip_loss,
     _resolve_clip_range_from_schedule,
+    _transition_sigma,
     gather_sde_field,
     typed_conditions,
 )
@@ -251,15 +252,17 @@ class BagelFlowUniGRPO(FlowGRPO):
         mu_old = gather_sde_field(segment.sde_means, segment.sde_indices, target_steps, field_name="sde_means").to(
             dtype=mu_theta.dtype, device=mu_theta.device
         )
-        sde_sigma_max = float(segment.sigmas[1]) if int(segment.sigmas.shape[0]) > 1 else float(segment.sigmas[0])
-        std_var = self._sde_std_var(
-            segment.sigmas,
-            target_steps,
-            eta=float(self.params.eta),
+        std_broadcast = _transition_sigma(
+            replay,
+            target_steps=target_steps,
             device=new_logp.device,
-            dtype=new_logp.dtype,
-            sigma_max=sde_sigma_max,
+            like=mu_theta,
         )
+        if std_broadcast.numel() != int(std_broadcast.shape[0]) * int(std_broadcast.shape[1]):
+            raise RuntimeError(
+                "BagelFlowUniGRPO(ratio_norm=True) requires one isotropic transition std per sample and step."
+            )
+        std_var = std_broadcast.reshape(std_broadcast.shape[:2]).to(dtype=new_logp.dtype)
 
         log_r = new_logp - old_logp
         delta_mu = mu_old - mu_theta
@@ -296,28 +299,6 @@ class BagelFlowUniGRPO(FlowGRPO):
             num_steps_or_tokens=len(target_steps),
             has_backward=True,
         )
-
-    @staticmethod
-    def _sde_std_var(
-        sigmas: torch.Tensor,
-        target_steps: List[int],
-        *,
-        eta: float,
-        device: Any,
-        dtype: Any,
-        sigma_max: float = 0.99,
-    ) -> torch.Tensor:
-        """Per-SDE-step ``std_var = σ_t·√(-dt)`` as ``[1, len(target_steps)]``, broadcasting against ``[1, S']``."""
-        sig = sigmas.to(device=device, dtype=torch.float32)
-        vals: List[torch.Tensor] = []
-        for s in target_steps:
-            sigma = sig[s]
-            sigma_next = sig[s + 1]
-            dt = sigma_next - sigma
-            denom = 1.0 - (sigma_max if float(sigma) == 1.0 else float(sigma))
-            std_dev_t = torch.sqrt(sigma / denom) * float(eta)
-            vals.append(std_dev_t * torch.sqrt(-dt))
-        return torch.stack(vals).to(dtype=dtype).reshape(1, -1)
 
     @staticmethod
     def _sde_inv_dt(

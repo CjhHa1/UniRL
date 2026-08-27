@@ -11,7 +11,7 @@ import torch
 
 from unirl.config.require import require
 from unirl.models.types.diffusion import DiffusionStage
-from unirl.models.types.replay_result import ReplayResult
+from unirl.models.types.replay_result import ReplayResult, compute_transition_stds
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment
@@ -412,8 +412,17 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
         sigma_max = schedule[1].float()
         batch_log_probs: List[torch.Tensor] = []
         batch_means: List[torch.Tensor] = []
+        batch_stds: List[torch.Tensor] = []
+        unit_stds = compute_transition_stds(
+            self.strategy,
+            sigmas=schedule,
+            step_indices=target,
+            eta=float(params.eta),
+            sigma_max=sigma_max,
+        )
         for batch_index in range(conditions.batch_size):
             single = self._single_conditions(conditions, batch_index)
+            noise_scale = resolve_noise_scale(self.model.model, tuple(single.image_shapes[0]))
             log_probs: List[torch.Tensor] = []
             means: List[torch.Tensor] = []
             for step_index in target:
@@ -441,10 +450,12 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
                 means.append(mean)
             batch_log_probs.append(torch.stack(log_probs, dim=1))
             batch_means.append(torch.stack(means, dim=1))
+            batch_stds.append(unit_stds * noise_scale)
 
         return ReplayResult(
             log_probs=torch.cat(batch_log_probs, dim=0).to(dtype=self.logprob_dtype),
             prev_sample_means=torch.cat(batch_means, dim=0).to(dtype=self.trajectory_dtype),
+            transition_stds=torch.cat(batch_stds, dim=0).to(dtype=torch.float32),
         )
 
     def predict_noise_at_step(

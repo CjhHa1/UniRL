@@ -12,6 +12,7 @@ import torch
 from unirl.distributed.group.remote import Remote
 
 if TYPE_CHECKING:
+    from unirl.models.types.replay_result import ReplayResult
     from unirl.types.conditions import Condition
     from unirl.types.sample import Part
     from unirl.types.segments.base import Segment
@@ -131,26 +132,51 @@ def _gaussian_kl_div(p: torch.Tensor, q: torch.Tensor, sigma: torch.Tensor) -> t
 
 
 def _transition_sigma(
-    stage: Any,
+    replay_result: "ReplayResult",
     *,
-    segment: "Segment",
     target_steps: List[int],
-    eta: float,
     device: torch.device,
+    like: torch.Tensor,
     add_coefficient: bool = True,
 ) -> torch.Tensor:
-    """Per-step SDE transition std ``sigma_t`` for KL normalization, shape ``[1, S', 1, 1, 1]``."""
+    """Resolve KL-normalization std in the replay mean's coordinate system."""
+    steps = len(target_steps)
+    if like.ndim < 2 or int(like.shape[1]) != steps:
+        raise ValueError(
+            "_transition_sigma: `like` must have shape [B, len(target_steps), ...]; "
+            f"got {tuple(like.shape)} for {steps} target step(s)."
+        )
+    tail_dims = like.ndim - 2
+
     if not add_coefficient:
-        return torch.ones(1, len(target_steps), 1, 1, 1, device=device)
-    if segment.sigmas is None:
-        raise ValueError("_transition_sigma requires segment.sigmas (add_coefficient=True).")
-    sigmas = segment.sigmas.to(device=device, dtype=torch.float32)
-    idx = torch.tensor(target_steps, dtype=torch.long, device=device)
-    s = sigmas[idx]
-    s_next = sigmas[idx + 1]
-    sigma_max = sigmas[1] if int(sigmas.shape[0]) > 1 else torch.tensor(0.99, device=device, dtype=sigmas.dtype)
-    sigma_t = stage.strategy.transition_std(sigma=s, sigma_next=s_next, eta=float(eta), sigma_max=sigma_max)
-    return sigma_t.reshape(1, -1, 1, 1, 1)
+        sigma_t = torch.ones(1, steps, device=device, dtype=torch.float32)
+    else:
+        if replay_result.transition_stds is None:
+            raise RuntimeError(
+                "_transition_sigma: stage.replay() returned transition means without same-coordinate transition_stds."
+            )
+        sigma_t = replay_result.transition_stds.to(device=device, dtype=torch.float32)
+
+    if sigma_t.ndim < 2 or int(sigma_t.shape[1]) != steps:
+        raise ValueError(
+            "_transition_sigma: transition std must align as [B|1, len(target_steps), ...]; "
+            f"got {tuple(sigma_t.shape)} for {steps} target step(s)."
+        )
+    if sigma_t.ndim > tail_dims + 2:
+        raise ValueError(
+            f"_transition_sigma: transition std rank {sigma_t.ndim} exceeds replay mean rank {tail_dims + 2}."
+        )
+    sigma_t = sigma_t.reshape(*sigma_t.shape, *([1] * (tail_dims + 2 - sigma_t.ndim)))
+
+    if like is not None:
+        try:
+            torch.broadcast_shapes(tuple(sigma_t.shape), tuple(like.shape))
+        except RuntimeError as exc:
+            raise ValueError(
+                f"_transition_sigma: std shape {tuple(sigma_t.shape)} is not broadcastable "
+                f"to replay mean shape {tuple(like.shape)}."
+            ) from exc
+    return sigma_t
 
 
 def _reference_replay_means(

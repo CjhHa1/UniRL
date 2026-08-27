@@ -160,12 +160,10 @@ class FlowGRPO(StageAlgorithm):
                     "but got None. Ensure the stage's replay method produces means."
                 )
             sigma_t = _transition_sigma(
-                self.stage,
-                segment=segment,
+                replay_result,
                 target_steps=target_steps,
-                eta=float(self.params.eta),
                 device=new_logp.device,
-                add_coefficient=True,
+                like=new_means,
             )
             ref_means = _reference_replay_means(
                 self.stage,

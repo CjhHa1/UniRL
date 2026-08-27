@@ -195,12 +195,11 @@ class DiffusionOPD(StageAlgorithm):
         teacher_f32 = teacher_means.to(device=student_means.device, dtype=torch.float32)
 
         sigma_t = _transition_sigma(
-            self.stage,
-            segment=segment,
+            replay_result,
             target_steps=target_steps,
-            eta=float(getattr(self.params, "eta", 1.0)),
             device=student_means.device,
             add_coefficient=self.add_kl_coefficient,
+            like=student_means,
         )
         kl_per_elem = _gaussian_kl_div(student_f32, teacher_f32, sigma_t)
         kl_per_sample_step = kl_per_elem.mean(dim=tuple(range(2, kl_per_elem.ndim)))  # [B, S']

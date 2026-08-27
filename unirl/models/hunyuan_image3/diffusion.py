@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import torch
 
 from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
-from unirl.models.types.replay_result import ReplayResult
+from unirl.models.types.replay_result import ReplayResult, compute_transition_stds
 from unirl.sde.kernels import GeneratorLike, StepStrategy
 from unirl.types.conditions import ImageEmbedCondition
 from unirl.types.noise_recipe import NoiseRecipe
@@ -714,7 +714,18 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
 
         log_probs_t = torch.stack(log_probs, dim=1).to(dtype=self.logprob_dtype)
         means_t = torch.stack(prev_sample_means, dim=1).to(dtype=self.trajectory_dtype) if prev_sample_means else None
-        return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
+        transition_stds = compute_transition_stds(
+            self.strategy,
+            sigmas=sigmas,
+            step_indices=target,
+            eta=float(params.eta),
+            sigma_max=sigma_max,
+        )
+        return ReplayResult(
+            log_probs=log_probs_t,
+            prev_sample_means=means_t,
+            transition_stds=transition_stds,
+        )
 
     def predict_noise_at_step(
         self,

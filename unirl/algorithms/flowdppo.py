@@ -200,7 +200,12 @@ class FlowDPPO(StageAlgorithm):
             dtype=new_means.dtype, device=new_means.device
         )
 
-        sigma_t = self._compute_sigma_t(segment, target_steps, device=new_logp.device)
+        sigma_t = self._compute_sigma_t(
+            replay_result,
+            target_steps,
+            device=new_logp.device,
+            like=new_means,
+        )
 
         adv_b = advantages.detach().to(dtype=new_logp.dtype, device=new_logp.device).reshape(-1, 1).expand_as(new_logp)
 
@@ -232,12 +237,10 @@ class FlowDPPO(StageAlgorithm):
                 target_steps=target_steps,
             ).to(dtype=new_means.dtype, device=new_means.device)
             kl_sigma_t = _transition_sigma(
-                self.stage,
-                segment=segment,
+                replay_result,
                 target_steps=target_steps,
-                eta=float(self.params.eta),
                 device=new_logp.device,
-                add_coefficient=True,
+                like=new_means,
             )
             kl_ref = _reference_kl_loss(new_means, ref_means, kl_sigma_t)
             loss = loss + self.beta * kl_ref
@@ -261,18 +264,18 @@ class FlowDPPO(StageAlgorithm):
 
     def _compute_sigma_t(
         self,
-        segment: "LatentSegment",
+        replay_result: Any,
         target_steps: List[int],
         device: torch.device,
+        like: torch.Tensor,
     ) -> torch.Tensor:
-        """Per-step KL-normalization sigma_t ``[1, S', 1, 1, 1]``; ones when ``add_kl_coefficient=False``."""
+        """Resolve replay-aligned KL-normalization standard deviations."""
         return _transition_sigma(
-            self.stage,
-            segment=segment,
+            replay_result,
             target_steps=target_steps,
-            eta=float(self.params.eta),
             device=device,
             add_coefficient=self.add_kl_coefficient,
+            like=like,
         )
 
 
