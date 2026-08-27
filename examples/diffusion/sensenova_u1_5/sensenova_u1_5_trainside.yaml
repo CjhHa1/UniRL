@@ -30,7 +30,9 @@ bundle:
     trajectory_precision: bf16
     logprob_precision: fp32
     timestep_shift: 3.0
-    attention_backend: auto
+    # Pin SDPA: the pristine vendor's flash path targets Flash-Attention 2,
+    # while the supported UniRL engine stack ships Flash-Attention 4.
+    attention_backend: sdpa
     # Matches the released U1.5 pretraining recipe: freeze the shared /
     # understanding path, train fm_modules + every *_mot_gen branch.
     full_finetune_generation: true

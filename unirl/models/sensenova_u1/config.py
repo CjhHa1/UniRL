@@ -31,6 +31,9 @@ class SenseNovaU1PipelineConfig:
     logprob_precision: str = "fp32"
 
     timestep_shift: float = 3.0
+    # The pristine vendor's forced "flash" mode requires Flash-Attention 2,
+    # while UniRL's supported engine stack ships Flash-Attention 4. Keep
+    # automatic fallback and explicit SDPA until a tested FA4 adapter exists.
     attention_backend: str = "auto"
     full_finetune_generation: bool = True
 
@@ -39,10 +42,12 @@ class SenseNovaU1PipelineConfig:
 
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="SenseNovaU1PipelineConfig.model_precision")
-        if self.attention_backend not in {"auto", "flash", "sdpa"}:
+        if self.attention_backend not in {"auto", "sdpa"}:
             raise ValueError(
                 "SenseNovaU1PipelineConfig.attention_backend must be one of "
-                f"('auto', 'flash', 'sdpa'); got {self.attention_backend!r}."
+                f"('auto', 'sdpa'); got {self.attention_backend!r}. "
+                "The vendored 'flash' backend requires Flash-Attention 2, which "
+                "is incompatible with UniRL's Flash-Attention 4 stack."
             )
         if float(self.timestep_shift) <= 0:
             raise ValueError(f"SenseNovaU1PipelineConfig.timestep_shift must be positive; got {self.timestep_shift}.")
