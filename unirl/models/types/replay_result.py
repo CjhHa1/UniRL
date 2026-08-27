@@ -24,8 +24,8 @@ class ReplayResult:
     transition_stds: Optional[torch.Tensor] = None
     """The SDE transition standard deviation aligned with
     :attr:`prev_sample_means`, in the same coordinate system. Shape ``[B, S']``
-    or any shape broadcastable to ``[B, S', *latent_shape]``. Stages that
-    return diffusion transition means must populate this field."""
+    or any shape broadcastable to ``[B, S', *latent_shape]``. Required only by
+    algorithms that normalize losses with the transition variance."""
 
     logits: Optional[torch.Tensor] = None
     """Per-step token logits at each replayed position. Shape
@@ -38,16 +38,16 @@ class ReplayResult:
     ``None`` when replay did not request a value head."""
 
     def __post_init__(self) -> None:
-        """Enforce the complete stochastic-diffusion replay contract."""
+        """Validate transition standard deviations when replay provides them."""
         if self.prev_sample_means is None:
             return
-        if self.transition_stds is None:
-            raise ValueError("ReplayResult: prev_sample_means requires same-coordinate transition_stds.")
         if self.prev_sample_means.ndim < 2:
             raise ValueError(
                 "ReplayResult: prev_sample_means must have shape [B, S, ...]; "
                 f"got {tuple(self.prev_sample_means.shape)}."
             )
+        if self.transition_stds is None:
+            return
         batch, steps = self.prev_sample_means.shape[:2]
         if (
             self.transition_stds.ndim < 2
