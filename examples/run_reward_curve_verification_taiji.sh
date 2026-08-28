@@ -89,11 +89,56 @@ require_torch_flavor() {
     fi
 }
 
+# Read a pin out of pyproject.toml instead of restating it, so bumping an extra
+# cannot leave this launcher asserting a version the venv no longer installs.
+pin_from_pyproject() {
+    local extra="$1"
+    local pkg="$2"
+    "${PYTHON}" - "${extra}" "${pkg}" <<'PY'
+import re
+import sys
+import tomllib
+
+extra, pkg = sys.argv[1], sys.argv[2]
+with open("pyproject.toml", "rb") as fh:
+    specs = tomllib.load(fh)["project"]["optional-dependencies"][extra]
+for spec in specs:
+    match = re.match(rf"{re.escape(pkg)}\s*(?:\[[^\]]*\])?\s*==\s*([^\s;]+)", spec)
+    if match:
+        print(match.group(1))
+        break
+else:
+    sys.exit(f"no {pkg}== pin in the [{extra}] extra")
+PY
+}
+
+# CUDA 13 user code needs NVIDIA's forward-compat layer on the driver-535 fleet.
+resolve_cuda_compat_dir() {
+    CUDA_COMPAT_DIR="${CUDA_COMPAT_DIR:-}"
+    if [ -z "${CUDA_COMPAT_DIR}" ]; then
+        for candidate in \
+            "${REPO_ROOT}"/.cuda-compat-13/usr/local/cuda-13.*/compat \
+            /usr/local/cuda-13.*/compat; do
+            if [ -d "${candidate}" ]; then
+                CUDA_COMPAT_DIR="${candidate}"
+                break
+            fi
+        done
+    fi
+    if [ -z "${CUDA_COMPAT_DIR}" ] || [ ! -d "${CUDA_COMPAT_DIR}" ]; then
+        echo "CUDA 13 forward-compat libraries are missing; set CUDA_COMPAT_DIR." >&2
+        exit 2
+    fi
+    export CUDA_COMPAT_DIR
+    export LD_LIBRARY_PATH="${CUDA_COMPAT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+}
+
 SINGLE_NODE=1
 case "${PROFILE}" in
     sd3-trainside)
         ENTRY=train_diffusion
         EXPERIMENT=diffusion/sd3/sd3_trainside
+        ENGINE_EXTRA=vllm
         VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv}"
         export PRETRAINED_MODEL="${PRETRAINED_MODEL:-${REPO_ROOT}/models/local/stable-diffusion-3.5-medium}"
         require_file "${PRETRAINED_MODEL}/model_index.json"
@@ -101,6 +146,7 @@ case "${PROFILE}" in
     sd3-vllm-omni)
         ENTRY=train_diffusion
         EXPERIMENT=diffusion/sd3/sd3_vllmomni
+        ENGINE_EXTRA=vllm
         VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv}"
         export PRETRAINED_MODEL="${PRETRAINED_MODEL:-${REPO_ROOT}/models/local/stable-diffusion-3.5-medium}"
         require_file "${PRETRAINED_MODEL}/model_index.json"
@@ -108,6 +154,7 @@ case "${PROFILE}" in
     pe)
         ENTRY=train_pe
         EXPERIMENT=pe/pe_trainside_pickscore
+        ENGINE_EXTRA=vllm
         VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv}"
         # The colocated SD3 + Qwen FSDP stacks run close to the H20 memory
         # ceiling.  Variable AR sequence lengths can otherwise fragment the
@@ -122,6 +169,7 @@ case "${PROFILE}" in
     ar-drpo)
         ENTRY=train_ar
         EXPERIMENT=ar/qwen3_drpo_4b_base_dapo_sglang
+        ENGINE_EXTRA=sglang
         VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv-sglang}"
         CUDA_TOOLKIT_DIR="${CUDA_TOOLKIT_DIR:-}"
         if [ -z "${CUDA_TOOLKIT_DIR}" ]; then
@@ -158,23 +206,7 @@ case "${PROFILE}" in
         # small per-node shim before Ray starts, so SGLang TVM-FFI JIT links.
         export CUDA_RUNTIME_LIB_DIR
         export CUDA_RUNTIME_LINK_DIR="${CUDA_RUNTIME_LINK_DIR:-/tmp/unirl-cuda-runtime-${UID}}"
-        CUDA_COMPAT_DIR="${CUDA_COMPAT_DIR:-}"
-        if [ -z "${CUDA_COMPAT_DIR}" ]; then
-            for candidate in \
-                "${REPO_ROOT}"/.cuda-compat-13/usr/local/cuda-13.*/compat \
-                /usr/local/cuda-13.*/compat; do
-                if [ -d "${candidate}" ]; then
-                    CUDA_COMPAT_DIR="${candidate}"
-                    break
-                fi
-            done
-        fi
-        if [ -z "${CUDA_COMPAT_DIR}" ] || [ ! -d "${CUDA_COMPAT_DIR}" ]; then
-            echo "CUDA 13 forward-compat libraries are missing; set CUDA_COMPAT_DIR." >&2
-            exit 2
-        fi
-        export CUDA_COMPAT_DIR
-        export LD_LIBRARY_PATH="${CUDA_COMPAT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        resolve_cuda_compat_dir
         export QWEN3_PATH="${QWEN3_PATH:-${REPO_ROOT}/models/local/Qwen3-4B-Base}"
         export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/dapo_math/train.jsonl}"
         export EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/data/dapo_math/aime_eval.jsonl}"
@@ -186,6 +218,7 @@ case "${PROFILE}" in
     qwen-omni)
         ENTRY=train_ar
         EXPERIMENT=ar/qwen3_omni_video_r1_gspo_lora_vllm_omni_1x8
+        ENGINE_EXTRA=vllm
         VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv}"
         export QWEN3_OMNI_PATH="${QWEN3_OMNI_PATH:-${REPO_ROOT}/models/local/Qwen3-Omni-30B-A3B-Instruct}"
         export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/video_r1_260k/train.jsonl}"
@@ -208,9 +241,14 @@ fi
 export VENV_DIR
 export PATH="${VENV_DIR}/bin:${PATH}"
 
-if [ "${PROFILE}" = "ar-drpo" ]; then
-    require_torch_flavor "2.11.0+cu130"
-    require_dist_version "sglang" "0.5.12.post1"
+# Gate on the venv the profile selected, not on a list of profile names: both
+# engine stacks are CUDA 13 now, so a profile omitted from such a list silently
+# asserted the retired cu129 pins against whichever venv it actually ran in.
+TORCH_PIN="$(pin_from_pyproject "${ENGINE_EXTRA}" torch)"
+if [ "${ENGINE_EXTRA}" = "sglang" ]; then
+    SGLANG_PIN="$(pin_from_pyproject sglang sglang)"
+    require_torch_flavor "${TORCH_PIN}"
+    require_dist_version "sglang" "${SGLANG_PIN}"
     require_dist_version "nvidia-cuda-nvcc" "13.0.88"
     require_dist_version "nvidia-cuda-crt" "13.0.88"
     require_dist_version "nvidia-nvvm" "13.0.88"
@@ -220,30 +258,13 @@ if [ "${PROFILE}" = "ar-drpo" ]; then
         echo "SGLang JIT compilation requires CUDA 13.0 nvcc; found $(${CUDACXX} --version | tail -1)." >&2
         exit 2
     fi
-elif [ "${PROFILE}" = "sd3-vllm-omni" ] || [ "${PROFILE}" = "qwen-omni" ]; then
-    require_torch_flavor "2.13.0+cu130"
-    require_dist_version "vllm" "0.27.0"
-    require_dist_version "vllm-omni" "0.27.0rc1"
-    # vllm >=0.26 is CUDA-13, so this profile needs ar-drpo's forward-compat layer.
-    CUDA_COMPAT_DIR="${CUDA_COMPAT_DIR:-}"
-    if [ -z "${CUDA_COMPAT_DIR}" ]; then
-        for candidate in \
-            "${REPO_ROOT}"/.cuda-compat-13/usr/local/cuda-13.*/compat \
-            /usr/local/cuda-13.*/compat; do
-            if [ -d "${candidate}" ]; then
-                CUDA_COMPAT_DIR="${candidate}"
-                break
-            fi
-        done
-    fi
-    if [ -z "${CUDA_COMPAT_DIR}" ] || [ ! -d "${CUDA_COMPAT_DIR}" ]; then
-        echo "CUDA 13 forward-compat libraries are missing; set CUDA_COMPAT_DIR." >&2
-        exit 2
-    fi
-    export CUDA_COMPAT_DIR
-    export LD_LIBRARY_PATH="${CUDA_COMPAT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 else
-    require_torch_flavor "2.11.0+cu129"
+    VLLM_PIN="$(pin_from_pyproject vllm vllm)"
+    VLLM_OMNI_PIN="$(pin_from_pyproject vllm vllm-omni)"
+    require_torch_flavor "${TORCH_PIN}"
+    require_dist_version "vllm" "${VLLM_PIN}"
+    require_dist_version "vllm-omni" "${VLLM_OMNI_PIN}"
+    resolve_cuda_compat_dir
 fi
 
 WANDB_OVERRIDES=(
