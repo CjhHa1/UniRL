@@ -30,6 +30,8 @@ def detach_cpu_pair(p: Any) -> Any:
 #: Metadata group namespacing every unirl capture; vllm-omni validates only its
 #: own groups and tolerates unknown ones, so this cannot collide with upstream.
 CAPTURE_GROUP = "unirl"
+#: Private bag on ``DiffusionOutput``; flushed into ``metadata[CAPTURE_GROUP]`` after postprocess.
+CAPTURE_ATTR = "_unirl_captures"
 
 
 def single_request(req: Any, *, caller: str) -> Any:
@@ -45,29 +47,26 @@ def single_request(req: Any, *, caller: str) -> Any:
     return requests[0]
 
 
-def stamp_capture(out: Any, key: str, value: Any, *, payload_key: str = "image") -> None:
-    """Export a capture on ``DiffusionOutput.output``'s metadata envelope."""
-    envelope = out.output
-    if not (isinstance(envelope, dict) and isinstance(envelope.get("payload"), dict)):
-        envelope = {"payload": {payload_key: envelope}}
-        out.output = envelope
-    metadata = envelope.setdefault("metadata", {})
-    if not isinstance(metadata, dict):
-        raise RuntimeError(f"stamp_capture: output['metadata'] must be a dict, got {type(metadata).__name__}")
-    metadata.setdefault(CAPTURE_GROUP, {})[key] = value
+def _captures(out: Any) -> Dict[str, Any]:
+    bag = getattr(out, CAPTURE_ATTR, None)
+    if not isinstance(bag, dict):
+        bag = {}
+        setattr(out, CAPTURE_ATTR, bag)
+    return bag
 
 
-def set_payload(out: Any, value: Any, *, payload_key: str = "image") -> None:
-    """Replace the generated payload without dropping stamped captures."""
-    envelope = out.output
-    if isinstance(envelope, dict) and isinstance(envelope.get("payload"), dict):
-        envelope["payload"][payload_key] = value
-    else:
-        out.output = value
+def stamp_capture(out: Any, key: str, value: Any) -> None:
+    """Record an RL capture on the output object; postprocess never sees this bag."""
+    _captures(out)[key] = value
+
+
+def set_payload(out: Any, value: Any) -> None:
+    """Replace the generated media; captures live on the output object, not in ``output``."""
+    out.output = value
 
 
 def read_captures(result: Any) -> Dict[str, Any]:
-    """Driver-side inverse of :func:`stamp_capture`."""
+    """Driver-side inverse of :func:`stamp_capture` after the formatter flush."""
     mm = getattr(result, "multimodal_output", None) or {}
     if not isinstance(mm, dict):
         return {}
@@ -78,20 +77,8 @@ def read_captures(result: Any) -> Dict[str, Any]:
     return captures if isinstance(captures, dict) else {}
 
 
-def _override_payload_trajectory(out: Any, *, latents: Any, timesteps: Any, log_probs: Any) -> None:
-    """vllm-omni 0.27's formatter reads ``payload['trajectory']`` first and the attributes only as a fallback."""
-    envelope = getattr(out, "output", None)
-    payload = envelope.get("payload") if isinstance(envelope, dict) else None
-    trajectory = payload.get("trajectory") if isinstance(payload, dict) else None
-    if not isinstance(trajectory, dict):
-        return
-    trajectory["latents"] = latents
-    trajectory["timesteps"] = timesteps
-    trajectory["log_probs"] = log_probs
-
-
-def drain_trajectory_into(out: Any, scheduler: Any, *, payload_key: str = "image") -> None:
-    """Harvest the SDE scheduler's recordings; ``trajectory_timesteps`` is the true ``[0, 1]`` sigma schedule."""
+def drain_trajectory_into(out: Any, scheduler: Any) -> None:
+    """Write the SDE recordings onto ``DiffusionOutput.trajectory_*`` — the formatter's fallback channel."""
     traj = scheduler.drain_trajectory()
     if traj is None:
         return
@@ -99,8 +86,20 @@ def drain_trajectory_into(out: Any, scheduler: Any, *, payload_key: str = "image
     out.trajectory_latents = latents
     out.trajectory_timesteps = sigmas
     out.trajectory_log_probs = log_probs
-    _override_payload_trajectory(out, latents=latents, timesteps=sigmas, log_probs=log_probs)
-    stamp_capture(out, "sde_step_indices", scheduler.last_sde_step_indices, payload_key=payload_key)
+    stamp_capture(out, "sde_step_indices", scheduler.last_sde_step_indices)
+
+
+def finalize_output(out: Any) -> None:
+    """Drop payload trajectory so ``trajectory_*`` wins; unwrap media so postprocess sees a tensor."""
+    envelope = getattr(out, "output", None)
+    if not (isinstance(envelope, dict) and isinstance(envelope.get("payload"), dict)):
+        return
+    payload = envelope["payload"]
+    payload.pop("trajectory", None)
+    if "image" in payload:
+        out.output = payload["image"]
+    elif "video" in payload:
+        out.output = payload["video"]
 
 
 def resolve_request_noise(req: Any, *, caller: str) -> Optional[torch.Tensor]:
@@ -149,16 +148,39 @@ def inject_latents(
     return bound.args, bound.kwargs
 
 
+def flush_captures_into_postprocess(diffusion_output: Any, postprocess_output: Any) -> Any:
+    """Copy the private capture bag into formatter metadata; drop payload trajectory when ``trajectory_*`` is set."""
+    from dataclasses import replace
+
+    captures = getattr(diffusion_output, CAPTURE_ATTR, None)
+    outputs = dict(postprocess_output.outputs)
+    metadata = dict(postprocess_output.metadata)
+    changed = False
+    if isinstance(captures, dict) and captures:
+        existing = metadata.get(CAPTURE_GROUP)
+        metadata[CAPTURE_GROUP] = {**(existing if isinstance(existing, dict) else {}), **captures}
+        changed = True
+    if getattr(diffusion_output, "trajectory_latents", None) is not None and "trajectory" in outputs:
+        outputs.pop("trajectory")
+        changed = True
+    if not changed:
+        return postprocess_output
+    return replace(postprocess_output, outputs=outputs, metadata=metadata)
+
+
 def make_sde_scheduler(upstream_config: Any, *, eta: float = 0.0) -> FlowMatchSDEDiscreteScheduler:
     """Build the trajectory-capturing scheduler from the upstream scheduler's config — the sd3/hv15 install path."""
     return FlowMatchSDEDiscreteScheduler.from_config(upstream_config, eta=float(eta))
 
 
 __all__ = [
+    "CAPTURE_ATTR",
     "CAPTURE_GROUP",
     "detach_cpu",
     "detach_cpu_pair",
     "drain_trajectory_into",
+    "finalize_output",
+    "flush_captures_into_postprocess",
     "inject_latents",
     "make_sde_scheduler",
     "read_captures",

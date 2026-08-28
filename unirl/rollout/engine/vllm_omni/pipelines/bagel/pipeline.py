@@ -22,6 +22,7 @@ from unirl.models.bagel.rl_ops import (
 )
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import (
     drain_trajectory_into,
+    finalize_output,
     resolve_request_noise,
     set_payload,
     single_request,
@@ -377,6 +378,7 @@ class RLBagelPipeline(BagelPipeline):
         out = super().forward(req, **kwargs)
 
         self._harvest_trajectory(out)
+        finalize_output(out)
         return out
 
     def _forward_batched(self, req: DiffusionRequestBatch, spp: int, **kwargs) -> DiffusionOutput:
@@ -404,6 +406,8 @@ class RLBagelPipeline(BagelPipeline):
                 first = (raw.get("payload") or {}).get("image")
             elif isinstance(raw, (list, tuple)) and raw:
                 first = raw[0]
+            else:
+                first = raw
             image_shape = (int(one.sampling_params.height), int(one.sampling_params.width))
             if first is not None:
                 images = [first] + [
@@ -412,6 +416,7 @@ class RLBagelPipeline(BagelPipeline):
             else:
                 images = [self._decode_image_from_latent(self.bagel, self.vae, lat, image_shape) for lat in lats]
             set_payload(out, images)
+            finalize_output(out)
         finally:
             self._pending_spp = 1
             self._pending_batched_latents = None

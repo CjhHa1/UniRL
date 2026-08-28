@@ -40,10 +40,10 @@ dependencies = [
   "tensordict>=0.5",
 ]
 
-# Loaded in every stage process, the only place the diffusion postprocess can be
-# wrapped before the engine resolves it.
+# Loaded in every stage process so format_diffusion_outputs can flush
+# pipeline-side RL captures into metadata after postprocess.
 [project.entry-points."vllm_omni.general_plugins"]
-unirl_envelope_postprocess = "unirl.rollout.engine.vllm_omni.plugin:register_envelope_postprocess"
+unirl_capture_flush = "unirl.rollout.engine.vllm_omni.plugin:register_capture_flush"
 
 [project.optional-dependencies]
 # sglang pinned to the upstream release the UniRL sglang patch package

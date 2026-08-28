@@ -17,6 +17,7 @@ from unirl.rollout.engine.vllm_omni.pipelines._shared.flow_match_sde_scheduler i
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import (
     detach_cpu,
     drain_trajectory_into,
+    finalize_output,
     single_request,
     stamp_capture,
 )
@@ -169,6 +170,7 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
 
         self._harvest_trajectory(out)
         self._harvest_conditioning(out)
+        finalize_output(out)
         return out
 
 

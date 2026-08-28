@@ -19,6 +19,7 @@ from unirl.rollout.engine.vllm_omni.pipelines._shared.flow_match_sde_scheduler i
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import (
     detach_cpu,
     drain_trajectory_into,
+    finalize_output,
     inject_latents,
     make_sde_scheduler,
     resolve_request_noise,
@@ -169,6 +170,7 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
         out = outs[0]
         self._harvest_trajectory(out)
         self._harvest_conditioning(out)
+        finalize_output(out)
         return outs
 
 
