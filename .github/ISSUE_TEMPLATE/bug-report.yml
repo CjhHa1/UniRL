@@ -51,12 +51,14 @@ body:
     attributes:
       label: Domain
       options:
-        - diffusion (`train_diffusion`)
-        - ar (`train_ar`)
-        - sft (`train_sft`)
-        - pe (`train_pe`)
-        - unified_model (`train_unified_model`)
-        - agentic (`train_agentic`)
+        - diffusion (train_diffusion)
+        - diffusion async (train_async_diffusion)
+        - ar (train_ar)
+        - ar async (train_async_ar)
+        - sft (train_sft)
+        - pe (train_pe)
+        - unified_model (train_unified_model)
+        - agentic (train_agentic, examples/deep_research)
         - reward service
         - docs / install / CI
         - other
