@@ -548,29 +548,6 @@ def patch_per_request_ar_seed() -> None:
     AsyncOmniEngine.add_request = _patched
 
 
-def patch_master_port_unstrip() -> None:
-    """Keep ``master_port`` alive through ``AsyncOmniEngine._strip_single_engine_args``."""
-    try:
-        from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
-
-        _orig = AsyncOmniEngine._strip_single_engine_args
-        if getattr(_orig, "_diffrl_master_port_unstrip", False):
-            return
-
-        def _patched_strip(kwargs, _orig=_orig):
-            out = _orig(kwargs)
-            if isinstance(kwargs, dict):
-                master_port = kwargs.get("master_port")
-                if master_port is not None:
-                    out["master_port"] = master_port
-            return out
-
-        _patched_strip._diffrl_master_port_unstrip = True  # type: ignore[attr-defined]
-        AsyncOmniEngine._strip_single_engine_args = staticmethod(_patched_strip)
-    except (ImportError, AttributeError):
-        pass
-
-
 class VLLMOmniHijack:
     """Monkey-patches vllm-omni internals to support in-memory LoRA tensors."""
 
@@ -587,7 +564,6 @@ class VLLMOmniHijack:
         patch_lora_request_passthrough()
         patch_per_request_ar_seed()
         patch_sigmas_passthrough()
-        patch_master_port_unstrip()
         patch_moe_workspace_pool()
 
 

@@ -82,22 +82,24 @@ def _assemble_omni_kwargs(intent: Dict[str, Any]) -> Dict[str, Any]:
     omni_kwargs = dict(intent.get("omni_kwargs") or {})
     if intent.get("enable_sleep_mode"):
         omni_kwargs["enable_sleep_mode"] = True
-    ports = intent.get("ports")
-    if ports is not None:
-        omni_kwargs["master_port"] = int(ports.master_port)
     return omni_kwargs
 
 
 @contextmanager
-def _master_port_env_yielded(active: bool):
-    """Drop ``MASTER_PORT`` from the env so an injected ``master_port`` is honored."""
-    saved = os.environ.pop("MASTER_PORT", None) if active else None
-    if saved is not None:
-        logger.info("VLLM-Omni boot: withheld MASTER_PORT=%s so the injected master_port wins", saved)
+def _master_port_env(port: Optional[int]):
+    """Pin ``MASTER_PORT`` to the reserved engine port for the duration of ``Omni()``."""
+    if port is None:
+        yield
+        return
+    saved = os.environ.get("MASTER_PORT")
+    os.environ["MASTER_PORT"] = str(int(port))
+    logger.info("VLLM-Omni boot: MASTER_PORT=%s (was %s) for engine construction", port, saved)
     try:
         yield
     finally:
-        if saved is not None:
+        if saved is None:
+            os.environ.pop("MASTER_PORT", None)
+        else:
             os.environ["MASTER_PORT"] = saved
 
 
@@ -149,6 +151,8 @@ class VLLMOmniBackend:
 
         yaml_path = _resolve_stage_yaml(str(intent["stage_yaml"]), str(intent.get("stage_yaml_source", "local")))
         omni_kwargs = _assemble_omni_kwargs(intent)
+        ports = intent.get("ports")
+        boot_master_port = int(ports.master_port) if ports is not None else None
         logger.info(
             "VLLM-Omni boot intent (before engine startup):\n%s",
             pformat(
@@ -156,6 +160,7 @@ class VLLMOmniBackend:
                     **intent,
                     "stage_yaml_path": yaml_path,
                     "assembled_omni_kwargs": omni_kwargs,
+                    "boot_master_port": boot_master_port,
                 },
                 sort_dicts=True,
             ),
@@ -167,7 +172,7 @@ class VLLMOmniBackend:
             try:
                 if lock_file is not None:
                     fcntl.flock(lock_file, fcntl.LOCK_EX)
-                with _master_port_env_yielded("master_port" in omni_kwargs):
+                with _master_port_env(boot_master_port):
                     omni = rt["Omni"](
                         model=str(intent["model_path"]),
                         stage_configs_path=yaml_path,
