@@ -39,6 +39,7 @@ All in `runtime.py` unless noted.
 | Patch | Why | DELETE-WHEN |
 | --- | --- | --- |
 | `wrap_mp_process_for_children` | Re-installs the bundle inside every spawn child. **Must run first** | the rest of the bundle is empty |
+| `register_capture_flush` (`plugin.py`) | Flushes `_unirl_captures` into formatter `metadata["unirl"]` after postprocess. The `vllm_omni.general_plugins` entry point is not loaded in `StageDiffusionProc` (HI3's 2-stage path), so hijack installs it in spawn children | vllm-omni loads general plugins in every stage process including `StageDiffusionProc` |
 | `patch_dit_lora_loader` / `patch_ar_lora_loader` | Stock `DiffusionLoRAManager._load_adapter` loads only from a file path; RL pushes freshly-trained adapter tensors without a disk round-trip (`OmniTensorLoRARequest`). Lifted verbatim from verl-omni | vllm-omni's LoRA managers accept tensor-bag requests natively |
 | `patch_dit_hi3_lora_weights` | Resolves HI3 DiT `transformer.layers.*` wrappers against PEFT `model.layers.*` keys and converts GQA-interleaved fused-QKV LoRA-B rows to vLLM's packed `[q, k, v]` slices | [vllm-omni #6411](https://github.com/vllm-project/vllm-omni/issues/6411) is fixed and the pinned release includes it |
 | `patch_fp32_skip` | Punica kernels hard-assert dtype; HI3's MoE router gate is fp32, so non-fp16/bf16 layers must be skipped for LoRA wrapping | vllm's `from_layer` skips unsupported dtypes itself |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -89,13 +90,41 @@ def drain_trajectory_into(out: Any, scheduler: Any) -> None:
     stamp_capture(out, "sde_step_indices", scheduler.last_sde_step_indices)
 
 
+def _adopt_payload_trajectory(out: Any, traj: Any) -> None:
+    """Lift upstream payload trajectory onto ``trajectory_*`` so unwrap does not drop it."""
+    if isinstance(traj, Mapping):
+        if (latents := traj.get("latents")) is not None:
+            out.trajectory_latents = latents
+        if (timesteps := traj.get("timesteps")) is not None:
+            out.trajectory_timesteps = timesteps
+        if (log_probs := traj.get("log_probs")) is not None:
+            out.trajectory_log_probs = log_probs
+        if (decoded := traj.get("decoded")) is not None:
+            out.trajectory_decoded = decoded
+        return
+    if torch.is_tensor(traj):
+        out.trajectory_latents = traj
+
+
 def finalize_output(out: Any) -> None:
-    """Drop payload trajectory so ``trajectory_*`` wins; unwrap media so postprocess sees a tensor."""
+    """Keep captures and SDE trajectory; unwrap media so postprocess sees a tensor."""
     envelope = getattr(out, "output", None)
     if not (isinstance(envelope, dict) and isinstance(envelope.get("payload"), dict)):
         return
     payload = envelope["payload"]
-    payload.pop("trajectory", None)
+    extra = envelope.get("metadata")
+    if isinstance(extra, dict) and extra:
+        bag = _captures(out)
+        for key, value in extra.items():
+            if key not in bag:
+                bag[key] = value
+            elif isinstance(bag[key], dict) and isinstance(value, dict):
+                bag[key] = {**value, **bag[key]}
+    has_sde_traj = getattr(out, "trajectory_latents", None) is not None
+    if has_sde_traj:
+        payload.pop("trajectory", None)
+    elif "image" in payload or "video" in payload:
+        _adopt_payload_trajectory(out, payload.get("trajectory"))
     if "image" in payload:
         out.output = payload["image"]
     elif "video" in payload:

@@ -40,8 +40,8 @@ dependencies = [
   "tensordict>=0.5",
 ]
 
-# Loaded in every stage process so format_diffusion_outputs can flush
-# pipeline-side RL captures into metadata after postprocess.
+# Parent/inline engines load this. Multi-stage StageDiffusionProc does not —
+# VLLMOmniHijack.hijack() reinstalls the same hook in spawn children.
 [project.entry-points."vllm_omni.general_plugins"]
 unirl_capture_flush = "unirl.rollout.engine.vllm_omni.plugin:register_capture_flush"
 
@@ -86,7 +86,8 @@ vllm = [
   "vllm-omni==0.27.0rc1 ; sys_platform == 'linux'",
   "torch==2.13.0+cu130 ; sys_platform == 'linux'",
   "torchvision==0.28.0+cu130 ; sys_platform == 'linux'",
-  "torchaudio==2.11.0+cu130 ; sys_platform == 'linux'",
+  # torchaudio 2.11.0+cu130 is ABI-built against torch 2.11; there is no
+  # torchaudio >=2.12 on the cu130 index, so this extra does not pin it.
   "av>=14.2,<19 ; sys_platform == 'linux'",
 ]
 train = [
