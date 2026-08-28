@@ -33,7 +33,7 @@ CAPTURE_GROUP = "unirl"
 
 
 def single_request(req: Any, *, caller: str) -> Any:
-    """The one request of a ``DiffusionRequestBatch``."""
+    """Unwrap the one request; the GPU batch is ``num_outputs_per_prompt`` inside it, not request batching."""
     requests = getattr(req, "requests", None)
     if requests is None:
         return req
