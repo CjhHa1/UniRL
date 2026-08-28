@@ -11,7 +11,7 @@ import torch
 
 from unirl.config.require import require
 from unirl.models.types.diffusion import DiffusionStage
-from unirl.models.types.replay_result import ReplayResult, compute_transition_stds
+from unirl.models.types.replay_result import ReplayResult
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment
@@ -413,13 +413,14 @@ class SenseNovaU1DiffusionStage(DiffusionStage[SenseNovaU1Conditions]):
         batch_log_probs: List[torch.Tensor] = []
         batch_means: List[torch.Tensor] = []
         batch_stds: List[torch.Tensor] = []
-        unit_stds = compute_transition_stds(
-            self.strategy,
-            sigmas=schedule,
-            step_indices=target,
+        transition_schedule = schedule.to(dtype=torch.float32)
+        indices = torch.as_tensor(target, dtype=torch.long, device=device)
+        unit_stds = self.strategy.transition_std(
+            sigma=transition_schedule.index_select(0, indices),
+            sigma_next=transition_schedule.index_select(0, indices + 1),
             eta=float(params.eta),
             sigma_max=sigma_max,
-        )
+        ).reshape(1, len(target))
         for batch_index in range(conditions.batch_size):
             single = self._single_conditions(conditions, batch_index)
             noise_scale = resolve_noise_scale(self.model.model, tuple(single.image_shapes[0]))

@@ -11,7 +11,7 @@ import torch
 
 from unirl.config.require import require
 from unirl.models.types.diffusion import DiffusionStage
-from unirl.models.types.replay_result import ReplayResult, compute_transition_stds
+from unirl.models.types.replay_result import ReplayResult
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment
@@ -471,18 +471,7 @@ class BagelDiffusionStage(DiffusionStage[BagelDiffusionConditions]):
 
         log_probs_t = torch.stack(log_probs, dim=0).unsqueeze(0).to(dtype=self.logprob_dtype)
         means_t = torch.stack(prev_sample_means, dim=0).unsqueeze(0).to(dtype=self.trajectory_dtype)
-        transition_stds = compute_transition_stds(
-            self.strategy,
-            sigmas=schedule,
-            step_indices=target,
-            eta=float(params.eta),
-            sigma_max=sigma_max,
-        )
-        return ReplayResult(
-            log_probs=log_probs_t,
-            prev_sample_means=means_t,
-            transition_stds=transition_stds,
-        )
+        return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
 
     def build_forward_kwargs(
         self,

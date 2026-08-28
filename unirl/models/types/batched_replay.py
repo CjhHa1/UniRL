@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, List
 
 import torch
 
-from unirl.models.types.replay_result import ReplayResult, compute_transition_stds
+from unirl.models.types.replay_result import ReplayResult
 
 if TYPE_CHECKING:
     from unirl.types.segments.latent import LatentSegment
@@ -68,18 +68,7 @@ class BatchedStepReplayMixin:
         if prev_mean_all is not None:
             tail = prev_mean_all.shape[1:]
             means_t = prev_mean_all.view(S, B, *tail).transpose(0, 1).contiguous().to(dtype=self.trajectory_dtype)
-        transition_stds = compute_transition_stds(
-            self.strategy,
-            sigmas=sigmas,
-            step_indices=target,
-            eta=float(params.eta),
-            sigma_max=sigma_max,
-        )
-        return ReplayResult(
-            log_probs=log_probs_t,
-            prev_sample_means=means_t,
-            transition_stds=transition_stds,
-        )
+        return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
 
 
 __all__ = ["BatchedStepReplayMixin"]

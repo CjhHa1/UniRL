@@ -10,7 +10,7 @@ import torch
 
 from unirl.models.types.batched_replay import BatchedStepReplayMixin
 from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
-from unirl.models.types.replay_result import ReplayResult, compute_transition_stds
+from unirl.models.types.replay_result import ReplayResult
 from unirl.sde.kernels import SDEStrategy, StepStrategy
 from unirl.types.conditions import TextEmbedCondition
 from unirl.types.sampling import compute_trajectory_positions
@@ -464,18 +464,7 @@ class Flux2KleinDiffusionStage(BatchedStepReplayMixin, DiffusionStage[Flux2Klein
 
         log_probs_t = torch.stack(log_probs, dim=1).to(dtype=self.logprob_dtype)
         means_t = torch.stack(prev_sample_means, dim=1).to(dtype=self.trajectory_dtype) if prev_sample_means else None
-        transition_stds = compute_transition_stds(
-            self.strategy,
-            sigmas=sigmas,
-            step_indices=target,
-            eta=float(params.eta),
-            sigma_max=sigma_max,
-        )
-        return ReplayResult(
-            log_probs=log_probs_t,
-            prev_sample_means=means_t,
-            transition_stds=transition_stds,
-        )
+        return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
 
     @staticmethod
     def _tile_conditions(conditions: Flux2KleinConditions, repeats: int) -> Flux2KleinConditions:
