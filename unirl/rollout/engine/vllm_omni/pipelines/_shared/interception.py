@@ -103,16 +103,8 @@ def drain_trajectory_into(out: Any, scheduler: Any, *, payload_key: str = "image
     stamp_capture(out, "sde_step_indices", scheduler.last_sde_step_indices, payload_key=payload_key)
 
 
-def _grouped_span(idx: int, spp: int) -> tuple[int, int]:
-    spp = int(spp or 1)
-    if spp < 1:
-        raise ValueError(f"_grouped_span: spp must be >= 1, got {spp}")
-    start = int(idx) * spp
-    return start, start + spp
-
-
 def resolve_request_noise(req: Any, *, caller: str) -> Optional[torch.Tensor]:
-    """This request's driver x_T, sliced from ``[B, ...]`` keeping its leading ``[num_outputs_per_prompt, ...]``."""
+    """This request's driver x_T, sliced from ``[B, ...]`` by Omni's ``f'{i}_{uuid}'`` id."""
     extra = getattr(req.sampling_params, "extra_args", None) or {}
     noise_batch = extra.get("initial_noise_batch")
     recipe_gids = extra.get("init_noise_group_ids")
@@ -125,23 +117,15 @@ def resolve_request_noise(req: Any, *, caller: str) -> Optional[torch.Tensor]:
     except ValueError:
         raise RuntimeError(
             f"{caller}: cannot parse batch index from request_id={rid!r}. Expected Omni's ``f'{{i}}_{{uuid}}'`` shape."
-        )
+        ) from None
 
     spp = int(getattr(req.sampling_params, "num_outputs_per_prompt", 1) or 1)
-    start, end = _grouped_span(idx, spp)
-
+    start, end = idx * spp, (idx + 1) * spp
+    n = int(noise_batch.shape[0]) if noise_batch is not None else len(recipe_gids)
+    if spp < 1 or not 0 <= start < end <= n:
+        raise IndexError(f"{caller}: grouped slice [{start}:{end}) out of bounds for length {n} (spp={spp}).")
     if noise_batch is not None:
-        if start < 0 or end > int(noise_batch.shape[0]):
-            raise IndexError(
-                f"{caller}: grouped slice [{start}:{end}) out of bounds for "
-                f"noise_batch.shape[0]={int(noise_batch.shape[0])}."
-            )
         return noise_batch[start:end].clone()
-
-    if start < 0 or end > len(recipe_gids):
-        raise IndexError(
-            f"{caller}: grouped slice [{start}:{end}) out of bounds for init_noise_group_ids len={len(recipe_gids)}."
-        )
     return NoiseRecipe(
         noise_group_ids=[str(g) for g in recipe_gids[start:end]],
         base_seed=int(extra.get("init_noise_seed", 0)),
@@ -156,31 +140,13 @@ def inject_latents(
     noise: torch.Tensor,
 ) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
     """Slot a pre-computed x_T into a ``prepare_latents`` call site."""
-    names = [
-        name
-        for name, p in inspect.signature(target).parameters.items()
-        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-    ]
-
-    def _at(name: str) -> Any:
-        if name in names:
-            idx = names.index(name)
-            if len(args) > idx:
-                return args[idx]
-        return kwargs.get(name)
-
-    dtype, device = _at("dtype"), _at("device")
-    if dtype is not None:
+    bound = inspect.signature(target).bind_partial(*args, **kwargs)
+    if (dtype := bound.arguments.get("dtype")) is not None:
         noise = noise.to(dtype=dtype)
-    if device is not None:
+    if (device := bound.arguments.get("device")) is not None:
         noise = noise.to(device=device)
-
-    latents_idx = names.index("latents") if "latents" in names else None
-    if latents_idx is not None and len(args) > latents_idx:
-        args = (*args[:latents_idx], noise, *args[latents_idx + 1 :])
-    else:
-        kwargs = {**kwargs, "latents": noise}
-    return args, kwargs
+    bound.arguments["latents"] = noise
+    return bound.args, bound.kwargs
 
 
 def make_sde_scheduler(upstream_config: Any, *, eta: float = 0.0) -> FlowMatchSDEDiscreteScheduler:
@@ -193,7 +159,6 @@ __all__ = [
     "detach_cpu",
     "detach_cpu_pair",
     "drain_trajectory_into",
-    "_grouped_span",
     "inject_latents",
     "make_sde_scheduler",
     "read_captures",
