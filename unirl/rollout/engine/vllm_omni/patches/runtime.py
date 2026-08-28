@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import signal
 import threading
@@ -133,28 +132,6 @@ def wrap_mp_process_for_children() -> None:
     _MpBaseProcess.__init__ = __init__
     _MpBaseProcess.start = start
     setattr(_MpBaseProcess, _WRAP_SENTINEL, True)
-
-
-def patch_qwen3_omni_thinker_lora() -> None:
-    """Backport Qwen3-Omni Thinker LoRA support to vLLM-Omni 0.20."""
-    module_name = "vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker"
-    if importlib.util.find_spec(module_name) is None:
-        return
-
-    from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker import (
-        Qwen3OmniMoeThinkerForConditionalGeneration,
-        Qwen3OmniMoeThinkerMultiModalProcessor,
-    )
-
-    from unirl.rollout.engine.vllm_omni.patches.compat_qwen3_omni import (
-        patch_qwen3_omni_audio_truncation,
-        patch_qwen3_omni_audio_video_mrope,
-        patch_qwen3_omni_thinker_class,
-    )
-
-    patch_qwen3_omni_thinker_class(Qwen3OmniMoeThinkerForConditionalGeneration)
-    patch_qwen3_omni_audio_video_mrope(Qwen3OmniMoeThinkerForConditionalGeneration)
-    patch_qwen3_omni_audio_truncation(Qwen3OmniMoeThinkerMultiModalProcessor)
 
 
 def patch_dit_lora_loader() -> None:
@@ -555,7 +532,6 @@ class VLLMOmniHijack:
     def hijack() -> None:
         wrap_mp_process_for_children()
 
-        patch_qwen3_omni_thinker_lora()
         patch_dit_lora_loader()
         patch_dit_hi3_lora_weights()
         patch_ar_lora_loader()
