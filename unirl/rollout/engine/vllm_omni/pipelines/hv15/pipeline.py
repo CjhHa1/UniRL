@@ -19,7 +19,6 @@ from unirl.rollout.engine.vllm_omni.pipelines._shared.flow_match_sde_scheduler i
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import (
     detach_cpu,
     drain_trajectory_into,
-    finalize_output,
     inject_latents,
     make_sde_scheduler,
     resolve_request_noise,
@@ -95,7 +94,7 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         self._captured_conditioning = None
 
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
-        """Initial-noise injection point (consume-once); same dtype@4 / device@5 / latents@7 slots as SD3."""
+        """Initial-noise injection point: bypass upstream RNG when the driver supplied an x_T."""
         upstream = super().prepare_latents
         noise = self._pending_initial_noise
         if noise is not None:
@@ -146,14 +145,11 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
             out = super().forward(req, **kwargs)
 
         decoded = getattr(out, "output", None)
-        if isinstance(decoded, dict):
-            decoded = (decoded.get("payload") or {}).get("video")
         if decoded is not None:
             stamp_capture(out, "rl_decoded_video", detach_cpu(decoded))
 
         self._harvest_trajectory(out)
         self._harvest_conditioning(out)
-        finalize_output(out)
         return out
 
 

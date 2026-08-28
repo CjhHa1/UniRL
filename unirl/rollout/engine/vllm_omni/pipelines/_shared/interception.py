@@ -178,23 +178,16 @@ def inject_latents(
 
 
 def flush_captures_into_postprocess(diffusion_output: Any, postprocess_output: Any) -> Any:
-    """Copy the private capture bag into formatter metadata; drop payload trajectory when ``trajectory_*`` is set."""
+    """Copy the private capture bag into formatter metadata."""
     from dataclasses import replace
 
     captures = getattr(diffusion_output, CAPTURE_ATTR, None)
-    outputs = dict(postprocess_output.outputs)
-    metadata = dict(postprocess_output.metadata)
-    changed = False
-    if isinstance(captures, dict) and captures:
-        existing = metadata.get(CAPTURE_GROUP)
-        metadata[CAPTURE_GROUP] = {**(existing if isinstance(existing, dict) else {}), **captures}
-        changed = True
-    if getattr(diffusion_output, "trajectory_latents", None) is not None and "trajectory" in outputs:
-        outputs.pop("trajectory")
-        changed = True
-    if not changed:
+    if not (isinstance(captures, dict) and captures):
         return postprocess_output
-    return replace(postprocess_output, outputs=outputs, metadata=metadata)
+    metadata = dict(postprocess_output.metadata)
+    existing = metadata.get(CAPTURE_GROUP)
+    metadata[CAPTURE_GROUP] = {**(existing if isinstance(existing, dict) else {}), **captures}
+    return replace(postprocess_output, metadata=metadata)
 
 
 def make_sde_scheduler(upstream_config: Any, *, eta: float = 0.0) -> FlowMatchSDEDiscreteScheduler:

@@ -41,17 +41,12 @@ def _import_omni_runtime() -> Dict[str, Any]:
     }
 
 
-def _resolve_stage_yaml(name: str, source: str) -> str:
-    """Return the absolute path of the stage-config YAML asset."""
-    if source != "local":
-        raise ValueError(
-            f"_resolve_stage_yaml: unknown source {source!r} (expected 'local'). "
-            "vllm-omni has shipped no stage_configs directory since v0.21."
-        )
+def _resolve_stage_yaml(name: str) -> str:
+    """Return the absolute path of the local stage-config YAML asset."""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     path = os.path.join(here, "stage_configs", name)
     if not os.path.exists(path):
-        raise FileNotFoundError(f"_resolve_stage_yaml: local YAML not found at {path}")
+        raise FileNotFoundError(f"_resolve_stage_yaml: YAML not found at {path}")
     return path
 
 
@@ -149,7 +144,7 @@ class VLLMOmniBackend:
         except Exception:  # noqa: BLE001 - belt and braces; never block a boot
             pass
 
-        yaml_path = _resolve_stage_yaml(str(intent["stage_yaml"]), str(intent.get("stage_yaml_source", "local")))
+        yaml_path = _resolve_stage_yaml(str(intent["stage_yaml"]))
         omni_kwargs = _assemble_omni_kwargs(intent)
         ports = intent.get("ports")
         boot_master_port = int(ports.master_port) if ports is not None else None
