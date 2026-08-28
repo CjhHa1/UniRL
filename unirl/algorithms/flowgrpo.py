@@ -165,8 +165,6 @@ class FlowGRPO(StageAlgorithm):
                 target_steps=target_steps,
                 eta=float(self.params.eta),
                 device=new_logp.device,
-                transition_stds=replay_result.transition_stds,
-                like=new_means,
                 add_coefficient=True,
             )
             ref_means = _reference_replay_means(

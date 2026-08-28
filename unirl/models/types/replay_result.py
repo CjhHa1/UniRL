@@ -31,12 +31,5 @@ class ReplayResult:
     """Per-token critic predictions ``V_t``. Packed ``[total_tokens]`` for AR.
     ``None`` when replay did not request a value head."""
 
-    transition_stds: Optional[torch.Tensor] = None
-    """Optional transition-standard-deviation override aligned with
-    :attr:`prev_sample_means`. Most diffusion stages leave this unset and let
-    algorithms derive the standard deviation from the schedule and strategy.
-    Stages that return means in a transformed coordinate system may provide
-    ``[B|1, S', ...]`` values broadcastable to the replay means."""
-
 
 __all__ = ["ReplayResult"]

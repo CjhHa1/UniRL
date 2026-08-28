@@ -137,59 +137,20 @@ def _transition_sigma(
     target_steps: List[int],
     eta: float,
     device: torch.device,
-    transition_stds: Optional[torch.Tensor] = None,
-    like: Optional[torch.Tensor] = None,
     add_coefficient: bool = True,
 ) -> torch.Tensor:
-    """Resolve transition std, preferring a producer override when present."""
+    """Per-step SDE transition std ``sigma_t`` for KL normalization, shape ``[1, S', 1, 1, 1]``."""
     if not add_coefficient:
         return torch.ones(1, len(target_steps), 1, 1, 1, device=device)
-
-    if transition_stds is None:
-        if segment.sigmas is None:
-            raise ValueError("_transition_sigma requires segment.sigmas (add_coefficient=True).")
-        sigmas = segment.sigmas.to(device=device, dtype=torch.float32)
-        idx = torch.tensor(target_steps, dtype=torch.long, device=device)
-        sigma = sigmas[idx]
-        sigma_next = sigmas[idx + 1]
-        sigma_max = sigmas[1] if int(sigmas.shape[0]) > 1 else torch.tensor(0.99, device=device, dtype=sigmas.dtype)
-        sigma_t = stage.strategy.transition_std(
-            sigma=sigma,
-            sigma_next=sigma_next,
-            eta=float(eta),
-            sigma_max=sigma_max,
-        )
-        return sigma_t.reshape(1, -1, 1, 1, 1)
-
-    if like is None or like.ndim < 2 or int(like.shape[1]) != len(target_steps):
-        got = None if like is None else tuple(like.shape)
-        raise ValueError(
-            "_transition_sigma: `like` must have shape [B, len(target_steps), ...] "
-            f"when transition_stds is provided; got {got}."
-        )
-
-    sigma_t = transition_stds.to(device=device, dtype=torch.float32)
-    if sigma_t.ndim < 2 or int(sigma_t.shape[0]) not in {1, int(like.shape[0])}:
-        raise ValueError(
-            "_transition_sigma: transition std must align as [B|1, len(target_steps), ...]; "
-            f"got {tuple(sigma_t.shape)}."
-        )
-    if int(sigma_t.shape[1]) != len(target_steps):
-        raise ValueError(
-            "_transition_sigma: transition std step dimension must match target_steps; "
-            f"got {tuple(sigma_t.shape)} for {len(target_steps)} target step(s)."
-        )
-    if sigma_t.ndim > like.ndim:
-        raise ValueError(f"_transition_sigma: transition std rank {sigma_t.ndim} exceeds replay mean rank {like.ndim}.")
-    sigma_t = sigma_t.reshape(*sigma_t.shape, *([1] * (like.ndim - sigma_t.ndim)))
-    try:
-        torch.broadcast_shapes(tuple(sigma_t.shape), tuple(like.shape))
-    except RuntimeError as exc:
-        raise ValueError(
-            f"_transition_sigma: std shape {tuple(sigma_t.shape)} is not broadcastable "
-            f"to replay mean shape {tuple(like.shape)}."
-        ) from exc
-    return sigma_t
+    if segment.sigmas is None:
+        raise ValueError("_transition_sigma requires segment.sigmas (add_coefficient=True).")
+    sigmas = segment.sigmas.to(device=device, dtype=torch.float32)
+    idx = torch.tensor(target_steps, dtype=torch.long, device=device)
+    s = sigmas[idx]
+    s_next = sigmas[idx + 1]
+    sigma_max = sigmas[1] if int(sigmas.shape[0]) > 1 else torch.tensor(0.99, device=device, dtype=sigmas.dtype)
+    sigma_t = stage.strategy.transition_std(sigma=s, sigma_next=s_next, eta=float(eta), sigma_max=sigma_max)
+    return sigma_t.reshape(1, -1, 1, 1, 1)
 
 
 def _reference_replay_means(
