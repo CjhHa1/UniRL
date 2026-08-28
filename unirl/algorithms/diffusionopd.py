@@ -200,8 +200,6 @@ class DiffusionOPD(StageAlgorithm):
             target_steps=target_steps,
             eta=float(getattr(self.params, "eta", 1.0)),
             device=student_means.device,
-            transition_stds=replay_result.transition_stds,
-            like=student_means,
             add_coefficient=self.add_kl_coefficient,
         )
         kl_per_elem = _gaussian_kl_div(student_f32, teacher_f32, sigma_t)
