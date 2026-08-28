@@ -8,7 +8,7 @@ UniRL ships two mutually exclusive inference engines (`vllm` and `sglang`) — i
 | **sglang** | 13.0 | ≥ 2.34 |
 
 Both engines are CUDA 13 now. On the driver-535 fleet that means NVIDIA's
-`cuda-compat-13-0` forward-compat layer has to be on `LD_LIBRARY_PATH`; the Taiji
+`cuda-compat-13-0` forward-compat layer has to be on `LD_LIBRARY_PATH`; the
 launchers find it under `.cuda-compat-13/` or `/usr/local/cuda-13.*/`, or take an
 explicit `CUDA_COMPAT_DIR`.
 
