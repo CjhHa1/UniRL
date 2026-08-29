@@ -69,6 +69,7 @@ class FSDPBackend(BaseFSDP2Backend):
             mixed_precision=fsdp_cfg.mixed_precision,
             cast_forward_inputs=fsdp_cfg.cast_forward_inputs,
             fsdp_mode=fsdp_cfg.fsdp_mode,
+            hsdp_shard_size=fsdp_cfg.hsdp_shard_size,
             reshard_after_forward=fsdp_cfg.reshard_after_forward,
             forward_prefetch=fsdp_cfg.forward_prefetch,
             activation_checkpointing=fsdp_cfg.activation_checkpointing,
