@@ -53,6 +53,7 @@ class FSDPBackend(BaseFSDP2Backend):
         self._bundle = bundle
         self._rank = int(rank)
         self._device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _ensure_dist_initialized()
 
         self._weight_sync_dtype: torch.dtype = parse_torch_dtype(
             fsdp_cfg.param_dtype, field_name="training.fsdp.param_dtype"
@@ -121,6 +122,16 @@ class FSDPBackend(BaseFSDP2Backend):
 
     def _offload_model(self) -> None:
         fsdp_offload(self.model)
+
+
+def _ensure_dist_initialized() -> None:
+    """Bring up the default process group before constructing an explicit FSDP2 mesh."""
+    import os
+
+    import torch.distributed as dist
+
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1 and not dist.is_initialized():
+        dist.init_process_group()
 
 
 __all__ = ["FSDPBackend"]
