@@ -24,6 +24,7 @@ defaults:
   - _self_
 
 num_devices: 16
+batch_size: 16
 
 logging:
   tags: [minimax-h3, t2va, flowgrpo, trainside, hsdp, 2x8, audio, stereo]

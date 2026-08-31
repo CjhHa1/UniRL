@@ -174,6 +174,8 @@ def fsdp_wrap(
                 "DP-synced and replicas drift. Enable training.fsdp.root_wrap or freeze them.",
             )
 
+    _validate_hsdp_mesh(model, fsdp_mode=fsdp_mode, hsdp_shard_size=hsdp_shard_size)
+
     if forward_prefetch:
         if not isinstance(model, FSDPModule):
             raise ValueError(
@@ -297,6 +299,43 @@ def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Optional
     )
     logger.info("fsdp_wrap: %s mesh dp_replicate=%d x dp_shard=%d", mode, replicate_size, shard_size)
     return mesh
+
+
+def _validate_hsdp_mesh(model: nn.Module, *, fsdp_mode: str, hsdp_shard_size: int) -> None:
+    """Fail fast unless every FSDP DTensor uses the requested two-dimensional HSDP mesh."""
+    if str(fsdp_mode).strip().lower() != "hybrid":
+        return
+
+    import torch.distributed as dist
+    from torch.distributed.tensor import DTensor
+
+    if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+        return
+
+    expected_shape = (dist.get_world_size() // hsdp_shard_size, hsdp_shard_size)
+    expected_names = ("dp_replicate", "dp_shard")
+    checked = 0
+    mismatches = []
+    for name, param in model.named_parameters():
+        if not isinstance(param, DTensor):
+            continue
+        checked += 1
+        mesh = param.device_mesh
+        shape = tuple(int(size) for size in mesh.shape)
+        names = tuple(mesh.mesh_dim_names or ())
+        if shape != expected_shape or names != expected_names:
+            mismatches.append((name, shape, names))
+            if len(mismatches) == 3:
+                break
+
+    require(checked > 0, "fsdp_wrap: hybrid mode produced no DTensor parameters; HSDP was not installed.")
+    require(
+        not mismatches,
+        f"fsdp_wrap: hybrid mode requested mesh {expected_names}={expected_shape}, "
+        f"but found mismatched DTensor meshes: {mismatches}.",
+    )
+    if _current_rank() == 0:
+        logger.info("fsdp_wrap: validated HSDP mesh dp_replicate=%d x dp_shard=%d", *expected_shape)
 
 
 def _current_rank() -> int:
