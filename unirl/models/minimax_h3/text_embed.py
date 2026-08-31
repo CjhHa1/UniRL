@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import TYPE_CHECKING, List
 
 import torch
@@ -25,6 +26,11 @@ class MiniMaxH3TextEmbedStage:
         self.tokenizer = bundle.tokenizer
         self.dtype = bundle.dtype
         self.device = bundle.device
+        # The encoder is frozen and prompt-only. Trainside forward_batch_size=1
+        # invokes pipeline.generate once per sibling sample, so cache on CPU to
+        # avoid repeating a 32B conditioner forward for the same prompt.
+        self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
+        self._cache_size = 64
 
     @property
     def _encoder_device(self) -> torch.device:
@@ -56,22 +62,15 @@ class MiniMaxH3TextEmbedStage:
         encoder_device = self._encoder_device
         embeds = []
         for prompt in prompts:
-            token_ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
-            input_ids = torch.tensor([token_ids], dtype=torch.long, device=encoder_device)
-            # Qwen3-VL lays its 3D rotary positions out per modality run, read
-            # off the token type ids the processor derives (0 text, 1 image,
-            # 2 video). Text-only here, but the conditioner still wants them.
-            mm_token_type_ids = torch.tensor(
-                self.processor.create_mm_token_type_ids([token_ids]), dtype=torch.long, device=encoder_device
-            )
-            outputs = self.text_encoder.model(
-                input_ids=input_ids,
-                attention_mask=torch.ones_like(input_ids),
-                mm_token_type_ids=mm_token_type_ids,
-                use_cache=False,
-                output_hidden_states=True,
-            )
-            embeds.append(outputs.hidden_states[MINIMAX_H3_TEXT_ENCODER_LAYER].to(device=self.device, dtype=self.dtype))
+            cached = self._cache.get(prompt)
+            if cached is None:
+                cached = self._encode_prompt(prompt, encoder_device).detach().to("cpu").contiguous()
+                self._cache[prompt] = cached
+                if len(self._cache) > self._cache_size:
+                    self._cache.popitem(last=False)
+            else:
+                self._cache.move_to_end(prompt)
+            embeds.append(cached.to(device=self.device, dtype=self.dtype))
 
         lengths = {int(e.shape[1]) for e in embeds}
         require(
@@ -85,6 +84,25 @@ class MiniMaxH3TextEmbedStage:
             embeds=text_embeds,
             attn_mask=torch.ones(text_embeds.shape[:2], dtype=torch.bool, device=text_embeds.device),
         )
+
+    def _encode_prompt(self, prompt: str, encoder_device: torch.device) -> torch.Tensor:
+        """Run the frozen Qwen3-VL conditioner once for one prompt."""
+        token_ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        input_ids = torch.tensor([token_ids], dtype=torch.long, device=encoder_device)
+        # Qwen3-VL lays its 3D rotary positions out per modality run, read
+        # off the token type ids the processor derives (0 text, 1 image,
+        # 2 video). Text-only here, but the conditioner still wants them.
+        mm_token_type_ids = torch.tensor(
+            self.processor.create_mm_token_type_ids([token_ids]), dtype=torch.long, device=encoder_device
+        )
+        outputs = self.text_encoder.model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            mm_token_type_ids=mm_token_type_ids,
+            use_cache=False,
+            output_hidden_states=True,
+        )
+        return outputs.hidden_states[MINIMAX_H3_TEXT_ENCODER_LAYER]
 
 
 __all__ = ["MiniMaxH3TextEmbedStage"]
