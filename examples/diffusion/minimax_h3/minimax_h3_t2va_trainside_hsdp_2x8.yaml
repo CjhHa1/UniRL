@@ -7,11 +7,11 @@
 # hold replicated model copies whose gradients are synchronized.
 #
 # Launch:
-#   bash examples/run_experiment_multinode_taiji.sh \
+#   bash examples/run_experiment_multinode.sh \
 #     diffusion/minimax_h3/minimax_h3_t2va_trainside_hsdp_2x8
 #
 # Cheap one-rollout smoke:
-#   bash examples/run_experiment_multinode_taiji.sh \
+#   bash examples/run_experiment_multinode.sh \
 #     diffusion/minimax_h3/minimax_h3_t2va_trainside_hsdp_2x8 \
 #     num_rollouts=1
 #
