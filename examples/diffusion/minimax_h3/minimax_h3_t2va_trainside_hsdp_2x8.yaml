@@ -29,6 +29,12 @@ batch_size: 16
 logging:
   tags: [minimax-h3, t2va, flowgrpo, trainside, hsdp, 2x8, audio, stereo]
 
+bundle:
+  config:
+    # H20 has enough room when the two VAEs move to CPU during the one uncached
+    # Qwen3-VL forward; the encoder returns to CPU before video denoising.
+    text_encoder_onload_for_embed: true
+
 backend:
   fsdp_cfg:
     fsdp_mode: hybrid
