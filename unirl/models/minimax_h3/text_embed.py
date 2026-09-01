@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import time
 from collections import OrderedDict
@@ -134,20 +135,29 @@ class MiniMaxH3TextEmbedStage:
             yield
             return
 
-        vae_devices = [(module, next(module.parameters()).device) for module in (self.vae, self.audio_vae)]
-        try:
-            for module, device in vae_devices:
-                if device.type == "cuda":
-                    module.to("cpu")
-            torch.cuda.empty_cache()
-            self.text_encoder.to(target_device)
-            yield
-        finally:
-            self.text_encoder.to("cpu")
-            torch.cuda.empty_cache()
-            for module, device in vae_devices:
-                if device.type == "cuda":
-                    module.to(device)
+        # Eight DP workers share one node's host-memory channels. Concurrently
+        # paging and copying eight 64 GB encoders made every H2D transfer
+        # hour-scale; serialize the residency window per node while allowing
+        # the two nodes to proceed independently.
+        lock_started = time.perf_counter()
+        with open("/tmp/unirl_minimax_h3_text_encoder_onload.lock", "a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            logger.info("MiniMaxH3 conditioner residency lock acquired after %.3fs", time.perf_counter() - lock_started)
+            vae_devices = [(module, next(module.parameters()).device) for module in (self.vae, self.audio_vae)]
+            try:
+                for module, device in vae_devices:
+                    if device.type == "cuda":
+                        module.to("cpu")
+                torch.cuda.empty_cache()
+                self.text_encoder.to(target_device)
+                yield
+            finally:
+                self.text_encoder.to("cpu")
+                torch.cuda.empty_cache()
+                for module, device in vae_devices:
+                    if device.type == "cuda":
+                        module.to(device)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 __all__ = ["MiniMaxH3TextEmbedStage"]
