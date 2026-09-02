@@ -39,3 +39,10 @@ backend:
   fsdp_cfg:
     fsdp_mode: hybrid
     hsdp_shard_size: 8
+
+sampling:
+  # Topology gate: one replay transition is enough to exercise backward,
+  # reduce-scatter, replica all-reduce, and optimizer state without retaining
+  # the three-transition production graph that exhausts H20 memory under HSDP.
+  num_inference_steps: 2
+  sde_indices: [0]
