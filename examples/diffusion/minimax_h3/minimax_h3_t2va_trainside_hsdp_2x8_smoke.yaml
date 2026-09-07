@@ -1,5 +1,5 @@
 # @package _global_
-# MiniMax-H3 t2va Flow-GRPO — 2 nodes x 8 GPUs, trainside HSDP validation.
+# MiniMax-H3 t2va Flow-GRPO — 2 nodes x 8 GPUs, trainside HSDP smoke.
 #
 # This keeps the validated model, mixed-dtype, LoRA, rollout, and replay
 # settings from minimax_h3_t2va_trainside. Only the distributed topology
@@ -8,12 +8,7 @@
 #
 # Launch:
 #   bash examples/run_experiment_multinode.sh \
-#     diffusion/minimax_h3/minimax_h3_t2va_trainside_hsdp_2x8
-#
-# Cheap one-rollout smoke:
-#   bash examples/run_experiment_multinode.sh \
-#     diffusion/minimax_h3/minimax_h3_t2va_trainside_hsdp_2x8 \
-#     num_rollouts=1
+#     diffusion/minimax_h3/minimax_h3_t2va_trainside_hsdp_2x8_smoke
 #
 # Larger HSDP shard groups are selected with
 # backend.fsdp_cfg.hsdp_shard_size=32. A shard of 32 needs a world larger than
@@ -25,9 +20,10 @@ defaults:
 
 num_devices: 16
 batch_size: 16
+num_rollouts: 1
 
 logging:
-  tags: [minimax-h3, t2va, flowgrpo, trainside, hsdp, 2x8, audio, stereo]
+  tags: [minimax-h3, t2va, flowgrpo, trainside, hsdp, 2x8, smoke, audio, stereo]
 
 bundle:
   config:
@@ -41,8 +37,7 @@ backend:
     hsdp_shard_size: 8
 
 sampling:
-  # Topology gate: one replay transition is enough to exercise backward,
-  # reduce-scatter, replica all-reduce, and optimizer state without retaining
-  # the three-transition production graph that exhausts H20 memory under HSDP.
+  # One replay transition is enough to exercise backward, reduce-scatter,
+  # replica all-reduce, and optimizer state within the H20 memory envelope.
   num_inference_steps: 2
   sde_indices: [0]

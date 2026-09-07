@@ -90,6 +90,7 @@ class MiniMaxH3PipelineConfig:
     # When the frozen conditioner is parked on CPU, temporarily move the VAEs
     # off GPU and onload Qwen3-VL only while computing uncached prompt embeds.
     # Intended for ~95 GB H20-class devices; lower-memory recipes leave it off.
+    # UNIRL_MINIMAX_H3_ONLOAD_SERIALIZE=0 disables the per-node transfer lock.
     text_encoder_onload_for_embed: bool = False
 
     # The two VAEs are a SEPARATE decision from the conditioner, and default to

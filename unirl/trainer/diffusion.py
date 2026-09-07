@@ -13,6 +13,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
+from unirl.train.configs import resolve_fsdp_mesh_shape
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
 from unirl.trainer.eval_suites import EvalRewardSuite, build_eval_suites
@@ -133,6 +134,11 @@ def _validate_static_trainside_dp_geometry(
         raise ValueError(
             f"Static trainside geometry: {shared_devices} shared devices are not divisible by sp_size={sp_size}."
         )
+    resolve_fsdp_mesh_shape(
+        fsdp_cfg.get("fsdp_mode", "full"),
+        world_size=shared_devices,
+        hsdp_shard_size=fsdp_cfg.get("hsdp_shard_size", 8),
+    )
     shared_dp_size = shared_devices // sp_size
 
     if reward_cfg is None:

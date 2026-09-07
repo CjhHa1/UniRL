@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import logging
+import os
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
+from datetime import timedelta
+from functools import cache
 from typing import TYPE_CHECKING, Iterator, List
 
 import torch
@@ -14,6 +18,8 @@ import torch
 from unirl.config.require import require
 from unirl.types.conditions import TextEmbedCondition
 from unirl.types.primitives import Texts
+from unirl.utils.distributed_utils import find_dtensor_mesh, init_gloo_group, init_gloo_subgroup
+from unirl.utils.run_id import resolve_run_id
 
 from .vendor import MINIMAX_H3_TEXT_ENCODER_LAYER
 
@@ -21,6 +27,31 @@ if TYPE_CHECKING:
     from .bundle import MiniMaxH3Bundle
 
 logger = logging.getLogger(__name__)
+_EMBED_SYNC_TIMEOUT = timedelta(minutes=30)
+
+
+@cache
+def _residency_lock_path() -> str:
+    """Return a per-run, per-user node-local conditioner lock path."""
+    fallback = ":".join((os.environ.get("MASTER_ADDR", "local"), os.environ.get("MASTER_PORT", "single")))
+    digest = hashlib.sha256(f"{os.getuid()}:{resolve_run_id(fallback=fallback)}".encode()).hexdigest()[:16]
+    return f"/tmp/unirl_minimax_h3_onload_{digest}.lock"
+
+
+@contextmanager
+def _serialize_residency() -> Iterator[float]:
+    """Serialize host-to-device conditioner transfers within one run and node."""
+    if os.environ.get("UNIRL_MINIMAX_H3_ONLOAD_SERIALIZE", "1") == "0":
+        yield 0.0
+        return
+
+    started = time.perf_counter()
+    with open(_residency_lock_path(), "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield time.perf_counter() - started
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class MiniMaxH3TextEmbedStage:
@@ -32,6 +63,7 @@ class MiniMaxH3TextEmbedStage:
         self.tokenizer = bundle.tokenizer
         self.dtype = bundle.dtype
         self.device = bundle.device
+        self.transformer = bundle.transformer
         self.vae = bundle.vae
         self.audio_vae = bundle.audio_vae
         self._onload_for_embed = bundle.text_encoder_onload_for_embed
@@ -40,6 +72,7 @@ class MiniMaxH3TextEmbedStage:
         # avoid repeating a 32B conditioner forward for the same prompt.
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._cache_size = 64
+        self._embedding_sync_group = None
 
     @property
     def _encoder_device(self) -> torch.device:
@@ -84,7 +117,8 @@ class MiniMaxH3TextEmbedStage:
         for prompt in unique_prompts:
             if prompt in self._cache:
                 self._cache.move_to_end(prompt)
-        logger.info(
+        self._synchronize_embedding_ranks()
+        logger.debug(
             "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f",
             len(prompts),
             len(unique_prompts) - len(missing),
@@ -105,6 +139,34 @@ class MiniMaxH3TextEmbedStage:
         return TextEmbedCondition(
             embeds=text_embeds,
             attn_mask=torch.ones(text_embeds.shape[:2], dtype=torch.bool, device=text_embeds.device),
+        )
+
+    def _synchronize_embedding_ranks(self) -> None:
+        """Keep delayed conditioner loads out of the next FSDP NCCL collective."""
+        if not self._onload_for_embed:
+            return
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
+            return
+
+        if self._embedding_sync_group is None:
+            match = find_dtensor_mesh(self.transformer)
+            fsdp_group = None
+            if match is not None:
+                _, mesh = match
+                mesh_names = tuple(mesh.mesh_dim_names or ())
+                if "dp_shard" in mesh_names:
+                    fsdp_group = mesh.get_group("dp_shard")
+                elif len(mesh.shape) == 1:
+                    fsdp_group = mesh.get_group()
+            self._embedding_sync_group = (
+                init_gloo_group() if fsdp_group is None else init_gloo_subgroup(fsdp_group, timeout=_EMBED_SYNC_TIMEOUT)
+            )
+        dist.monitored_barrier(
+            group=self._embedding_sync_group,
+            timeout=_EMBED_SYNC_TIMEOUT,
+            wait_all_ranks=True,
         )
 
     def _encode_prompt(self, prompt: str, encoder_device: torch.device) -> torch.Tensor:
@@ -139,10 +201,11 @@ class MiniMaxH3TextEmbedStage:
         # paging and copying eight 64 GB encoders made every H2D transfer
         # hour-scale; serialize the residency window per node while allowing
         # the two nodes to proceed independently.
-        lock_started = time.perf_counter()
-        with open("/tmp/unirl_minimax_h3_text_encoder_onload.lock", "a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            logger.info("MiniMaxH3 conditioner residency lock acquired after %.3fs", time.perf_counter() - lock_started)
+        with _serialize_residency() as lock_wait:
+            if lock_wait >= 60.0:
+                logger.warning("MiniMaxH3 conditioner residency lock wait: %.1fs", lock_wait)
+            else:
+                logger.debug("MiniMaxH3 conditioner residency lock wait: %.3fs", lock_wait)
             vae_devices = [(module, next(module.parameters()).device) for module in (self.vae, self.audio_vae)]
             try:
                 for module, device in vae_devices:
@@ -152,12 +215,13 @@ class MiniMaxH3TextEmbedStage:
                 self.text_encoder.to(target_device)
                 yield
             finally:
-                self.text_encoder.to("cpu")
-                torch.cuda.empty_cache()
-                for module, device in vae_devices:
-                    if device.type == "cuda":
-                        module.to(device)
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                try:
+                    self.text_encoder.to("cpu")
+                finally:
+                    torch.cuda.empty_cache()
+                    for module, device in vae_devices:
+                        if device.type == "cuda":
+                            module.to(device)
 
 
 __all__ = ["MiniMaxH3TextEmbedStage"]

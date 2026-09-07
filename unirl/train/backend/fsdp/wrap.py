@@ -10,6 +10,8 @@ import torch
 from torch import nn
 
 from unirl.config.require import require
+from unirl.train.configs import normalize_fsdp_mode, resolve_fsdp_mesh_shape
+from unirl.utils.distributed_utils import find_dtensor_mesh
 from unirl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
@@ -91,7 +93,7 @@ def fsdp_wrap(
     if cpu_offload:
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
 
-    mesh = _create_device_mesh(fsdp_mode, hsdp_shard_size=hsdp_shard_size)
+    mode, mesh = _create_device_mesh(fsdp_mode, hsdp_shard_size=hsdp_shard_size)
     if mesh is not None:
         fsdp_kwargs["mesh"] = mesh
 
@@ -174,7 +176,7 @@ def fsdp_wrap(
                 "DP-synced and replicas drift. Enable training.fsdp.root_wrap or freeze them.",
             )
 
-    if str(fsdp_mode).strip().lower() == "hybrid":
+    if mode == "hybrid":
         _validate_hsdp_mesh(model, expected_mesh=mesh)
 
     if forward_prefetch:
@@ -243,86 +245,47 @@ def _enumerate_block_instances(
     return tuple(m for _, m in model.named_modules() if type(m).__name__ in names)
 
 
-_FSDP_MODES = ("full", "hybrid", "no_shard")
-
-
-def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Optional[object]:
-    mode = str(fsdp_mode).strip().lower()
-    require(
-        mode in _FSDP_MODES,
-        f"training.fsdp.fsdp_mode={fsdp_mode!r} is not one of {list(_FSDP_MODES)}; "
-        "an unrecognized mode would silently fall back to full sharding.",
-    )
+def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Tuple[str, Optional[object]]:
+    mode = normalize_fsdp_mode(fsdp_mode)
     if mode == "full":
-        return None
-
-    if mode == "hybrid":
-        require(
-            isinstance(hsdp_shard_size, int) and not isinstance(hsdp_shard_size, bool),
-            f"training.fsdp.hsdp_shard_size must be an integer >= 2, got {hsdp_shard_size!r}.",
-        )
-        require(
-            hsdp_shard_size >= 2,
-            f"training.fsdp.hsdp_shard_size must be >= 2, got {hsdp_shard_size}.",
-        )
-        shard_size = hsdp_shard_size
-    else:
-        shard_size = 1
+        return mode, None
 
     import torch.distributed as dist
 
-    if mode == "hybrid":
+    if not (dist.is_available() and dist.is_initialized()):
         require(
-            dist.is_available(),
-            "training.fsdp.fsdp_mode='hybrid' requires torch.distributed support.",
-        )
-        require(
-            dist.is_initialized(),
+            mode == "no_shard",
             "training.fsdp.fsdp_mode='hybrid' requires an initialized default process group; "
             "refusing to silently fall back to full sharding.",
         )
-    elif not (dist.is_available() and dist.is_initialized()):
-        return None
+        return mode, None
 
     world_size = dist.get_world_size()
-    if mode == "no_shard" and world_size == 1:
-        return None
-    if mode == "hybrid":
-        require(
-            world_size > shard_size,
-            f"training.fsdp.fsdp_mode='hybrid' requires world_size > hsdp_shard_size "
-            f"to form at least two replica groups, got world_size={world_size}, "
-            f"hsdp_shard_size={shard_size}. Use fsdp_mode='full' for one shard group.",
-        )
-        require(
-            world_size % shard_size == 0,
-            f"training.fsdp.fsdp_mode='hybrid' requires world_size divisible by "
-            f"hsdp_shard_size, got world_size={world_size}, hsdp_shard_size={shard_size}.",
-        )
+    _, mesh_shape = resolve_fsdp_mesh_shape(
+        mode,
+        world_size=world_size,
+        hsdp_shard_size=hsdp_shard_size,
+    )
+    if mesh_shape is None:
+        return mode, None
 
     from torch.distributed.device_mesh import init_device_mesh
 
-    replicate_size = world_size // shard_size
     mesh = init_device_mesh(
         "cuda",
-        (replicate_size, shard_size),
+        mesh_shape,
         mesh_dim_names=("dp_replicate", "dp_shard"),
     )
-    logger.info("fsdp_wrap: %s mesh dp_replicate=%d x dp_shard=%d", mode, replicate_size, shard_size)
-    return mesh
+    if _current_rank() == 0:
+        logger.info("fsdp_wrap: %s mesh dp_replicate=%d x dp_shard=%d", mode, *mesh_shape)
+    return mode, mesh
 
 
 def _validate_hsdp_mesh(model: nn.Module, *, expected_mesh: object) -> None:
     """Confirm that FSDP installed the requested HSDP mesh on a representative parameter."""
-    from torch.distributed.tensor import DTensor
-
-    actual_mesh = None
-    for name, param in model.named_parameters():
-        if isinstance(param, DTensor):
-            actual_mesh = param.device_mesh
-            break
-
-    require(actual_mesh is not None, "fsdp_wrap: hybrid mode produced no DTensor parameters; HSDP was not installed.")
+    match = find_dtensor_mesh(model)
+    require(match is not None, "fsdp_wrap: hybrid mode produced no DTensor parameters; HSDP was not installed.")
+    name, actual_mesh = match
     expected_shape = tuple(int(size) for size in expected_mesh.shape)
     expected_names = tuple(expected_mesh.mesh_dim_names or ())
     actual_shape = tuple(int(size) for size in actual_mesh.shape)

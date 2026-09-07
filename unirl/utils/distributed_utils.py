@@ -1,22 +1,46 @@
-"""Distributed helper utilities shared by rollout-side weight sync."""
+"""Shared distributed-process and process-group utilities."""
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import torch
 import torch.distributed as dist
-from torch.distributed.distributed_c10d import (
-    Backend,
-    PrefixStore,
-    Store,
-    _new_process_group_helper,
-    _world,
-    default_pg_timeout,
-    rendezvous,
-)
+
+if TYPE_CHECKING:
+    from torch.distributed.distributed_c10d import Backend, Store
+
+logger = logging.getLogger(__name__)
 
 GLOO_GROUP = None
+GLOO_SUBGROUPS: dict[tuple[int, ...], Any] = {}
+
+
+def find_dtensor_mesh(model: torch.nn.Module) -> tuple[str, Any] | None:
+    """Return one DTensor parameter name and its device mesh."""
+    from torch.distributed.tensor import DTensor
+
+    for name, param in model.named_parameters():
+        if isinstance(param, DTensor):
+            return name, param.device_mesh
+    return None
+
+
+def ensure_dist_initialized(local_rank: int | None = None) -> None:
+    """Idempotently bring up the default process group."""
+    if not dist.is_available():
+        raise RuntimeError("torch.distributed is unavailable")
+    if torch.cuda.is_available() and local_rank is not None:
+        torch.cuda.set_device(local_rank)
+    if not dist.is_initialized():
+        dist.init_process_group()
+        logger.info(
+            "ensure_dist_initialized: default process group up (rank=%s world=%s)",
+            dist.get_rank(),
+            dist.get_world_size(),
+        )
 
 
 def init_gloo_group():
@@ -25,6 +49,27 @@ def init_gloo_group():
     if GLOO_GROUP is None:
         GLOO_GROUP = dist.new_group(backend="gloo")
     return GLOO_GROUP
+
+
+def init_gloo_subgroup(group: Any, *, timeout: timedelta = timedelta(minutes=30)):
+    """Mirror one contiguous shard group with globally ordered Gloo groups."""
+    ranks = tuple(dist.get_process_group_ranks(group))
+    world_size = dist.get_world_size()
+    if len(ranks) == world_size:
+        return init_gloo_group()
+
+    if world_size % len(ranks):
+        raise ValueError(f"Gloo subgroup size {len(ranks)} must divide world_size={world_size}.")
+    partitions = [tuple(range(start, start + len(ranks))) for start in range(0, world_size, len(ranks))]
+    if ranks not in partitions:
+        raise ValueError(f"Gloo subgroup ranks must form a contiguous partition, got {ranks}.")
+
+    if ranks not in GLOO_SUBGROUPS:
+        for peers in partitions:
+            control_group = dist.new_group(ranks=list(peers), backend="gloo", timeout=timeout)
+            if peers == ranks:
+                GLOO_SUBGROUPS[ranks] = control_group
+    return GLOO_SUBGROUPS[ranks]
 
 
 def get_gloo_group():
@@ -46,6 +91,15 @@ def init_process_group(
     pg_options: Any | None = None,
 ):
     """Copy of PyTorch init_process_group that can create extra main groups."""
+    from torch.distributed.distributed_c10d import (
+        Backend,
+        PrefixStore,
+        _new_process_group_helper,
+        _world,
+        default_pg_timeout,
+        rendezvous,
+    )
+
     assert (store is None) or (init_method is None), "Cannot specify both init_method and store."
 
     if store is not None:

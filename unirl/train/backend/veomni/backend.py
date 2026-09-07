@@ -32,6 +32,7 @@ from unirl.train.configs import (
     FSDPConfig,
     LoraConfig,
 )
+from unirl.utils.distributed_utils import ensure_dist_initialized
 from unirl.utils.dtypes import parse_torch_dtype
 
 
@@ -61,7 +62,7 @@ class VeOmniBackend(BaseFSDP2Backend):
         from unirl.train.backend.veomni import _compat
 
         _, _, local_rank = _compat.rank_world_local()
-        _compat.ensure_dist_initialized(local_rank)
+        ensure_dist_initialized(local_rank)
         import torch.distributed as dist
 
         self._rank = dist.get_rank() if dist.is_initialized() else int(rank)
