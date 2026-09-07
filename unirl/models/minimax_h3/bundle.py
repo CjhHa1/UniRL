@@ -52,7 +52,7 @@ class MiniMaxH3Bundle(Bundle):
         self.device = device
         self.pretrained_path = pretrained_path
         self.max_sequence_length = max_sequence_length
-        self.text_encoder_onload_for_embed = bool(text_encoder_onload_for_embed)
+        self.text_encoder_onload_for_embed = text_encoder_onload_for_embed
 
     @classmethod
     def from_config(cls, config: MiniMaxH3PipelineConfig) -> "MiniMaxH3Bundle":

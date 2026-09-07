@@ -34,7 +34,7 @@ class MiniMaxH3TextEmbedStage:
         self.device = bundle.device
         self.vae = bundle.vae
         self.audio_vae = bundle.audio_vae
-        self._onload_for_embed = bool(bundle.text_encoder_onload_for_embed)
+        self._onload_for_embed = bundle.text_encoder_onload_for_embed
         # The encoder is frozen and prompt-only. Trainside forward_batch_size=1
         # invokes pipeline.generate once per sibling sample, so cache on CPU to
         # avoid repeating a 32B conditioner forward for the same prompt.
