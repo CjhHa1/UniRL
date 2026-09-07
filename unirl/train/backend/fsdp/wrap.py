@@ -174,7 +174,8 @@ def fsdp_wrap(
                 "DP-synced and replicas drift. Enable training.fsdp.root_wrap or freeze them.",
             )
 
-    _validate_hsdp_mesh(model, fsdp_mode=fsdp_mode, hsdp_shard_size=hsdp_shard_size)
+    if str(fsdp_mode).strip().lower() == "hybrid":
+        _validate_hsdp_mesh(model, expected_mesh=mesh)
 
     if forward_prefetch:
         if not isinstance(model, FSDPModule):
@@ -270,7 +271,17 @@ def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Optional
 
     import torch.distributed as dist
 
-    if not (dist.is_available() and dist.is_initialized()):
+    if mode == "hybrid":
+        require(
+            dist.is_available(),
+            "training.fsdp.fsdp_mode='hybrid' requires torch.distributed support.",
+        )
+        require(
+            dist.is_initialized(),
+            "training.fsdp.fsdp_mode='hybrid' requires an initialized default process group; "
+            "refusing to silently fall back to full sharding.",
+        )
+    elif not (dist.is_available() and dist.is_initialized()):
         return None
 
     world_size = dist.get_world_size()
@@ -301,38 +312,25 @@ def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Optional
     return mesh
 
 
-def _validate_hsdp_mesh(model: nn.Module, *, fsdp_mode: str, hsdp_shard_size: int) -> None:
-    """Fail fast unless every FSDP DTensor uses the requested two-dimensional HSDP mesh."""
-    if str(fsdp_mode).strip().lower() != "hybrid":
-        return
-
-    import torch.distributed as dist
+def _validate_hsdp_mesh(model: nn.Module, *, expected_mesh: object) -> None:
+    """Confirm that FSDP installed the requested HSDP mesh on a representative parameter."""
     from torch.distributed.tensor import DTensor
 
-    if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
-        return
-
-    expected_shape = (dist.get_world_size() // hsdp_shard_size, hsdp_shard_size)
-    expected_names = ("dp_replicate", "dp_shard")
-    checked = 0
-    mismatches = []
+    actual_mesh = None
     for name, param in model.named_parameters():
-        if not isinstance(param, DTensor):
-            continue
-        checked += 1
-        mesh = param.device_mesh
-        shape = tuple(int(size) for size in mesh.shape)
-        names = tuple(mesh.mesh_dim_names or ())
-        if shape != expected_shape or names != expected_names:
-            mismatches.append((name, shape, names))
-            if len(mismatches) == 3:
-                break
+        if isinstance(param, DTensor):
+            actual_mesh = param.device_mesh
+            break
 
-    require(checked > 0, "fsdp_wrap: hybrid mode produced no DTensor parameters; HSDP was not installed.")
+    require(actual_mesh is not None, "fsdp_wrap: hybrid mode produced no DTensor parameters; HSDP was not installed.")
+    expected_shape = tuple(int(size) for size in expected_mesh.shape)
+    expected_names = tuple(expected_mesh.mesh_dim_names or ())
+    actual_shape = tuple(int(size) for size in actual_mesh.shape)
+    actual_names = tuple(actual_mesh.mesh_dim_names or ())
     require(
-        not mismatches,
+        actual_shape == expected_shape and actual_names == expected_names,
         f"fsdp_wrap: hybrid mode requested mesh {expected_names}={expected_shape}, "
-        f"but found mismatched DTensor meshes: {mismatches}.",
+        f"but parameter {name!r} uses {actual_names}={actual_shape}.",
     )
     if _current_rank() == 0:
         logger.info("fsdp_wrap: validated HSDP mesh dp_replicate=%d x dp_shard=%d", *expected_shape)
