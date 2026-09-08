@@ -55,6 +55,13 @@ class ImageBindRewardScorer(LocalRewardBackend):
             batch_size=config.batch_size,
         )
 
+    def covers_prompt_video(self) -> bool:
+        if self._mode == "text_video":
+            return True
+        if self._mode == "all":
+            return float(self._weights.get("text_video", 0.0)) != 0.0
+        return False
+
     def _load_model(self) -> None:
         warnings.warn(_IMAGEBIND_LICENSE_WARNING, stacklevel=2)
         try:

@@ -36,6 +36,16 @@ class RewardBackend(ABC):
         """The decoded media kind this backend consumes (image/video/text)."""
         return str(getattr(self, "input_kind", "image") or "image").strip().lower()
 
+    def covers_prompt_video(self) -> bool:
+        """Whether this backend scores alignment between the prompt and the video.
+
+        T2AVCompositeScorer refuses to start when no positive-weight inner
+        scorer returns True here. Default is False; video-text scorers opt in.
+        ImageBind returns True only for ``text_video`` / ``all`` (with a
+        nonzero ``text_video`` mix weight), not for ``audio_video``.
+        """
+        return False
+
     @abstractmethod
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
         """Score the request."""
