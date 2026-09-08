@@ -122,6 +122,14 @@ class BaseRolloutEngine(Remote, ABC):
         """Receive a bucket of weights via the established NCCL group."""
         raise NotImplementedError
 
+    def begin_weights_update(self, *, group_name: str, track_prefix: str = "") -> None:
+        """Mark the start of a multi-bucket weight publication."""
+        del group_name, track_prefix
+
+    def finish_weights_update(self, *, group_name: str, track_prefix: str = "") -> None:
+        """Commit a successfully received multi-bucket weight publication."""
+        del group_name, track_prefix
+
     def destroy_weights_update_group(
         self,
         *,
