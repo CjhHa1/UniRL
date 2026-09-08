@@ -59,7 +59,7 @@ def _validate_prompt_tree_dp_geometry(
             )
 
 
-def _validate_diffusion_dp_geometry(
+def _validate_dp_geometry(
     *,
     batch_size: int,
     samples_per_prompt: int,
@@ -103,7 +103,7 @@ def _validate_diffusion_dp_geometry(
         )
 
 
-def _validate_static_trainside_dp_geometry(
+def _preflight_trainside_geometry(
     *,
     num_devices: int,
     layout: str,
@@ -154,7 +154,7 @@ def _validate_static_trainside_dp_geometry(
     else:
         reward_dp_size = shared_devices
 
-    _validate_diffusion_dp_geometry(
+    _validate_dp_geometry(
         batch_size=batch_size,
         samples_per_prompt=samples_per_prompt,
         num_updates_per_batch=num_updates_per_batch,
@@ -406,7 +406,7 @@ class DiffusionTrainer(BaseTrainer):
             )
         self._reward_is_separate = reward_separate
 
-        _validate_static_trainside_dp_geometry(
+        _preflight_trainside_geometry(
             num_devices=int(self.num_devices),
             layout=self._layout,
             reward_fraction=reward_fraction,
@@ -454,7 +454,7 @@ class DiffusionTrainer(BaseTrainer):
         self._validate_accumulation(stack_cfg)
 
         self._validate_residency_config()
-        _validate_diffusion_dp_geometry(
+        _validate_dp_geometry(
             batch_size=int(batch_size),
             samples_per_prompt=total_samples_per_prompt(self.sampling_params),
             num_updates_per_batch=int(stack_cfg.get("num_updates_per_batch", 1)),
