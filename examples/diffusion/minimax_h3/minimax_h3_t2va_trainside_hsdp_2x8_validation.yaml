@@ -1,5 +1,5 @@
 # @package _global_
-# MiniMax-H3 t2va Flow-GRPO — 2 nodes x 8 GPUs, trainside HSDP smoke.
+# MiniMax-H3 t2va Flow-GRPO — 2 nodes x 8 GPUs, trainside HSDP validation.
 #
 # This keeps the validated model, mixed-dtype, LoRA, rollout, and replay
 # settings from minimax_h3_t2va_trainside. Only the distributed topology
@@ -8,7 +8,7 @@
 #
 # Launch:
 #   bash examples/run_experiment_multinode.sh \
-#     diffusion/minimax_h3/minimax_h3_t2va_trainside_hsdp_2x8_smoke
+#     diffusion/minimax_h3/minimax_h3_t2va_trainside_hsdp_2x8_validation
 #
 # Larger HSDP shard groups are selected with
 # backend.fsdp_cfg.hsdp_shard_size=32. A shard of 32 needs a world larger than
@@ -23,7 +23,7 @@ batch_size: 16
 num_rollouts: 1
 
 logging:
-  tags: [minimax-h3, t2va, flowgrpo, trainside, hsdp, 2x8, smoke, audio, stereo]
+  tags: [minimax-h3, t2va, flowgrpo, trainside, hsdp, 2x8, validation, audio, stereo]
 
 bundle:
   config:
