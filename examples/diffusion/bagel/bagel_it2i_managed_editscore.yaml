@@ -199,8 +199,8 @@ reward:
           backbone: qwen3vl_vllm
           lora_path: ${oc.env:EDITSCORE_LORA,EditScore/EditScore-Qwen3-VL-8B-Instruct}
           # cache_dir: point EDITSCORE_MERGED_CACHE at shared storage so the one-time
-          # LoRA-merge artifact (~17GB for 8B) is reused across hosts. Start with
-          # an empty path; legacy caches lack UniRL's completion/provenance manifest.
+          # LoRA-merge artifact (~17GB for 8B) is reused across hosts. The target
+          # must not exist yet; legacy caches lack UniRL's completion/provenance manifest.
           cache_dir: ${oc.decode:${oc.env:EDITSCORE_MERGED_CACHE,null}}
           score_range: 25
           num_pass: 1
@@ -212,14 +212,10 @@ reward:
         _target_: unirl.reward.remote.RemoteRewardSpec
         base_url: managed://rank-affine
         required_rewards: [editscore]
-        reward_weights: {editscore: 1.0}
-        batch_size: 8
         request_batch_size: 8
         timeout: 600.0
         # EditScore exposes its calibrated `overall` metric first.
         sub_metric_reduce: first
-        aggregation_method: weighted_sum
-        input_kind: image
       gpu_residency: per_call
 
 algorithm:

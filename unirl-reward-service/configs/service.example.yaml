@@ -233,7 +233,7 @@ rewards:
   #     model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
   #     backbone: qwen3vl_vllm
   #     lora_path: EditScore/EditScore-Qwen3-VL-8B-Instruct
-  #     # Use an empty path; legacy upstream-built caches have no UniRL
+  #     # Use a target path that does not exist yet; legacy upstream-built caches have no UniRL
   #     # completion/provenance manifest and are rejected.
   #     cache_dir: /shared/path/EditScore-Qwen3-VL-8B-merged
   #     score_range: 25
