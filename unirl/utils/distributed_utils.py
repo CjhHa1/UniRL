@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
     from torch.distributed.distributed_c10d import Backend, Store
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 GLOO_GROUP = None
 
 
-def find_dtensor_mesh(model: torch.nn.Module) -> Any | None:
+def find_dtensor_mesh(model: torch.nn.Module) -> DeviceMesh | None:
     """Return one DTensor parameter's device mesh."""
     from torch.distributed.tensor import DTensor
 
