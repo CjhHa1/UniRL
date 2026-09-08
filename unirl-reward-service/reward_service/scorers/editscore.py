@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from numbers import Real
 from pathlib import Path
 from statistics import fmean
-from typing import Any, Iterator, cast
+from typing import Any, Iterator
 
 from PIL import Image
 
@@ -32,33 +32,20 @@ from reward_service.scorers.registry import register
 
 logger = get_logger(__name__)
 
-_VLLM_BACKBONE_MODULES = {
-    "qwen3vl_vllm": "editscore.mllm_tools.qwen3vl_vllm",
-    "qwen25vl_vllm": "editscore.mllm_tools.qwen25vl_vllm",
+_BACKBONES: dict[str, tuple[str, str] | None] = {
+    "qwen3vl": None,
+    "qwen25vl": None,
+    "qwen3vl_vllm": ("editscore.mllm_tools.qwen3vl_vllm", "Qwen3VLForConditionalGeneration"),
+    "qwen25vl_vllm": ("editscore.mllm_tools.qwen25vl_vllm", "Qwen2_5_VLForConditionalGeneration"),
 }
-_SUPPORTED_BACKBONES = {"qwen3vl", "qwen3vl_vllm", "qwen25vl", "qwen25vl_vllm"}
-_RESERVED_LLM_KWARGS = {"enable_sleep_mode"}
 _SLEEP_MANAGED_LLM_KWARGS = {"enable_prefix_caching", "mm_processor_cache_gb"}
 _MAX_PARSE_ATTEMPTS = 3
 _CACHE_MANIFEST = ".unirl-editscore-cache.json"
-_MERGE_MODEL_CLASSES = {
-    "qwen25vl_vllm": "Qwen2_5_VLForConditionalGeneration",
-    "qwen3vl_vllm": "Qwen3VLForConditionalGeneration",
-}
 _PreparedRow = tuple[int, str, Any, Any]
 
 
 class _InvalidJudgeOutput(ValueError):
     """One row could not be parsed into valid EditScore values."""
-
-
-def _cache_identity(model: str, lora: str, backbone: str) -> dict[str, object]:
-    return {
-        "format_version": 1,
-        "backbone": backbone,
-        "model_name_or_path": model,
-        "lora_path": lora,
-    }
 
 
 def _validate_cache(path: Path, expected: dict[str, object]) -> None:
@@ -90,7 +77,7 @@ def _merge_checkpoint(path: Path, *, model: str, lora: str, backbone: str) -> No
     from peft import PeftModel
     from transformers import AutoProcessor
 
-    model_cls = getattr(transformers, _MERGE_MODEL_CLASSES[backbone])
+    model_cls = getattr(transformers, _BACKBONES[backbone][1])
     merged = model_cls.from_pretrained(model, torch_dtype=torch.bfloat16, device_map="cpu")
     merged = PeftModel.from_pretrained(merged, lora).merge_and_unload()
     merged.save_pretrained(path)
@@ -104,7 +91,12 @@ def _prepare_merged_checkpoint(
     backbone: str,
     cache_dir: str | None,
 ) -> str:
-    expected = _cache_identity(model, lora, backbone)
+    expected = {
+        "format_version": 1,
+        "backbone": backbone,
+        "model_name_or_path": model,
+        "lora_path": lora,
+    }
     if cache_dir is None:
         import torch
 
@@ -123,7 +115,6 @@ def _prepare_merged_checkpoint(
             _validate_cache(target, expected)
             return str(target)
 
-        target.parent.mkdir(parents=True, exist_ok=True)
         cutoff = time.time() - 24 * 60 * 60
         for stale in target.parent.glob(f".{target.name}.tmp-*"):
             try:
@@ -156,28 +147,13 @@ def _require_positive_int(name: str, value: Any) -> None:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
 
 
-def _require_bool(name: str, value: Any) -> None:
-    if not isinstance(value, bool):
-        raise TypeError(f"{name} must be a bool, got {type(value).__name__}")
-
-
-def _require_finite_real(
-    name: str,
-    value: Any,
-    *,
-    minimum: float,
-    maximum: float | None = None,
-    minimum_exclusive: bool = False,
-) -> None:
-    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
+def _finite_number(name: str, value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(f"{name} must be a finite number, got {value!r}")
-    below_minimum = float(value) <= minimum if minimum_exclusive else float(value) < minimum
-    if below_minimum or (maximum is not None and float(value) > maximum):
-        left = "(" if minimum_exclusive else "["
-        upper = maximum if maximum is not None else "+inf"
-        right = "]" if maximum is not None else ")"
-        interval = f"{left}{minimum}, {upper}{right}"
-        raise ValueError(f"{name} must be in {interval}, got {value!r}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    return number
 
 
 def _engine_kwargs(
@@ -187,7 +163,7 @@ def _engine_kwargs(
     enable_sleep_mode: bool,
 ) -> dict[str, Any]:
     injected = dict(extra_llm_kwargs or {})
-    overlap = _RESERVED_LLM_KWARGS & set(injected)
+    overlap = {"enable_sleep_mode"} & set(injected)
     if gpu_memory_utilization is not None and "gpu_memory_utilization" in injected:
         overlap.add("gpu_memory_utilization")
     if enable_sleep_mode:
@@ -197,13 +173,9 @@ def _engine_kwargs(
     if gpu_memory_utilization is not None:
         injected["gpu_memory_utilization"] = gpu_memory_utilization
     elif "gpu_memory_utilization" in injected:
-        _require_finite_real(
-            "extra_llm_kwargs['gpu_memory_utilization']",
-            injected["gpu_memory_utilization"],
-            minimum=0.0,
-            maximum=1.0,
-            minimum_exclusive=True,
-        )
+        utilization = _finite_number("extra_llm_kwargs['gpu_memory_utilization']", injected["gpu_memory_utilization"])
+        if not 0.0 < utilization <= 1.0:
+            raise ValueError("extra_llm_kwargs['gpu_memory_utilization'] must be in (0, 1]")
     if enable_sleep_mode:
         injected.update(
             enable_sleep_mode=True,
@@ -220,7 +192,7 @@ def _inject_llm_kwargs(backbone: str, injected: dict[str, Any]) -> Iterator[None
         yield
         return
 
-    module = importlib.import_module(_VLLM_BACKBONE_MODULES[backbone])
+    module = importlib.import_module(_BACKBONES[backbone][0])
     original_llm = module.LLM
 
     def llm_with_injected_kwargs(**kwargs):
@@ -267,8 +239,9 @@ class EditScoreScorer(BaseScorer):
     ) -> None:
         if not isinstance(model_name_or_path, str) or not model_name_or_path.strip():
             raise ValueError("model_name_or_path must be a non-empty string")
-        if not isinstance(backbone, str) or backbone not in _SUPPORTED_BACKBONES:
-            raise ValueError(f"backbone must be one of {sorted(_SUPPORTED_BACKBONES)}, got {backbone!r}")
+        if not isinstance(backbone, str) or backbone not in _BACKBONES:
+            raise ValueError(f"backbone must be one of {sorted(_BACKBONES)}, got {backbone!r}")
+        is_vllm = _BACKBONES[backbone] is not None
         for name, value in (("lora_path", lora_path), ("cache_dir", cache_dir)):
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"{name} must be a non-empty string or None")
@@ -283,26 +256,25 @@ class EditScoreScorer(BaseScorer):
             _require_positive_int(name, value)
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise TypeError(f"seed must be an int, got {type(seed).__name__}")
-        _require_finite_real("temperature", temperature, minimum=0.0)
-        if gpu_memory_utilization is not None:
-            _require_finite_real(
-                "gpu_memory_utilization",
-                gpu_memory_utilization,
-                minimum=0.0,
-                maximum=1.0,
-                minimum_exclusive=True,
-            )
-        _require_bool("enable_sleep_mode", enable_sleep_mode)
-        _require_bool("batched", batched)
+        if _finite_number("temperature", temperature) < 0.0:
+            raise ValueError("temperature must be non-negative")
+        if (
+            gpu_memory_utilization is not None
+            and not 0.0 < _finite_number("gpu_memory_utilization", gpu_memory_utilization) <= 1.0
+        ):
+            raise ValueError("gpu_memory_utilization must be in (0, 1]")
+        for name, value in (("enable_sleep_mode", enable_sleep_mode), ("batched", batched)):
+            if not isinstance(value, bool):
+                raise TypeError(f"{name} must be a bool, got {type(value).__name__}")
         if extra_llm_kwargs is not None and not isinstance(extra_llm_kwargs, dict):
             raise TypeError("extra_llm_kwargs must be a dict or None")
         if max_image_side is not None:
             _require_positive_int("max_image_side", max_image_side)
-        if cache_dir is not None and (lora_path is None or backbone not in _VLLM_BACKBONE_MODULES):
+        if cache_dir is not None and (lora_path is None or not is_vllm):
             raise ValueError("cache_dir is only valid for a LoRA used with a vLLM backbone")
-        if enable_sleep_mode and backbone not in _VLLM_BACKBONE_MODULES:
+        if enable_sleep_mode and not is_vllm:
             raise ValueError("enable_sleep_mode requires a vLLM backbone")
-        if (gpu_memory_utilization is not None or extra_llm_kwargs) and backbone not in _VLLM_BACKBONE_MODULES:
+        if (gpu_memory_utilization is not None or extra_llm_kwargs) and not is_vllm:
             raise ValueError("vLLM engine kwargs require a vLLM backbone")
         injected = _engine_kwargs(
             extra_llm_kwargs=extra_llm_kwargs,
@@ -317,7 +289,7 @@ class EditScoreScorer(BaseScorer):
 
         resolved_model = model_name_or_path
         resolved_lora = lora_path
-        if lora_path is not None and backbone in _VLLM_BACKBONE_MODULES:
+        if lora_path is not None and is_vllm:
             resolved_model = _prepare_merged_checkpoint(
                 model=model_name_or_path,
                 lora=lora_path,
@@ -333,7 +305,6 @@ class EditScoreScorer(BaseScorer):
                 backbone=backbone,
                 model_name_or_path=resolved_model,
                 lora_path=resolved_lora,
-                cache_dir=None,
                 score_range=score_range,
                 num_pass=num_pass,
                 temperature=temperature,
@@ -346,7 +317,7 @@ class EditScoreScorer(BaseScorer):
 
         self.supports_offload = enable_sleep_mode
         self._max_image_side = max_image_side
-        self._use_batch_inference = batched and backbone in _VLLM_BACKBONE_MODULES
+        self._use_batch_inference = batched and is_vllm
 
     def _cap_image(self, img: Image.Image) -> Image.Image:
         """Bound vision tokens before upstream processing.
@@ -376,7 +347,7 @@ class EditScoreScorer(BaseScorer):
 
     def score(self, items: list[ScoreItem]) -> list[dict[str, float]]:
         rows: list[_PreparedRow] = []
-        results: list[dict[str, float] | None] = [None] * len(items)
+        results = [self._failure_result() for _ in items]
         for i, item in enumerate(items):
             try:
                 prompt, source_image, edited_image = self._unpack_item(item)
@@ -388,7 +359,6 @@ class EditScoreScorer(BaseScorer):
                 row = (i, prompt, sc_message, pq_message)
             except Exception:
                 logger.exception("EditScore failed to score item %d", i)
-                results[i] = self._failure_result()
                 continue
             if self._use_batch_inference:
                 rows.append(row)
@@ -398,10 +368,10 @@ class EditScoreScorer(BaseScorer):
 
         if rows:
             scored = self._score_rows(rows)
-            for row, output in zip(rows, scored, strict=True):
+            for row, output in zip(rows, scored):
                 results[row[0]] = output if output is not None else self._failure_result()
 
-        return cast(list[dict[str, float]], results)
+        return results
 
     def _run_inference(self, messages: list[Any], *, seed: int) -> list[str]:
         if self._use_batch_inference:
@@ -442,15 +412,15 @@ class EditScoreScorer(BaseScorer):
         scores = parsed.get("score")
         if not isinstance(scores, list) or len(scores) != expected_count:
             raise _InvalidJudgeOutput(f"expected {expected_count} scores, got {scores!r}")
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, Real)
-            or not math.isfinite(float(value))
-            or not 0.0 <= float(value) <= score_range
-            for value in scores
-        ):
-            raise _InvalidJudgeOutput(f"scores must be finite numbers in [0, {score_range}], got {scores!r}")
-        return tuple(float(value) for value in scores)
+        normalized = []
+        for value in scores:
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise _InvalidJudgeOutput(f"scores must be real numbers, got {scores!r}")
+            number = float(value)
+            if not math.isfinite(number) or not 0.0 <= number <= score_range:
+                raise _InvalidJudgeOutput(f"scores must be finite and in [0, {score_range}], got {scores!r}")
+            normalized.append(number)
+        return tuple(normalized)
 
     @classmethod
     def _parse_metrics(
@@ -509,7 +479,7 @@ class EditScoreScorer(BaseScorer):
                 )
 
                 retry: list[int] = []
-                for row_index, sc_text, pq_text in zip(pending, sc_texts, pq_texts, strict=True):
+                for row_index, sc_text, pq_text in zip(pending, sc_texts, pq_texts):
                     prompt = rows[row_index][1]
                     try:
                         pass_outs[row_index] = self._parse_metrics(
