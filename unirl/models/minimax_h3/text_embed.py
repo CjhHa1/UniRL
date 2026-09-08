@@ -8,7 +8,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from functools import cache
 from typing import TYPE_CHECKING, Iterator, List
@@ -38,17 +38,16 @@ def _residency_lock_path() -> str:
 
 
 @contextmanager
-def _serialize_residency() -> Iterator[float]:
+def _serialize_residency() -> Iterator[None]:
     """Serialize host-to-device conditioner transfers within one run and node."""
     if os.environ.get("UNIRL_MINIMAX_H3_ONLOAD_SERIALIZE", "1") == "0":
-        yield 0.0
+        yield
         return
 
-    started = time.perf_counter()
     with open(_residency_lock_path(), "a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            yield time.perf_counter() - started
+            yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
@@ -200,27 +199,17 @@ class MiniMaxH3TextEmbedStage:
         # paging and copying eight 64 GB encoders made every H2D transfer
         # hour-scale; serialize the residency window per node while allowing
         # the two nodes to proceed independently.
-        with _serialize_residency() as lock_wait:
-            if lock_wait >= 60.0:
-                logger.warning("MiniMaxH3 conditioner residency lock wait: %.1fs", lock_wait)
-            else:
-                logger.debug("MiniMaxH3 conditioner residency lock wait: %.3fs", lock_wait)
-            vae_devices = [(module, next(module.parameters()).device) for module in (self.vae, self.audio_vae)]
-            try:
-                for module, device in vae_devices:
-                    if device.type == "cuda":
-                        module.to("cpu")
-                torch.cuda.empty_cache()
-                self.text_encoder.to(target_device)
-                yield
-            finally:
-                try:
-                    self.text_encoder.to("cpu")
-                finally:
-                    torch.cuda.empty_cache()
-                    for module, device in vae_devices:
-                        if device.type == "cuda":
-                            module.to(device)
+        with _serialize_residency(), ExitStack() as cleanup:
+            for module in (self.vae, self.audio_vae):
+                device = next(module.parameters()).device
+                if device.type == "cuda":
+                    module.to("cpu")
+                    cleanup.callback(module.to, device)
+            torch.cuda.empty_cache()
+            cleanup.callback(torch.cuda.empty_cache)
+            self.text_encoder.to(target_device)
+            cleanup.callback(self.text_encoder.to, "cpu")
+            yield
 
 
 __all__ = ["MiniMaxH3TextEmbedStage"]
