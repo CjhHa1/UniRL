@@ -233,13 +233,14 @@ rewards:
   #     model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
   #     backbone: qwen3vl_vllm
   #     lora_path: EditScore/EditScore-Qwen3-VL-8B-Instruct
+  #     # Use an empty path; legacy upstream-built caches have no UniRL
+  #     # completion/provenance manifest and are rejected.
   #     cache_dir: /shared/path/EditScore-Qwen3-VL-8B-merged
   #     score_range: 25
   #     num_pass: 1
   #     max_model_len: 8192
   #     max_num_batched_tokens: 8192
   #     gpu_memory_utilization: 0.85
-  #     report_sub_metrics: [overall]
 
   # ─────────────── GenEval (compositional) — DISABLED ───────────────
   # Classic GenEval: Mask2Former (mmdet) object detection + CLIP color

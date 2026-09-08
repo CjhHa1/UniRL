@@ -9,18 +9,18 @@
 # (EDITSCORE_BASE_MODEL / EDITSCORE_LORA); the scorer merges them once and
 # caches the merged checkpoint under EDITSCORE_MERGED_CACHE.
 #
-# NOTE: this scorer runs vLLM in its own venv, so its torch build must match
-# the driver's CUDA runtime — install torch and vllm together rather than
-# letting pip resolve them independently (a cu130 torch against a CUDA 12.9
-# driver fails at engine start).
+# vLLM/transformers match the validated judge stack. Torch intentionally
+# inherits from the Ray base environment: runtime_env uses system site
+# packages, so installing a second CUDA torch here can mismatch extensions
+# already present in the base environment. Managed-child venvs should pair
+# vLLM 0.20 with the host-compatible torch build (the validated stack used
+# torch 2.11 cu129).
 
 editscore @ git+https://github.com/VectorSpaceLab/EditScore.git@4609c5d2ebb62fdebf665d3c924686d896ef1f74
-vllm
-transformers
-torch
-torchvision
+vllm==0.20.0
+transformers==4.57.1
 accelerate
-peft
+peft==0.20.0
 safetensors
 huggingface_hub
 qwen-vl-utils

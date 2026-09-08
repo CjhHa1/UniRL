@@ -119,6 +119,7 @@ backend:
     fsdp_mode: full
     reshard_after_forward: true
     activation_checkpointing: true     # 7B + multi-step replay: required
+    ac_wrap_order: inside              # recompute re-enters FSDP hooks; matches the validated it2i sibling
     use_torch_compile: false
     root_wrap: false                   # vendored BAGEL calls embed_tokens/lm_head outside a root forward
   optimizer_cfg:
@@ -185,7 +186,9 @@ reward:
         startup_timeout: 1200
         shutdown_timeout: 30
         log_dir: ${oc.env:EDITSCORE_CHILD_LOG_DIR,/tmp/unirl-reward}
-        offline: true
+        # Defaults below are Hub IDs; set EDITSCORE_OFFLINE=true only when the
+        # base, adapter, and merged cache are already available locally.
+        offline: ${oc.decode:${oc.env:EDITSCORE_OFFLINE,false}}
       scorer:
         _target_: unirl.reward.managed_process.ManagedScorerConfig
         name: editscore
@@ -196,7 +199,8 @@ reward:
           backbone: qwen3vl_vllm
           lora_path: ${oc.env:EDITSCORE_LORA,EditScore/EditScore-Qwen3-VL-8B-Instruct}
           # cache_dir: point EDITSCORE_MERGED_CACHE at shared storage so the one-time
-          # LoRA-merge artifact (~17GB for 8B) is reused across hosts.
+          # LoRA-merge artifact (~17GB for 8B) is reused across hosts. Start with
+          # an empty path; legacy caches lack UniRL's completion/provenance manifest.
           cache_dir: ${oc.decode:${oc.env:EDITSCORE_MERGED_CACHE,null}}
           score_range: 25
           num_pass: 1
@@ -204,7 +208,6 @@ reward:
           max_num_batched_tokens: 8192
           gpu_memory_utilization: 0.3
           enable_sleep_mode: true
-          report_sub_metrics: [overall]
       client:
         _target_: unirl.reward.remote.RemoteRewardSpec
         base_url: managed://rank-affine
@@ -213,8 +216,7 @@ reward:
         batch_size: 8
         request_batch_size: 8
         timeout: 600.0
-        # Only `overall` is emitted; keep first so broadening report_sub_metrics
-        # later cannot silently average correlated EditScore dimensions.
+        # EditScore exposes its calibrated `overall` metric first.
         sub_metric_reduce: first
         aggregation_method: weighted_sum
         input_kind: image
