@@ -21,6 +21,7 @@ from unirl.sde.runtime import FlowMatchSchedulePolicy, ensure_sample_sigmas
 from unirl.types.primitives import Images
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import DiffusionSamplingParams
+from unirl.utils.dtypes import parse_torch_dtype
 
 from .config import NativeSD3EngineConfig
 from .quantization import FP8Controller, RoutedTransformer, convert_transformer_for_fp8
@@ -65,6 +66,16 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         self.config = config
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.rank = int(rank)
+        if bool(model_config.meta_init_transformer):
+            raise ValueError("NativeSD3RolloutEngine requires meta_init_transformer=false for its eager model copy.")
+        if bool(config.fp8_enabled):
+            model_dtype = parse_torch_dtype(model_config.model_precision, field_name="model_precision")
+            autocast_dtype = parse_torch_dtype(model_config.autocast_precision, field_name="autocast_precision")
+            if model_dtype != torch.bfloat16 or autocast_dtype != torch.bfloat16:
+                raise ValueError(
+                    "NativeSD3 FP8 conversion requires BF16 model and autocast precision; "
+                    f"got model={model_dtype}, autocast={autocast_dtype}."
+                )
         runtime_model_config = dataclasses.replace(model_config, device=self.device, load_vae=True)
         self.bundle = SD3Bundle.from_config(runtime_model_config)
         self.pipeline = SD3Pipeline(
@@ -91,11 +102,11 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         if bool(config.compile_model):
             transformer = torch.compile(transformer, mode=str(config.compile_mode))
         self.bundle.transformer = RoutedTransformer(transformer, self._controller).eval()
-        self.pipeline.diffusion.model = self.bundle
 
         self._weight_groups: Dict[str, dist.ProcessGroup] = {}
         self._generate_lock = threading.Lock()
         self._shutdown = False
+        self._weights_valid = True
         self._version = 0
         logger.info(
             "NativeSD3 rollout ready rank=%d fp8=%s converted=%d skipped=%d",
@@ -112,6 +123,8 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         with self._generate_lock:
             if self._shutdown:
                 raise RuntimeError("NativeSD3RolloutEngine.generate called after shutdown.")
+            if not self._weights_valid:
+                raise RuntimeError("NativeSD3RolloutEngine has an incomplete failed weight publication.")
             result = self._generate_core(sample)
             return self._stamp_output_version(result)
 
@@ -174,14 +187,24 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         del track_prefix
         from unirl.utils.distributed_utils import init_process_group
 
+        group_name = str(group_name)
+        if group_name in self._weight_groups:
+            raise RuntimeError(f"Native SD3 weight group {group_name!r} is already initialized.")
         group = init_process_group(
             backend=backend,
             init_method=f"tcp://{master_address}:{int(master_port)}",
             world_size=int(world_size),
             rank=int(rank_offset),
-            group_name=str(group_name),
+            group_name=group_name,
         )
-        self._weight_groups[str(group_name)] = group
+        self._weight_groups[group_name] = group
+
+    def begin_weights_update(self, *, group_name: str, track_prefix: str = "") -> None:
+        del track_prefix
+        if str(group_name) not in self._weight_groups:
+            raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
+        with self._generate_lock:
+            self._weights_valid = False
 
     def update_weights_from_distributed(
         self,
@@ -194,28 +217,42 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         flush_cache: bool = True,
         track_prefix: str = "",
     ) -> None:
-        del target_modules, track_prefix
+        del target_modules, flush_cache, track_prefix
         if not (len(names) == len(dtypes) == len(shapes)):
             raise ValueError(f"names/dtypes/shapes length mismatch: {len(names)}/{len(dtypes)}/{len(shapes)}")
         group = self._weight_groups.get(str(group_name))
         if group is None:
             raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
 
-        received: List[tuple[str, torch.Tensor]] = []
-        for name, dtype_name, shape in zip(names, dtypes, shapes):
-            tensor = torch.empty(
-                tuple(int(dim) for dim in shape),
-                dtype=_dtype_from_name(dtype_name),
-                device=self.device,
-            )
-            dist.broadcast(tensor, src=0, group=group)
-            received.append((str(name), tensor))
-        self._load_weights(received)
-        if flush_cache:
+        with self._generate_lock:
+            try:
+                received: List[tuple[str, torch.Tensor]] = []
+                for name, dtype_name, shape in zip(names, dtypes, shapes):
+                    tensor = torch.empty(
+                        tuple(int(dim) for dim in shape),
+                        dtype=_dtype_from_name(dtype_name),
+                        device=self.device,
+                    )
+                    dist.broadcast(tensor, src=0, group=group)
+                    received.append((str(name), tensor))
+                self._load_weights(received)
+            except Exception:
+                self._weights_valid = False
+                self._controller.mark_weights_dirty()
+                raise
             self._controller.mark_weights_dirty()
+
+    def finish_weights_update(self, *, group_name: str, track_prefix: str = "") -> None:
+        del track_prefix
+        if str(group_name) not in self._weight_groups:
+            raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
+        with self._generate_lock:
+            self._controller.mark_weights_dirty()
+            self._weights_valid = True
 
     @torch.no_grad()
     def _load_weights(self, tensors: List[tuple[str, torch.Tensor]]) -> None:
+        resolved: List[tuple[torch.Tensor, torch.Tensor]] = []
         for wire_name, tensor in tensors:
             name = wire_name.removeprefix("transformer.")
             target = self._parameter_targets.get(name)
@@ -226,19 +263,26 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
                     f"NativeSD3 weight shape mismatch for {wire_name}: "
                     f"target={tuple(target.shape)} wire={tuple(tensor.shape)}."
                 )
+            resolved.append((target, tensor))
+        for target, tensor in resolved:
             target.copy_(tensor.to(device=target.device, dtype=target.dtype))
 
     def destroy_weights_update_group(self, *, group_name: str, track_prefix: str = "") -> None:
         del track_prefix
-        self._weight_groups.pop(str(group_name), None)
+        group = self._weight_groups.pop(str(group_name), None)
+        if group is not None:
+            dist.destroy_process_group(group)
 
     def health_check(self) -> bool:
-        return not self._shutdown and self.bundle.transformer is not None
+        return not self._shutdown and self._weights_valid and self.bundle.transformer is not None
 
     def shutdown(self) -> None:
         with self._generate_lock:
             self._shutdown = True
+            groups = list(self._weight_groups.values())
             self._weight_groups.clear()
+            for group in groups:
+                dist.destroy_process_group(group)
 
 
 __all__ = ["NativeSD3RolloutEngine"]

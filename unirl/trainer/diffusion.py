@@ -233,7 +233,17 @@ def build_eval_sampling(
     updates: Dict[str, Any] = {"eta": float(eta)}
     if samples_per_prompt is not None:
         updates["samples_per_prompt"] = int(samples_per_prompt)
-    updates.update(_resolve_overrides(overrides, field_names))
+    resolved_overrides = _resolve_overrides(overrides, field_names)
+    updates.update(resolved_overrides)
+    if "num_samples_per_prompt" in resolved_overrides:
+        alias_fanout = int(resolved_overrides["num_samples_per_prompt"])
+        canonical_fanout = resolved_overrides.get("samples_per_prompt")
+        if canonical_fanout is not None and int(canonical_fanout) != alias_fanout:
+            raise ValueError(
+                "eval_sampling sets conflicting samples_per_prompt and "
+                f"num_samples_per_prompt values: {canonical_fanout} vs {alias_fanout}."
+            )
+        updates["samples_per_prompt"] = alias_fanout
     # ``DiffusionSamplingParams`` retains the deprecated
     # ``num_samples_per_prompt`` alias. dataclasses.replace() reruns
     # ``__post_init__``; changing only the canonical field to 1 while the alias
@@ -374,6 +384,7 @@ class DiffusionTrainer(BaseTrainer):
                 "contrastive_rollout and scout_sampling must be configured together; "
                 "one without the other cannot define a candidate-selection protocol."
             )
+        self._normalize_contrastive_sampling()
         # Frozen at init, so overlay contradictions surface at startup rather than an
         # hour in.
         self._eval_sampling_params: Dict[str, BaseSamplingParams] = build_eval_sampling(
@@ -527,6 +538,33 @@ class DiffusionTrainer(BaseTrainer):
                 "(monitoring-only) reward."
             )
 
+    def _normalize_contrastive_sampling(self) -> None:
+        """Make the naive control inherit one authoritative generation policy."""
+        config = self._contrastive
+        scout_params = self._scout_sampling_params
+        if config is None or scout_params is None:
+            return
+        expected_keys = {"diffusion"}
+        if set(self.sampling_params) != expected_keys or set(scout_params) != expected_keys:
+            raise ValueError(
+                "contrastive rollout currently requires exactly one diffusion sampling stage; "
+                f"got sampling={sorted(self.sampling_params)}, scout_sampling={sorted(scout_params)}."
+            )
+        main = self.sampling_params["diffusion"]
+        scout = scout_params["diffusion"]
+        if not isinstance(main, DiffusionSamplingParams) or not isinstance(scout, DiffusionSamplingParams):
+            raise TypeError("contrastive rollout selection currently supports one diffusion sampling stage.")
+        if config.mode == "naive":
+            scout_count = int(scout.samples_per_prompt)
+            self._scout_sampling_params = {
+                "diffusion": dataclasses.replace(
+                    main,
+                    samples_per_prompt=scout_count,
+                    num_samples_per_prompt=scout_count,
+                    reward_image_size=scout.reward_image_size,
+                )
+            }
+
     def _validate_contrastive_config(self) -> None:
         """Fail fast on two-stage geometry and seed mismatches."""
 
@@ -541,8 +579,6 @@ class DiffusionTrainer(BaseTrainer):
 
         main = self.sampling_params.get("diffusion")
         scout = scout_params.get("diffusion")
-        if not isinstance(main, DiffusionSamplingParams) or not isinstance(scout, DiffusionSamplingParams):
-            raise TypeError("contrastive rollout selection currently supports one diffusion sampling stage.")
         if total_samples_per_prompt(self.sampling_params) != config.selected_count:
             raise ValueError(
                 "sampling.samples_per_prompt must equal top_k + bottom_k for the BF16/train subset; "
@@ -556,6 +592,11 @@ class DiffusionTrainer(BaseTrainer):
         if main.seed != scout.seed:
             raise ValueError(
                 f"scout and regeneration must share sampling.seed for identical x_T; got {scout.seed} vs {main.seed}."
+            )
+        if main.rollout_precision != "bf16":
+            raise ValueError(
+                "contrastive rollout requires sampling.rollout_precision=bf16 for the train subset; "
+                f"got {main.rollout_precision!r}."
             )
         if (int(main.height), int(main.width)) != (int(scout.height), int(scout.width)):
             raise ValueError(
@@ -572,16 +613,13 @@ class DiffusionTrainer(BaseTrainer):
                     "scout_regen requires driver-authored latent shapes; DISABLE_DRIVER_XT and "
                     "pipelines without latent_shape() cannot preserve selected x_T."
                 )
+            if self._noise_latent_shape != self._scout_noise_latent_shape:
+                raise ValueError(
+                    "scout_regen requires identical inferred latent shapes; "
+                    f"got scout={self._scout_noise_latent_shape}, regen={self._noise_latent_shape}."
+                )
             if bool(main.init_same_noise) != bool(scout.init_same_noise):
                 raise ValueError("scout and regeneration must use the same init_same_noise policy for identical x_T.")
-        if config.mode == "naive":
-            if scout.rollout_precision != "bf16":
-                raise ValueError("contrastive_rollout.mode=naive requires scout_sampling.rollout_precision=bf16.")
-            if int(scout.num_inference_steps) != int(main.num_inference_steps):
-                raise ValueError(
-                    "contrastive_rollout.mode=naive is the full-step BF16 comparator and requires "
-                    "scout_sampling.num_inference_steps == sampling.num_inference_steps."
-                )
 
         chunk = int(config.prompt_chunk_size)
         if int(self.batch_size) % chunk:
@@ -837,6 +875,9 @@ class DiffusionTrainer(BaseTrainer):
         if part.rewards is None:
             raise RuntimeError("contrastive reward returned no frontier rewards.")
         part.rewards = hydrate(part.rewards)
+        if not torch.isfinite(part.rewards).all():
+            bad = torch.nonzero(~torch.isfinite(part.rewards), as_tuple=False).flatten().tolist()
+            raise ValueError(f"contrastive reward returned non-finite values at rows {bad[:8]}.")
         if isinstance(part.component_rewards, dict):
             part.component_rewards = {name: hydrate(value) for name, value in part.component_rewards.items()}
         return sample.with_parts([*sample.parts[:-1], part])

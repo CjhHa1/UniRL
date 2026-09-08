@@ -56,12 +56,17 @@ def _kendall_tau_b(left: List[float], right: List[float]) -> float:
 
 def _load_traces(path: Path) -> Dict[Tuple[int, str], dict]:
     traces: Dict[Tuple[int, str], dict] = {}
+    sources: Dict[Tuple[int, str], Path] = {}
     for file in sorted(path.glob("rollout_*.json")):
         with file.open(encoding="utf-8") as handle:
             payload = json.load(handle)
         rollout_id = int(payload["rollout_id"])
         for group in payload["groups"]:
-            traces[(rollout_id, str(group["group_id"]))] = group
+            key = (rollout_id, str(group["group_id"]))
+            if key in traces:
+                raise ValueError(f"Duplicate trace group {key} in {sources[key]} and {file}.")
+            traces[key] = group
+            sources[key] = file
     return traces
 
 
@@ -72,7 +77,15 @@ def _selected_ids(candidates: Iterable[dict], kind: str) -> set[str]:
 def compare(proxy_dir: Path, oracle_dir: Path) -> dict:
     proxy = _load_traces(proxy_dir)
     oracle = _load_traces(oracle_dir)
-    keys = sorted(set(proxy) & set(oracle))
+    proxy_keys = set(proxy)
+    oracle_keys = set(oracle)
+    if proxy_keys != oracle_keys:
+        raise ValueError(
+            "Trace groups differ: "
+            f"missing from proxy={sorted(oracle_keys - proxy_keys)[:8]}, "
+            f"missing from oracle={sorted(proxy_keys - oracle_keys)[:8]}."
+        )
+    keys = sorted(proxy_keys)
     if not keys:
         raise ValueError("No matching (rollout_id, group_id) traces found.")
 
@@ -82,6 +95,7 @@ def compare(proxy_dir: Path, oracle_dir: Path) -> dict:
     bottom_overlap: List[float] = []
     top_true_gap: List[float] = []
     bottom_true_gap: List[float] = []
+    side_presence: Dict[str, bool | None] = {"top": None, "bottom": None}
     for key in keys:
         proxy_candidates = proxy[key]["candidates"]
         oracle_candidates = oracle[key]["candidates"]
@@ -102,6 +116,13 @@ def compare(proxy_dir: Path, oracle_dir: Path) -> dict:
         ):
             proxy_ids = _selected_ids(proxy_candidates, kind)
             oracle_ids = _selected_ids(oracle_candidates, kind)
+            present = bool(proxy_ids or oracle_ids)
+            if side_presence[kind] is None:
+                side_presence[kind] = present
+            elif side_presence[kind] != present:
+                raise ValueError(f"Selection labels for {kind} are inconsistent across trace groups.")
+            if not present:
+                continue
             if not proxy_ids or len(proxy_ids) != len(oracle_ids):
                 raise ValueError(f"Selection labels for {kind} do not align in trace group {key}.")
             overlaps.append(len(proxy_ids & oracle_ids) / len(oracle_ids))
@@ -113,10 +134,10 @@ def compare(proxy_dir: Path, oracle_dir: Path) -> dict:
         "groups": len(keys),
         "spearman_mean": fmean(spearman),
         "kendall_tau_b_mean": fmean(kendall),
-        "top_overlap_mean": fmean(top_overlap),
-        "bottom_overlap_mean": fmean(bottom_overlap),
-        "top_selected_true_reward_gap": fmean(top_true_gap),
-        "bottom_selected_true_reward_gap": fmean(bottom_true_gap),
+        "top_overlap_mean": fmean(top_overlap) if top_overlap else None,
+        "bottom_overlap_mean": fmean(bottom_overlap) if bottom_overlap else None,
+        "top_selected_true_reward_gap": fmean(top_true_gap) if top_true_gap else None,
+        "bottom_selected_true_reward_gap": fmean(bottom_true_gap) if bottom_true_gap else None,
     }
 
 

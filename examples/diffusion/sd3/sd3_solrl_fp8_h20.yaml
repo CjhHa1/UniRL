@@ -2,7 +2,7 @@
 # H20 adaptation of Sol-RL: 128 FP8 scouts -> top8/bottom8 -> 16 BF16
 # regenerations -> DiffusionNFT.  The paper-parity 96/24 and naive BF16 arms
 # are produced with explicit Hydra overrides (documented in
-# train_scripts/sol_rl_h20/README.md) so every arm shares this recipe.
+# examples/diffusion/sd3/README_solrl_h20.md) so every arm shares this recipe.
 
 num_devices: 32
 devices_per_node: 8
@@ -36,6 +36,7 @@ bundle:
     text_encoder_dtype: bf16
     shift: 3.0
     load_vae: false
+    trajectory_precision: bf16
 
 pipeline:
   _target_: unirl.models.sd3.pipeline.SD3Pipeline
@@ -133,14 +134,14 @@ algorithm:
     path: unirl.models.sd3.conditions.SD3Conditions
   params: ${sampling}
   beta: 1.0
-  adv_clip_max: 5.0
+  adv_std_saturate: 5.0
   adv_mode: raw
   use_adaptive_weight: true
   train_timestep_mode: all
   shuffle_train_timesteps: true
   apply_time_shift_in_loss: false
   training_timestep_fraction: 0.6
-  kl_coef: 1.0e-4
+  ref_deviation_coef: 1.0e-4
 
 stack:
   _target_: unirl.train.stack.TrainStack
@@ -173,7 +174,7 @@ sampling:
   logprob_precision: fp32
   rollout_precision: bf16
   scheduler:
-    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.sde.index_schedule.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
     num_sde_steps: 0
 
@@ -195,7 +196,7 @@ scout_sampling:
   rollout_precision: fp8
   reward_image_size: 224
   scheduler:
-    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.sde.index_schedule.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
     num_sde_steps: 0
 

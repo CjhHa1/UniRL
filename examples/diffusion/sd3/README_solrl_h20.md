@@ -4,11 +4,18 @@
 configuration surface for all comparison arms so model, optimizer, reward,
 dataset, evaluation, and placement cannot silently drift.
 
+The task image must provide a CUDA/PyTorch-compatible Transformer Engine
+(`pip install -e ".[train,fp8]"`) plus an importable `hpsv2` package and the two
+checkpoints configured by `HPSV2_OPEN_CLIP` and `HPSV2_CHECKPOINT`. Model-specific
+reward packages are intentionally supplied by task images rather than pinned in
+UniRL's shared training extra.
+
 ## Arms
 
 Requested H20 adaptation (128 scouts, train 16):
 
 ```bash
+SOLRL_TRACE_DIR=traces/fp8-128x16 WANDB_RUN_NAME=sd35l-solrl-fp8-128x16 \
 python -m unirl.train_diffusion \
   --config-name diffusion/sd3/sd3_solrl_fp8_h20
 ```
@@ -16,15 +23,18 @@ python -m unirl.train_diffusion \
 BF16 six-step scout control (isolates the FP8 contribution):
 
 ```bash
+SOLRL_TRACE_DIR=traces/bf16-128x16 WANDB_RUN_NAME=sd35l-solrl-bf16-128x16 \
 python -m unirl.train_diffusion \
   --config-name diffusion/sd3/sd3_solrl_fp8_h20 \
   rollout.config.fp8_enabled=false \
-  scout_sampling.rollout_precision=bf16
+  scout_sampling.rollout_precision=bf16 \
+  'logging.tags=[sd3.5-large,sol-rl,bf16-scout,h20,diffusionnft]'
 ```
 
 Paper-shape H20 FP8 bridge (96 scouts, train 24):
 
 ```bash
+SOLRL_TRACE_DIR=traces/fp8-96x24 WANDB_RUN_NAME=sd35l-solrl-fp8-96x24 \
 python -m unirl.train_diffusion \
   --config-name diffusion/sd3/sd3_solrl_fp8_h20 \
   contrastive_rollout.top_k=12 contrastive_rollout.bottom_k=12 \
@@ -35,15 +45,26 @@ python -m unirl.train_diffusion \
 Paper comparator: full 10-step BF16 pool, select 24, no regeneration:
 
 ```bash
+SOLRL_TRACE_DIR=traces/bf16-naive-96x24 WANDB_RUN_NAME=sd35l-solrl-bf16-naive-96x24 \
 python -m unirl.train_diffusion \
   --config-name diffusion/sd3/sd3_solrl_fp8_h20 \
   contrastive_rollout.mode=naive \
   contrastive_rollout.top_k=12 contrastive_rollout.bottom_k=12 \
   sampling.samples_per_prompt=24 \
   scout_sampling.samples_per_prompt=96 \
-  scout_sampling.num_inference_steps=10 \
-  scout_sampling.rollout_precision=bf16 scout_sampling.reward_image_size=null \
-  rollout.config.fp8_enabled=false
+  scout_sampling.reward_image_size=null \
+  rollout.config.fp8_enabled=false \
+  'logging.tags=[sd3.5-large,sol-rl,bf16-naive,h20,diffusionnft]'
+```
+
+Naive mode derives its generation policy from `sampling`; only the scout fanout
+and optional reward-image resize remain scout-specific. Compare the paper-shape
+candidate rankings with:
+
+```bash
+python -m unirl.tools.solrl_rank_metrics \
+  --proxy-dir traces/fp8-96x24 \
+  --oracle-dir traces/bf16-naive-96x24
 ```
 
 ## Interpretation
