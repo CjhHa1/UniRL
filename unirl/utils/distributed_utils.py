@@ -18,13 +18,13 @@ GLOO_GROUP = None
 GLOO_SUBGROUPS: dict[tuple[int, ...], Any] = {}
 
 
-def find_dtensor_mesh(model: torch.nn.Module) -> tuple[str, Any] | None:
-    """Return one DTensor parameter name and its device mesh."""
+def find_dtensor_mesh(model: torch.nn.Module) -> Any | None:
+    """Return one DTensor parameter's device mesh."""
     from torch.distributed.tensor import DTensor
 
-    for name, param in model.named_parameters():
+    for param in model.parameters():
         if isinstance(param, DTensor):
-            return name, param.device_mesh
+            return param.device_mesh
     return None
 
 

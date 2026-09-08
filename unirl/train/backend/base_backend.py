@@ -566,8 +566,7 @@ class BaseFSDP2Backend(Remote):
     @staticmethod
     def _find_loss_reduction_mesh(model: nn.Module) -> Optional["DeviceMesh"]:
         """Return the primary FSDP mesh from the model's DTensor parameters."""
-        match = find_dtensor_mesh(model)
-        return None if match is None else match[1]
+        return find_dtensor_mesh(model)
 
     def gradient_average_world_size(self) -> int:
         """Ranks in the FSDP mesh whose gradient averaging loss scaling cancels."""

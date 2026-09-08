@@ -149,10 +149,9 @@ class MiniMaxH3TextEmbedStage:
             return
 
         if self._embedding_sync_group is None:
-            match = find_dtensor_mesh(self.transformer)
+            mesh = find_dtensor_mesh(self.transformer)
             fsdp_group = None
-            if match is not None:
-                _, mesh = match
+            if mesh is not None:
                 mesh_names = tuple(mesh.mesh_dim_names or ())
                 if "dp_shard" in mesh_names:
                     fsdp_group = mesh.get_group("dp_shard")
