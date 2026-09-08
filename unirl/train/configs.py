@@ -113,37 +113,26 @@ class FSDPConfig:
     ep_size: int = 1
 
 
-def normalize_fsdp_mode(fsdp_mode: str) -> str:
-    """Validate and normalize one FSDP sharding mode."""
-    require(
-        isinstance(fsdp_mode, str),
-        f"training.fsdp.fsdp_mode must be a string, got {type(fsdp_mode).__name__}.",
-    )
-    mode = fsdp_mode.strip().lower()
-    require(
-        mode in _FSDP_MODES,
-        f"training.fsdp.fsdp_mode={fsdp_mode!r} is not one of {list(_FSDP_MODES)}; "
-        "an unrecognized mode would silently fall back to full sharding.",
-    )
-    return mode
-
-
 def resolve_fsdp_mesh_shape(
     fsdp_mode: str,
     *,
     world_size: int,
     hsdp_shard_size: int = 8,
-) -> Tuple[str, Optional[Tuple[int, int]]]:
-    """Validate an FSDP mode and return its ``(replicate, shard)`` mesh shape."""
+) -> Optional[Tuple[int, int]]:
+    """Validate FSDP geometry and return its ``(replicate, shard)`` mesh shape."""
     require(
         isinstance(world_size, int) and not isinstance(world_size, bool) and world_size >= 1,
         f"training.fsdp world_size must be a positive integer, got {world_size!r}.",
     )
-    mode = normalize_fsdp_mode(fsdp_mode)
-    if mode == "full" or (mode == "no_shard" and world_size == 1):
-        return mode, None
-    if mode == "no_shard":
-        return mode, (world_size, 1)
+    require(
+        fsdp_mode in _FSDP_MODES,
+        f"training.fsdp.fsdp_mode={fsdp_mode!r} is not one of {list(_FSDP_MODES)}; "
+        "an unrecognized mode would silently fall back to full sharding.",
+    )
+    if fsdp_mode == "full" or (fsdp_mode == "no_shard" and world_size == 1):
+        return None
+    if fsdp_mode == "no_shard":
+        return (world_size, 1)
 
     require(
         isinstance(hsdp_shard_size, int) and not isinstance(hsdp_shard_size, bool),
@@ -164,7 +153,7 @@ def resolve_fsdp_mesh_shape(
         f"training.fsdp.fsdp_mode='hybrid' requires world_size divisible by "
         f"hsdp_shard_size, got world_size={world_size}, hsdp_shard_size={hsdp_shard_size}.",
     )
-    return mode, (world_size // hsdp_shard_size, hsdp_shard_size)
+    return (world_size // hsdp_shard_size, hsdp_shard_size)
 
 
 __all__ = [
@@ -173,6 +162,5 @@ __all__ = [
     "EmaLoraConfig",
     "EmaFullConfig",
     "FSDPConfig",
-    "normalize_fsdp_mode",
     "resolve_fsdp_mesh_shape",
 ]

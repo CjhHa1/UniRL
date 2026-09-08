@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from unirl.config.require import require
-from unirl.train.configs import normalize_fsdp_mode, resolve_fsdp_mesh_shape
+from unirl.train.configs import resolve_fsdp_mesh_shape
 from unirl.utils.distributed_utils import find_dtensor_mesh
 from unirl.utils.dtypes import parse_torch_dtype
 
@@ -246,28 +246,19 @@ def _enumerate_block_instances(
 
 
 def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Tuple[str, Optional[object]]:
-    mode = normalize_fsdp_mode(fsdp_mode)
-    if mode == "full":
-        return mode, None
-
     import torch.distributed as dist
 
-    if not (dist.is_available() and dist.is_initialized()):
-        require(
-            mode == "no_shard",
-            "training.fsdp.fsdp_mode='hybrid' requires an initialized default process group; "
-            "refusing to silently fall back to full sharding.",
-        )
-        return mode, None
-
-    world_size = dist.get_world_size()
-    _, mesh_shape = resolve_fsdp_mesh_shape(
-        mode,
-        world_size=world_size,
+    require(
+        dist.is_available() and dist.is_initialized(),
+        "fsdp_wrap requires an initialized default process group.",
+    )
+    mesh_shape = resolve_fsdp_mesh_shape(
+        fsdp_mode,
+        world_size=dist.get_world_size(),
         hsdp_shard_size=hsdp_shard_size,
     )
     if mesh_shape is None:
-        return mode, None
+        return fsdp_mode, None
 
     from torch.distributed.device_mesh import init_device_mesh
 
@@ -277,8 +268,8 @@ def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Tuple[st
         mesh_dim_names=("dp_replicate", "dp_shard"),
     )
     if _current_rank() == 0:
-        logger.info("fsdp_wrap: %s mesh dp_replicate=%d x dp_shard=%d", mode, *mesh_shape)
-    return mode, mesh
+        logger.info("fsdp_wrap: %s mesh dp_replicate=%d x dp_shard=%d", fsdp_mode, *mesh_shape)
+    return fsdp_mode, mesh
 
 
 def _validate_hsdp_mesh(model: nn.Module, *, expected_mesh: object) -> None:
