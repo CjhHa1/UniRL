@@ -18,7 +18,7 @@ import torch
 from unirl.config.require import require
 from unirl.types.conditions import TextEmbedCondition
 from unirl.types.primitives import Texts
-from unirl.utils.distributed_utils import find_dtensor_mesh, init_gloo_group, init_gloo_subgroup
+from unirl.utils.distributed_utils import init_gloo_group
 from unirl.utils.run_id import resolve_run_id
 
 from .vendor import MINIMAX_H3_TEXT_ENCODER_LAYER
@@ -61,7 +61,6 @@ class MiniMaxH3TextEmbedStage:
         self.tokenizer = bundle.tokenizer
         self.dtype = bundle.dtype
         self.device = bundle.device
-        self.transformer = bundle.transformer
         self.vae = bundle.vae
         self.audio_vae = bundle.audio_vae
         self._onload_for_embed = bundle.text_encoder_onload_for_embed
@@ -99,6 +98,7 @@ class MiniMaxH3TextEmbedStage:
             f"the loaded conditioner has {num_layers}.",
         )
 
+        self._ensure_embedding_sync_group()
         unique_prompts = list(dict.fromkeys(prompts))
         resolved = {prompt: self._cache[prompt] for prompt in unique_prompts if prompt in self._cache}
         missing = [prompt for prompt in unique_prompts if prompt not in resolved]
@@ -139,27 +139,26 @@ class MiniMaxH3TextEmbedStage:
             attn_mask=torch.ones(text_embeds.shape[:2], dtype=torch.bool, device=text_embeds.device),
         )
 
-    def _synchronize_embedding_ranks(self) -> None:
-        """Keep delayed conditioner loads out of the next FSDP NCCL collective."""
-        if not self._onload_for_embed:
+    def _ensure_embedding_sync_group(self) -> None:
+        """Build the barrier group while the ranks are still in lockstep."""
+        if self._embedding_sync_group is not None or not self._onload_for_embed:
             return
         import torch.distributed as dist
 
-        if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
-            return
+        # new_group is itself a collective over the default group, so it cannot
+        # wait until a rank has already spent minutes in an uncached conditioner
+        # forward. The barrier spans the whole world rather than one shard group:
+        # an onload stalls a whole node, and under HSDP the replica all-reduce
+        # crosses nodes just as the shard reduce-scatter stays inside one.
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            self._embedding_sync_group = init_gloo_group()
 
+    def _synchronize_embedding_ranks(self) -> None:
+        """Keep delayed conditioner loads out of the next FSDP NCCL collective."""
         if self._embedding_sync_group is None:
-            mesh = find_dtensor_mesh(self.transformer)
-            fsdp_group = None
-            if mesh is not None:
-                mesh_names = tuple(mesh.mesh_dim_names or ())
-                if "dp_shard" in mesh_names:
-                    fsdp_group = mesh.get_group("dp_shard")
-                elif len(mesh.shape) == 1:
-                    fsdp_group = mesh.get_group()
-            self._embedding_sync_group = (
-                init_gloo_group() if fsdp_group is None else init_gloo_subgroup(fsdp_group, timeout=_EMBED_SYNC_TIMEOUT)
-            )
+            return
+        import torch.distributed as dist
+
         dist.monitored_barrier(
             group=self._embedding_sync_group,
             timeout=_EMBED_SYNC_TIMEOUT,
@@ -198,16 +197,19 @@ class MiniMaxH3TextEmbedStage:
         # paging and copying eight 64 GB encoders made every H2D transfer
         # hour-scale; serialize the residency window per node while allowing
         # the two nodes to proceed independently.
+        # Each restore is registered BEFORE its move: ``Module.to`` walks
+        # parameters in place, so an OOM part-way through the 64 GB onload
+        # leaves the conditioner half-resident and still has to be undone.
         with _serialize_residency(), ExitStack() as cleanup:
             for module in (self.vae, self.audio_vae):
                 device = next(module.parameters()).device
                 if device.type == "cuda":
-                    module.to("cpu")
                     cleanup.callback(module.to, device)
+                    module.to("cpu")
             torch.cuda.empty_cache()
             cleanup.callback(torch.cuda.empty_cache)
-            self.text_encoder.to(target_device)
             cleanup.callback(self.text_encoder.to, "cpu")
+            self.text_encoder.to(target_device)
             yield
 
 

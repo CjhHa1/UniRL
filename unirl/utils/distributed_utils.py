@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 GLOO_GROUP = None
-GLOO_SUBGROUPS: dict[tuple[int, ...], Any] = {}
 
 
 def find_dtensor_mesh(model: torch.nn.Module) -> Any | None:
@@ -49,27 +48,6 @@ def init_gloo_group():
     if GLOO_GROUP is None:
         GLOO_GROUP = dist.new_group(backend="gloo")
     return GLOO_GROUP
-
-
-def init_gloo_subgroup(group: Any, *, timeout: timedelta = timedelta(minutes=30)):
-    """Mirror one contiguous shard group with globally ordered Gloo groups."""
-    ranks = tuple(dist.get_process_group_ranks(group))
-    world_size = dist.get_world_size()
-    if len(ranks) == world_size:
-        return init_gloo_group()
-
-    if world_size % len(ranks):
-        raise ValueError(f"Gloo subgroup size {len(ranks)} must divide world_size={world_size}.")
-    partitions = [tuple(range(start, start + len(ranks))) for start in range(0, world_size, len(ranks))]
-    if ranks not in partitions:
-        raise ValueError(f"Gloo subgroup ranks must form a contiguous partition, got {ranks}.")
-
-    if ranks not in GLOO_SUBGROUPS:
-        for peers in partitions:
-            control_group = dist.new_group(ranks=list(peers), backend="gloo", timeout=timeout)
-            if peers == ranks:
-                GLOO_SUBGROUPS[ranks] = control_group
-    return GLOO_SUBGROUPS[ranks]
 
 
 def get_gloo_group():
