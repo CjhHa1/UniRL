@@ -128,11 +128,11 @@ def resolve_fsdp_mesh_shape(
     fsdp_mode: str,
     *,
     world_size: int,
-    hsdp_shard_size: int = 8,
+    hsdp_shard_size: int,
 ) -> Optional[Tuple[int, int]]:
     """Validate FSDP geometry and return its ``(replicate, shard)`` mesh shape."""
     require(
-        isinstance(world_size, int) and not isinstance(world_size, bool) and world_size >= 1,
+        isinstance(world_size, int) and world_size >= 1,
         f"training.fsdp world_size must be a positive integer, got {world_size!r}.",
     )
     fsdp_mode = normalize_fsdp_mode(fsdp_mode)
@@ -142,12 +142,8 @@ def resolve_fsdp_mesh_shape(
         return (world_size, 1)
 
     require(
-        isinstance(hsdp_shard_size, int) and not isinstance(hsdp_shard_size, bool),
+        isinstance(hsdp_shard_size, int) and hsdp_shard_size >= 2,
         f"training.fsdp.hsdp_shard_size must be an integer >= 2, got {hsdp_shard_size!r}.",
-    )
-    require(
-        hsdp_shard_size >= 2,
-        f"training.fsdp.hsdp_shard_size must be >= 2, got {hsdp_shard_size}.",
     )
     require(
         world_size > hsdp_shard_size,

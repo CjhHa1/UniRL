@@ -13,7 +13,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
-from unirl.train.configs import resolve_fsdp_mesh_shape
+from unirl.train.configs import FSDPConfig, resolve_fsdp_mesh_shape
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
 from unirl.trainer.eval_suites import EvalRewardSuite, build_eval_suites
@@ -128,16 +128,20 @@ def _preflight_trainside_geometry(
             f"leaves {shared_devices_f} shared train/rollout devices, not an integer."
         )
 
+    # The recipe carries a raw DictConfig, so unset keys fall back to the one
+    # place the defaults live rather than to literals repeated here.
     fsdp_cfg = backend_cfg.get("fsdp_cfg", {})
-    sp_size = int(fsdp_cfg.get("sp_size", 1) or 1)
+    sp_size = int(fsdp_cfg.get("sp_size", None) or FSDPConfig.sp_size)
     if shared_devices % sp_size:
         raise ValueError(
             f"Static trainside geometry: {shared_devices} shared devices are not divisible by sp_size={sp_size}."
         )
+    # Called for its validation: raises when the shared world cannot form the
+    # configured mesh, while the wrap-time call owns the real world size.
     resolve_fsdp_mesh_shape(
-        fsdp_cfg.get("fsdp_mode", "full"),
+        fsdp_cfg.get("fsdp_mode", FSDPConfig.fsdp_mode),
         world_size=shared_devices,
-        hsdp_shard_size=fsdp_cfg.get("hsdp_shard_size", 8),
+        hsdp_shard_size=int(fsdp_cfg.get("hsdp_shard_size", None) or FSDPConfig.hsdp_shard_size),
     )
     shared_dp_size = shared_devices // sp_size
 

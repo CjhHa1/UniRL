@@ -53,7 +53,7 @@ def fsdp_wrap(
     mixed_precision: bool = True,
     cast_forward_inputs: bool = True,
     fsdp_mode: str = "full",
-    hsdp_shard_size: int = 8,
+    hsdp_shard_size: int,
     reshard_after_forward: bool = True,
     forward_prefetch: bool = False,
     activation_checkpointing: bool = False,
@@ -246,7 +246,7 @@ def _enumerate_block_instances(
     return tuple(m for _, m in model.named_modules() if type(m).__name__ in names)
 
 
-def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Optional[object]:
+def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int) -> Optional[object]:
     import torch.distributed as dist
 
     require(
