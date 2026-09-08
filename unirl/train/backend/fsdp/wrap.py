@@ -11,7 +11,6 @@ from torch import nn
 
 from unirl.config.require import require
 from unirl.train.configs import resolve_fsdp_mesh_shape
-from unirl.utils.distributed_utils import find_dtensor_mesh
 from unirl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
@@ -93,7 +92,7 @@ def fsdp_wrap(
     if cpu_offload:
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
 
-    mode, mesh = _create_device_mesh(fsdp_mode, hsdp_shard_size=hsdp_shard_size)
+    mesh = _create_device_mesh(fsdp_mode, hsdp_shard_size=hsdp_shard_size)
     if mesh is not None:
         fsdp_kwargs["mesh"] = mesh
 
@@ -176,9 +175,6 @@ def fsdp_wrap(
                 "DP-synced and replicas drift. Enable training.fsdp.root_wrap or freeze them.",
             )
 
-    if mode == "hybrid":
-        _validate_hsdp_mesh(model, expected_mesh=mesh)
-
     if forward_prefetch:
         if not isinstance(model, FSDPModule):
             raise ValueError(
@@ -245,7 +241,7 @@ def _enumerate_block_instances(
     return tuple(m for _, m in model.named_modules() if type(m).__name__ in names)
 
 
-def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Tuple[str, Optional[object]]:
+def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Optional[object]:
     import torch.distributed as dist
 
     require(
@@ -258,7 +254,7 @@ def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Tuple[st
         hsdp_shard_size=hsdp_shard_size,
     )
     if mesh_shape is None:
-        return fsdp_mode, None
+        return None
 
     from torch.distributed.device_mesh import init_device_mesh
 
@@ -269,25 +265,7 @@ def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Tuple[st
     )
     if _current_rank() == 0:
         logger.info("fsdp_wrap: %s mesh dp_replicate=%d x dp_shard=%d", fsdp_mode, *mesh_shape)
-    return fsdp_mode, mesh
-
-
-def _validate_hsdp_mesh(model: nn.Module, *, expected_mesh: object) -> None:
-    """Confirm that FSDP installed the requested HSDP mesh on a representative parameter."""
-    match = find_dtensor_mesh(model)
-    require(match is not None, "fsdp_wrap: hybrid mode produced no DTensor parameters; HSDP was not installed.")
-    name, actual_mesh = match
-    expected_shape = tuple(int(size) for size in expected_mesh.shape)
-    expected_names = tuple(expected_mesh.mesh_dim_names or ())
-    actual_shape = tuple(int(size) for size in actual_mesh.shape)
-    actual_names = tuple(actual_mesh.mesh_dim_names or ())
-    require(
-        actual_shape == expected_shape and actual_names == expected_names,
-        f"fsdp_wrap: hybrid mode requested mesh {expected_names}={expected_shape}, "
-        f"but parameter {name!r} uses {actual_names}={actual_shape}.",
-    )
-    if _current_rank() == 0:
-        logger.info("fsdp_wrap: validated HSDP mesh dp_replicate=%d x dp_shard=%d", *expected_shape)
+    return mesh
 
 
 def _current_rank() -> int:
