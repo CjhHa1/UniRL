@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import logging
 import os
+import tempfile
 import time
 from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
@@ -28,18 +29,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _EMBED_SYNC_TIMEOUT = timedelta(minutes=30)
+# One entry is [1, tokens, hidden] in the encoder's own dtype — a few MB for a
+# typical prompt, so this bounds the CPU-resident cache at a few hundred MB.
+_PROMPT_CACHE_SIZE = 64
 
 
 @cache
 def _residency_lock_path() -> str:
     """Return a per-run, per-user node-local conditioner lock path."""
     digest = hashlib.sha256(f"{os.getuid()}:{resolve_run_id()}".encode()).hexdigest()[:16]
-    return f"/tmp/unirl_minimax_h3_onload_{digest}.lock"
+    # Left behind on purpose: the file is empty and node-local, and unlinking it
+    # would race the sibling ranks still holding the lock through it.
+    return os.path.join(tempfile.gettempdir(), f"unirl_minimax_h3_onload_{digest}.lock")
 
 
 @contextmanager
-def _serialize_residency() -> Iterator[None]:
-    """Serialize host-to-device conditioner transfers within one run and node."""
+def _serialize_node_residency() -> Iterator[None]:
+    """Admit one rank at a time to the conditioner residency window on this node."""
     if os.environ.get("UNIRL_MINIMAX_H3_ONLOAD_SERIALIZE", "1") == "0":
         yield
         return
@@ -68,7 +74,6 @@ class MiniMaxH3TextEmbedStage:
         # invokes pipeline.generate once per sibling sample, so cache on CPU to
         # avoid repeating a 32B conditioner forward for the same prompt.
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
-        self._cache_size = 64
         self._embedding_sync_group = None
 
     @property
@@ -110,7 +115,7 @@ class MiniMaxH3TextEmbedStage:
                     cached = self._encode_prompt(prompt, encoder_device).detach().to("cpu").contiguous()
                     resolved[prompt] = cached
                     self._cache[prompt] = cached
-                    if len(self._cache) > self._cache_size:
+                    if len(self._cache) > _PROMPT_CACHE_SIZE:
                         self._cache.popitem(last=False)
         for prompt in unique_prompts:
             if prompt in self._cache:
@@ -200,7 +205,7 @@ class MiniMaxH3TextEmbedStage:
         # Each restore is registered BEFORE its move: ``Module.to`` walks
         # parameters in place, so an OOM part-way through the 64 GB onload
         # leaves the conditioner half-resident and still has to be undone.
-        with _serialize_residency(), ExitStack() as cleanup:
+        with _serialize_node_residency(), ExitStack() as cleanup:
             for module in (self.vae, self.audio_vae):
                 device = next(module.parameters()).device
                 if device.type == "cuda":
