@@ -10,7 +10,8 @@ import torch
 from torch import nn
 
 from unirl.config.require import require
-from unirl.train.configs import resolve_fsdp_mesh_shape
+from unirl.train.configs import normalize_fsdp_mode, resolve_fsdp_mesh_shape
+from unirl.utils.distributed_utils import find_dtensor_mesh
 from unirl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,8 @@ def fsdp_wrap(
     if cpu_offload:
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
 
-    mesh = _create_device_mesh(fsdp_mode, hsdp_shard_size=hsdp_shard_size)
+    mode = normalize_fsdp_mode(fsdp_mode)
+    mesh = _create_device_mesh(mode, hsdp_shard_size=hsdp_shard_size)
     if mesh is not None:
         fsdp_kwargs["mesh"] = mesh
 
@@ -174,6 +176,9 @@ def fsdp_wrap(
                 f"every fully_shard group (e.g. {stray[:3]}); their grads would never be "
                 "DP-synced and replicas drift. Enable training.fsdp.root_wrap or freeze them.",
             )
+
+    if mode == "hybrid":
+        _validate_hsdp_mesh(model, expected_mesh=mesh)
 
     if forward_prefetch:
         if not isinstance(model, FSDPModule):
@@ -266,6 +271,22 @@ def _create_device_mesh(fsdp_mode: str, *, hsdp_shard_size: int = 8) -> Optional
     if _current_rank() == 0:
         logger.info("fsdp_wrap: %s mesh dp_replicate=%d x dp_shard=%d", fsdp_mode, *mesh_shape)
     return mesh
+
+
+def _validate_hsdp_mesh(model: nn.Module, *, expected_mesh: object) -> None:
+    """Confirm FSDP installed the requested HSDP mesh, rather than silently sharding flat."""
+    actual_mesh = find_dtensor_mesh(model)
+    require(
+        actual_mesh is not None,
+        "fsdp_wrap: hybrid mode produced no DTensor parameters; HSDP was not installed.",
+    )
+    expected = (tuple(expected_mesh.mesh_dim_names or ()), tuple(int(size) for size in expected_mesh.shape))
+    actual = (tuple(actual_mesh.mesh_dim_names or ()), tuple(int(size) for size in actual_mesh.shape))
+    require(
+        actual == expected,
+        f"fsdp_wrap: hybrid mode requested mesh {expected[0]}={expected[1]}, "
+        f"but the wrapped parameters use {actual[0]}={actual[1]}.",
+    )
 
 
 def _current_rank() -> int:

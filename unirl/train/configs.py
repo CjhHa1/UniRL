@@ -113,6 +113,17 @@ class FSDPConfig:
     ep_size: int = 1
 
 
+def normalize_fsdp_mode(fsdp_mode: str) -> str:
+    """Canonicalize a configured shard mode, rejecting anything unrecognized."""
+    mode = str(fsdp_mode).strip().lower()
+    require(
+        mode in _FSDP_MODES,
+        f"training.fsdp.fsdp_mode={fsdp_mode!r} is not one of {list(_FSDP_MODES)}; "
+        "an unrecognized mode would silently fall back to full sharding.",
+    )
+    return mode
+
+
 def resolve_fsdp_mesh_shape(
     fsdp_mode: str,
     *,
@@ -124,11 +135,7 @@ def resolve_fsdp_mesh_shape(
         isinstance(world_size, int) and not isinstance(world_size, bool) and world_size >= 1,
         f"training.fsdp world_size must be a positive integer, got {world_size!r}.",
     )
-    require(
-        fsdp_mode in _FSDP_MODES,
-        f"training.fsdp.fsdp_mode={fsdp_mode!r} is not one of {list(_FSDP_MODES)}; "
-        "an unrecognized mode would silently fall back to full sharding.",
-    )
+    fsdp_mode = normalize_fsdp_mode(fsdp_mode)
     if fsdp_mode == "full" or (fsdp_mode == "no_shard" and world_size == 1):
         return None
     if fsdp_mode == "no_shard":
@@ -162,5 +169,6 @@ __all__ = [
     "EmaLoraConfig",
     "EmaFullConfig",
     "FSDPConfig",
+    "normalize_fsdp_mode",
     "resolve_fsdp_mesh_shape",
 ]
