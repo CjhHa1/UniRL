@@ -123,17 +123,13 @@ class T2AVCompositeScorer(RewardBackend):
 
 @dataclass
 class T2AVCompositeSpec(BaseRewardComponentSpec):
-    """Typed config for the T2AV composite reward.
-
-    Inner scorers are Hydra-instantiated backends under ``scorers``, not names
-    looked up from ``weights``. Put ``mode``, ``frame_selection``, ``model_id``
-    and any other inner field on that inner spec — the composite does not
-    forward a field allow-list.
-    """
+    """Typed config for the T2AV composite reward."""
 
     batch_size: int = 8
     device: str = "auto"
     weights: Dict[str, float] = field(default_factory=dict)
+    # Hydra-instantiated inner backends (same nested `_target_` pattern as PerDomainSpec).
+    # Inner fields such as mode / frame_selection / model_id live on those specs.
     scorers: Dict[str, RewardBackend] = field(default_factory=dict)
 
 
