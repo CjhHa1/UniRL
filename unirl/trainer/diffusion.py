@@ -111,9 +111,9 @@ def _preflight_trainside_geometry(
     batch_size: int,
     samples_per_prompt: int,
     num_updates_per_batch: int,
+    prompt_local_rollout: bool,
     backend_cfg: DictConfig,
     rollout_cfg: DictConfig,
-    reward_cfg: Optional[DictConfig],
 ) -> None:
     """Reject statically-known trainside DP geometry before constructing heavy model roles."""
     rollout_target = str(rollout_cfg.get("_target_", ""))
@@ -141,9 +141,10 @@ def _preflight_trainside_geometry(
     )
     shared_dp_size = shared_devices // sp_size
 
-    if reward_cfg is None:
-        reward_dp_size = 1
-    elif reward_fraction > 0.0:
+    # Mirror the runtime call below: a colocated reward is not a separate role,
+    # so DiffusionTrainer scores it with dp_size 1.
+    reward_dp_size = 1
+    if reward_fraction > 0.0:
         reward_devices_f = reward_fraction * num_devices
         reward_dp_size = int(round(reward_devices_f))
         if abs(reward_devices_f - reward_dp_size) > 1e-9:
@@ -151,8 +152,6 @@ def _preflight_trainside_geometry(
                 f"Static trainside geometry: reward_fraction={reward_fraction} of num_devices={num_devices} "
                 f"requests {reward_devices_f} reward devices, not an integer."
             )
-    else:
-        reward_dp_size = shared_devices
 
     _validate_dp_geometry(
         batch_size=batch_size,
@@ -161,6 +160,7 @@ def _preflight_trainside_geometry(
         rollout_dp_size=shared_dp_size,
         reward_dp_size=reward_dp_size,
         train_dp_size=shared_dp_size,
+        require_rollout_dp_divisibility=not prompt_local_rollout,
     )
 
 
@@ -413,9 +413,9 @@ class DiffusionTrainer(BaseTrainer):
             batch_size=int(batch_size),
             samples_per_prompt=total_samples_per_prompt(self.sampling_params),
             num_updates_per_batch=int(stack_cfg.get("num_updates_per_batch", 1)),
+            prompt_local_rollout=self._prompt_local_rollout,
             backend_cfg=backend_cfg,
             rollout_cfg=rollout_cfg,
-            reward_cfg=reward_cfg,
         )
 
         train_cfgs = dict(
