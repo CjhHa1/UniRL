@@ -33,8 +33,7 @@ _EMBED_SYNC_TIMEOUT = timedelta(minutes=30)
 @cache
 def _residency_lock_path() -> str:
     """Return a per-run, per-user node-local conditioner lock path."""
-    fallback = ":".join((os.environ.get("MASTER_ADDR", "local"), os.environ.get("MASTER_PORT", "single")))
-    digest = hashlib.sha256(f"{os.getuid()}:{resolve_run_id(fallback=fallback)}".encode()).hexdigest()[:16]
+    digest = hashlib.sha256(f"{os.getuid()}:{resolve_run_id()}".encode()).hexdigest()[:16]
     return f"/tmp/unirl_minimax_h3_onload_{digest}.lock"
 
 
