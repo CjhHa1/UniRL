@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from unirl.config.require import require
 from unirl.reward.base import BaseRewardComponentSpec, RewardBackend
 from unirl.types.reward import RewardRequest, RewardResponse
 
@@ -41,13 +42,18 @@ class T2AVCompositeScorer(RewardBackend):
                 }
             elif name == "clap":
                 model_overrides = {"model_id": config.clap_model_id}
-            overrides.update(
-                {
-                    field: value
-                    for field, value in model_overrides.items()
-                    if value is not None and hasattr(inner_spec, field)
-                }
-            )
+            for spec_field, value in model_overrides.items():
+                if value is None:
+                    continue
+                # Dropping an override restores the Hub id, which a
+                # network-isolated job reports as a download hang rather than
+                # as the config error it is.
+                require(
+                    hasattr(inner_spec, spec_field),
+                    f"T2AVComposite: {name} spec {type(inner_spec).__name__} has no {spec_field!r} field "
+                    f"to override with {value!r}.",
+                )
+                overrides[spec_field] = value
             if overrides:
                 inner_spec = dataclasses.replace(inner_spec, **overrides)
             self._scorers[name] = inner_cls(config=inner_spec, base_device=base_device)
