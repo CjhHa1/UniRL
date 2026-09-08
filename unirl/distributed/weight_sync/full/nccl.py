@@ -111,6 +111,20 @@ class NCCLWeightSync(FullWeightSync):
         import torch.distributed as dist
 
         is_rank0 = self._my_rank == 0
+        if is_rank0:
+            begin_refs = [
+                handle.call.remote(
+                    self._rollout_role,
+                    "begin_weights_update",
+                    (),
+                    {
+                        "group_name": self._group_name,
+                        "track_prefix": self._track_prefix,
+                    },
+                )
+                for handle in self._rollout_targets
+            ]
+            ray.get(begin_refs)
         for bucket, is_last in self._iter_buckets():
             if not is_rank0:
                 continue  # ranks >= 1 only drive the train-mesh all-gather
@@ -136,6 +150,20 @@ class NCCLWeightSync(FullWeightSync):
             for _, tensor in bucket:
                 dist.broadcast(tensor.data.contiguous(), 0, group=self._model_update_group)
             ray.get(recv_refs)
+        if is_rank0:
+            finish_refs = [
+                handle.call.remote(
+                    self._rollout_role,
+                    "finish_weights_update",
+                    (),
+                    {
+                        "group_name": self._group_name,
+                        "track_prefix": self._track_prefix,
+                    },
+                )
+                for handle in self._rollout_targets
+            ]
+            ray.get(finish_refs)
 
 
 __all__ = ["NCCLWeightSync"]

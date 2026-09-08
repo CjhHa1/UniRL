@@ -68,6 +68,12 @@ class HPSv2RewardScorer(LocalRewardBackend):
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         images = request.images
         prompts = self.prompts(request)
+        if images is None:
+            raise ValueError("HPSv2 requires generated images.")
+        if len(images) != len(prompts):
+            raise ValueError(
+                f"HPSv2 requires one prompt per image; got {len(prompts)} prompts for {len(images)} images."
+            )
         all_rewards: List[float] = []
 
         for i in range(0, len(images), self.batch_size):

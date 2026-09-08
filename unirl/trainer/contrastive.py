@@ -26,6 +26,10 @@ class ContrastiveRolloutConfig:
     def __post_init__(self) -> None:
         if self.mode not in {"naive", "scout_regen"}:
             raise ValueError(f"contrastive_rollout.mode must be naive|scout_regen, got {self.mode!r}.")
+        for name in ("top_k", "bottom_k", "prompt_chunk_size", "trace_interval"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"contrastive_rollout.{name} must be an integer, got {value!r}.")
         if self.top_k < 0 or self.bottom_k < 0 or self.selected_count < 1:
             raise ValueError(
                 "contrastive_rollout needs non-negative top_k/bottom_k with a positive sum; "
