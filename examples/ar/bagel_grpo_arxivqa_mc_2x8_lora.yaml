@@ -95,9 +95,8 @@ backend:
     master_dtype: fp32          # fp32 LoRA master + Adam states: stable small GRPO updates
     cpu_offload: false
     mixed_precision: true
-    # Preserve this recipe's validated 16-way sharding. True HSDP changes its
-    # memory and collective profile and needs a dedicated 2x8 validation run.
-    fsdp_mode: full
+    fsdp_mode: hybrid           # HSDP: shard within node (8) x replicate across nodes (2)
+    hsdp_shard_size: 8          # was the hardcoded degree; now stated outright
     # Safe with the AR path because rl_ops.decode_text runs a FIXED max_new
     # forwards (no early EOS break) → every rank issues an identical number of
     # all-gathers (lockstep), so resharding does not deadlock. This is also the
