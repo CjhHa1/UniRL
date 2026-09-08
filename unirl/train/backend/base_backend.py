@@ -197,7 +197,7 @@ class BaseFSDP2Backend(Remote):
     ) -> None:
         """Build EMA / optimizer / scheduler and set the shared train state."""
         self.model = model
-        self._loss_reduction_mesh = self._find_loss_reduction_mesh(model)
+        self._loss_reduction_mesh = find_dtensor_mesh(model)
 
         self.ema = None
         if shadow is not None:
@@ -562,11 +562,6 @@ class BaseFSDP2Backend(Remote):
         self._offload_model()
         move_optimizer_state(self.optimizer, "cpu")
         torch.cuda.empty_cache()
-
-    @staticmethod
-    def _find_loss_reduction_mesh(model: nn.Module) -> Optional["DeviceMesh"]:
-        """Return the primary FSDP mesh from the model's DTensor parameters."""
-        return find_dtensor_mesh(model)
 
     def gradient_average_world_size(self) -> int:
         """Ranks in the FSDP mesh whose gradient averaging loss scaling cancels."""

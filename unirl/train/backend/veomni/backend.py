@@ -31,6 +31,7 @@ from unirl.train.configs import (
     EmaLoraConfig,
     FSDPConfig,
     LoraConfig,
+    normalize_fsdp_mode,
 )
 from unirl.utils.distributed_utils import ensure_dist_initialized
 from unirl.utils.dtypes import parse_torch_dtype
@@ -211,7 +212,7 @@ class VeOmniBackend(BaseFSDP2Backend):
 
 def _validate_fsdp_cfg(fsdp_cfg: FSDPConfig) -> None:
     """Assert the v1-supported FSDPConfig subset (fail fast, actionably)."""
-    if str(fsdp_cfg.fsdp_mode).strip().lower() != "full":
+    if normalize_fsdp_mode(fsdp_cfg.fsdp_mode) != "full":
         raise ValueError(
             f"VeOmniBackend: fsdp_mode={fsdp_cfg.fsdp_mode!r} unsupported (v1 supports 'full'; "
             "HSDP/hybrid stays on FSDPBackend)."
