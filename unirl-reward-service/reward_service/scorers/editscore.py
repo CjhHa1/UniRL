@@ -319,17 +319,17 @@ class EditScoreScorer(BaseScorer):
         self._max_image_side = max_image_side
         self._use_batch_inference = batched and is_vllm
 
-    def _cap_image(self, img: Image.Image) -> Image.Image:
+    def _resize_image_to_max_side(self, image: Image.Image) -> Image.Image:
         """Bound vision tokens before upstream processing.
 
         Two 1536px square images use roughly 4.6k vision tokens; increasing
         this limit may also require increasing ``max_model_len``.
         """
         side = self._max_image_side
-        if side is not None and max(img.size) > side:
-            img = img.copy()
-            img.thumbnail((side, side), Image.Resampling.LANCZOS)
-        return img
+        if side is not None and max(image.size) > side:
+            image = image.copy()
+            image.thumbnail((side, side), Image.Resampling.LANCZOS)
+        return image
 
     def _failure_result(self) -> dict[str, float]:
         return {name: float("nan") for name in self.sub_metric_names}
@@ -343,7 +343,11 @@ class EditScoreScorer(BaseScorer):
             raise TypeError(f"EditScore prompt must be a string, got {type(prompt).__name__}")
         if not isinstance(source_image, Image.Image) or not isinstance(edited_image, Image.Image):
             raise TypeError("EditScore requires PIL source and edited images")
-        return prompt, self._cap_image(source_image), self._cap_image(edited_image)
+        return (
+            prompt,
+            self._resize_image_to_max_side(source_image),
+            self._resize_image_to_max_side(edited_image),
+        )
 
     def score(self, items: list[ScoreItem]) -> list[dict[str, float]]:
         rows: list[_PreparedRow] = []
