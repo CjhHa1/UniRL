@@ -331,9 +331,6 @@ class EditScoreScorer(BaseScorer):
             image.thumbnail((side, side), Image.Resampling.LANCZOS)
         return image
 
-    def _failure_result(self) -> dict[str, float]:
-        return {name: float("nan") for name in self.sub_metric_names}
-
     def _unpack_item(self, item: ScoreItem) -> tuple[str, Image.Image, Image.Image]:
         if len(item.history) < 2:
             raise ValueError(f"EditScore requires 2 history turns, got {len(item.history)}")
@@ -350,8 +347,10 @@ class EditScoreScorer(BaseScorer):
         )
 
     def score(self, items: list[ScoreItem]) -> list[dict[str, float]]:
+        import torch
+
         rows: list[_PreparedRow] = []
-        results = [self._failure_result() for _ in items]
+        results = [{name: float("nan") for name in self.sub_metric_names} for _ in items]
         for i, item in enumerate(items):
             try:
                 prompt, source_image, edited_image = self._unpack_item(item)
@@ -361,6 +360,8 @@ class EditScoreScorer(BaseScorer):
                 )
                 pq_message = self.es.model.prepare_input(edited_image, self.es.PQ_prompt)
                 row = (i, prompt, sc_message, pq_message)
+            except torch.OutOfMemoryError:
+                raise
             except Exception:
                 logger.exception("EditScore failed to score item %d", i)
                 continue
@@ -368,12 +369,14 @@ class EditScoreScorer(BaseScorer):
                 rows.append(row)
             else:
                 [output] = self._score_rows([row])
-                results[i] = output if output is not None else self._failure_result()
+                if output is not None:
+                    results[i] = output
 
         if rows:
             scored = self._score_rows(rows)
             for row, output in zip(rows, scored):
-                results[row[0]] = output if output is not None else self._failure_result()
+                if output is not None:
+                    results[row[0]] = output
 
         return results
 
