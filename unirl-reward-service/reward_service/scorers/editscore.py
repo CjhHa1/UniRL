@@ -8,18 +8,25 @@ validation of untrusted judge output. Each item carries the source image in
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import hashlib
 import importlib
+import json
 import math
 import os
+import shutil
+import time
+import uuid
 from contextlib import contextmanager
 from numbers import Real
+from pathlib import Path
 from statistics import fmean
 from typing import Any, Iterator, cast
 
 from PIL import Image
 
 from reward_service.logging_utils import get_logger
-from reward_service.scorers._editscore_cache import prepare_merged_checkpoint
 from reward_service.scorers.base import BaseScorer, ScoreItem
 from reward_service.scorers.registry import register
 
@@ -33,11 +40,115 @@ _SUPPORTED_BACKBONES = {"qwen3vl", "qwen3vl_vllm", "qwen25vl", "qwen25vl_vllm"}
 _RESERVED_LLM_KWARGS = {"enable_sleep_mode"}
 _SLEEP_MANAGED_LLM_KWARGS = {"enable_prefix_caching", "mm_processor_cache_gb"}
 _MAX_PARSE_ATTEMPTS = 3
+_CACHE_MANIFEST = ".unirl-editscore-cache.json"
+_MERGE_MODEL_CLASSES = {
+    "qwen25vl_vllm": "Qwen2_5_VLForConditionalGeneration",
+    "qwen3vl_vllm": "Qwen3VLForConditionalGeneration",
+}
 _PreparedRow = tuple[int, str, Any, Any]
 
 
 class _InvalidJudgeOutput(ValueError):
     """One row could not be parsed into valid EditScore values."""
+
+
+def _cache_identity(model: str, lora: str, backbone: str) -> dict[str, object]:
+    return {
+        "format_version": 1,
+        "backbone": backbone,
+        "model_name_or_path": model,
+        "lora_path": lora,
+    }
+
+
+def _validate_cache(path: Path, expected: dict[str, object]) -> None:
+    manifest = path / _CACHE_MANIFEST
+    try:
+        actual = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"EditScore cache {path} has no valid {_CACHE_MANIFEST}; use an empty path so UniRL can build it atomically"
+        ) from exc
+    if actual != expected:
+        raise ValueError(f"EditScore cache {path} was built for {actual!r}, not {expected!r}")
+
+
+@contextmanager
+def _cache_writer_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _merge_checkpoint(path: Path, *, model: str, lora: str, backbone: str) -> None:
+    import torch
+    import transformers
+    from peft import PeftModel
+    from transformers import AutoProcessor
+
+    model_cls = getattr(transformers, _MERGE_MODEL_CLASSES[backbone])
+    merged = model_cls.from_pretrained(model, torch_dtype=torch.bfloat16, device_map="cpu")
+    merged = PeftModel.from_pretrained(merged, lora).merge_and_unload()
+    merged.save_pretrained(path)
+    AutoProcessor.from_pretrained(model).save_pretrained(path)
+
+
+def _prepare_merged_checkpoint(
+    *,
+    model: str,
+    lora: str,
+    backbone: str,
+    cache_dir: str | None,
+) -> str:
+    expected = _cache_identity(model, lora, backbone)
+    if cache_dir is None:
+        import torch
+
+        digest = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()[:12]
+        target = Path(torch.hub.get_dir()) / "EditScore" / f"{Path(model).name}_{Path(lora).name}_{digest}"
+    else:
+        target = Path(cache_dir).expanduser()
+
+    if target.exists():
+        _validate_cache(target, expected)
+        return str(target)
+
+    lock = target.parent / f".{target.name}.lock"
+    with _cache_writer_lock(lock):
+        if target.exists():
+            _validate_cache(target, expected)
+            return str(target)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cutoff = time.time() - 24 * 60 * 60
+        for stale in target.parent.glob(f".{target.name}.tmp-*"):
+            try:
+                if stale.stat().st_mtime < cutoff:
+                    shutil.rmtree(stale, ignore_errors=True)
+            except OSError:
+                pass
+
+        temporary = target.parent / f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+        try:
+            temporary.mkdir()
+            _merge_checkpoint(temporary, model=model, lora=lora, backbone=backbone)
+            (temporary / _CACHE_MANIFEST).write_text(
+                json.dumps(expected, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                os.replace(temporary, target)
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not target.exists():
+                    raise
+                _validate_cache(target, expected)
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+    return str(target)
 
 
 def _require_positive_int(name: str, value: Any) -> None:
@@ -207,9 +318,9 @@ class EditScoreScorer(BaseScorer):
         resolved_model = model_name_or_path
         resolved_lora = lora_path
         if lora_path is not None and backbone in _VLLM_BACKBONE_MODULES:
-            resolved_model = prepare_merged_checkpoint(
-                model_name_or_path=model_name_or_path,
-                lora_path=lora_path,
+            resolved_model = _prepare_merged_checkpoint(
+                model=model_name_or_path,
+                lora=lora_path,
                 backbone=backbone,
                 cache_dir=cache_dir,
             )
