@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional
 
 from unirl.config.require import require
@@ -29,8 +29,6 @@ class T2AVCompositeScorer(RewardBackend):
             inner_cls = resolve_builtin_reward_scorer_class(name)
             inner_spec_cls = resolve_builtin_reward_spec_class(name)
             inner_spec = inner_spec_cls()
-            import dataclasses
-
             # Propagate only fields BOTH the composite and the inner spec declare.
             shared = ("device", "batch_size", "frame_selection")
             overrides = {f: getattr(config, f) for f in shared if hasattr(inner_spec, f) and hasattr(config, f)}
@@ -55,7 +53,7 @@ class T2AVCompositeScorer(RewardBackend):
                 )
                 overrides[spec_field] = value
             if overrides:
-                inner_spec = dataclasses.replace(inner_spec, **overrides)
+                inner_spec = replace(inner_spec, **overrides)
             self._scorers[name] = inner_cls(config=inner_spec, base_device=base_device)
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
