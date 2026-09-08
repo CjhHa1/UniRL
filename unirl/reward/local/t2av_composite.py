@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List, Mapping
 
 from unirl.reward.base import BaseRewardComponentSpec, RewardBackend
 from unirl.types.reward import RewardRequest, RewardResponse
+
+from .registry import resolve_builtin_reward_scorer_class, resolve_builtin_reward_spec_class
+
+_SKIP_INNER_OVERRIDE = frozenset({"weights", "scorers"})
+
+
+def _plain_mapping(value: Any) -> Dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    return dict(value)
 
 
 def _require_prompt_video_term(weights: Dict[str, float], scorers: Dict[str, RewardBackend]) -> None:
@@ -22,46 +35,48 @@ def _require_prompt_video_term(weights: Dict[str, float], scorers: Dict[str, Rew
     raise ValueError(
         "T2AVCompositeScorer: no positive-weight inner scorer relates the prompt to the video. "
         f"Current mix: {details}. "
-        "Add videopickscore / videoalign / videoclipdelta, or nest imagebind with mode "
+        "Add videopickscore / videoalign / videoclipdelta, or set scorers.imagebind.mode to "
         "'text_video' or 'all'. clap and imagebind mode='audio_video' do not cover this."
     )
 
 
 class T2AVCompositeScorer(RewardBackend):
-    """Weighted blend of Hydra-instantiated inner reward scorers for T2AV."""
+    """Weighted blend of inner reward scorers for T2AV (video + audio)."""
 
     input_kind = "video"
 
     def __init__(self, *, config: "T2AVCompositeSpec", base_device: str) -> None:
         super().__init__(model_name="t2av_composite", batch_size=config.batch_size)
-        del base_device
         self.weights: Dict[str, float] = dict(config.weights or {})
-        if not config.scorers:
-            raise ValueError(
-                "T2AVCompositeScorer requires a non-empty `scorers` mapping (name -> RewardBackend), "
-                "the same nested `_target_` pattern as PerDomainRewardScorer."
-            )
         if not self.weights:
             raise ValueError("T2AVCompositeScorer requires a non-empty `weights` dict (scorer_name -> weight).")
 
-        for name, scorer in config.scorers.items():
-            if not isinstance(scorer, RewardBackend):
-                raise TypeError(
-                    f"T2AVCompositeScorer: scorers[{name!r}] is {type(scorer).__name__}, not a "
-                    "RewardBackend — each entry needs its own `_target_` for Hydra to instantiate."
+        named_overrides = _plain_mapping(config.scorers)
+        extra = sorted(set(named_overrides) - set(self.weights))
+        if extra:
+            raise ValueError(f"T2AVCompositeScorer: scorers keys {extra} are not in weights {sorted(self.weights)}.")
+
+        self._scorers: Dict[str, RewardBackend] = {}
+        for name in self.weights:
+            inner_cls = resolve_builtin_reward_scorer_class(name)
+            inner_spec_cls = resolve_builtin_reward_spec_class(name)
+            inner_spec = inner_spec_cls()
+            overrides: Dict[str, Any] = {}
+            for f in dataclasses.fields(config):
+                if f.name in _SKIP_INNER_OVERRIDE or not hasattr(inner_spec, f.name):
+                    continue
+                overrides[f.name] = getattr(config, f.name)
+            per_scorer = _plain_mapping(named_overrides.get(name))
+            unknown = sorted(k for k in per_scorer if not hasattr(inner_spec, k))
+            if unknown:
+                raise ValueError(
+                    f"T2AVCompositeScorer: scorers[{name!r}] has fields {unknown} not on {inner_spec_cls.__name__}."
                 )
+            overrides.update(per_scorer)
+            if overrides:
+                inner_spec = dataclasses.replace(inner_spec, **overrides)
+            self._scorers[name] = inner_cls(config=inner_spec, base_device=base_device)
 
-        weight_names = set(self.weights)
-        scorer_names = set(config.scorers)
-        if weight_names != scorer_names:
-            missing = sorted(weight_names - scorer_names)
-            extra = sorted(scorer_names - weight_names)
-            raise ValueError(
-                "T2AVCompositeScorer: `weights` and `scorers` must use the same keys "
-                f"(weights missing scorers={missing}, scorers missing weights={extra})."
-            )
-
-        self._scorers: Dict[str, RewardBackend] = dict(config.scorers)
         _require_prompt_video_term(self.weights, self._scorers)
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
@@ -127,10 +142,13 @@ class T2AVCompositeSpec(BaseRewardComponentSpec):
 
     batch_size: int = 8
     device: str = "auto"
-    weights: Dict[str, float] = field(default_factory=dict)
-    # Hydra-instantiated inner backends (same nested `_target_` pattern as PerDomainSpec).
-    # Inner fields such as mode / frame_selection / model_id live on those specs.
-    scorers: Dict[str, RewardBackend] = field(default_factory=dict)
+    # Copied onto inner specs that declare it (videopickscore). "first" keeps
+    # historical behaviour; "middle" avoids scoring a blank opening frame.
+    frame_selection: str = "first"
+    weights: Dict[str, float] = field(default_factory=lambda: {"videopickscore": 0.5, "clap": 0.5})
+    # Optional per-name inner-spec overrides (e.g. imagebind: {mode: all}).
+    # Unknown keys are rejected against that inner spec; not an allow-list.
+    scorers: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 __all__ = ["T2AVCompositeScorer", "T2AVCompositeSpec"]

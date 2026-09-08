@@ -12,8 +12,8 @@
 #   - clap           (audio-text alignment, LAION CLAP; zero extra deps)
 # ImageBind (audio-video alignment) is also available as an inner scorer but is
 # NOT enabled here: it requires the facebookresearch/ImageBind package and is
-# CC-BY-NC-SA 4.0 (NonCommercial). To enable, nest an ImageBindRewardScorer
-# under `scorers` with mode: text_video or all (audio_video does not relate
+# CC-BY-NC-SA 4.0 (NonCommercial). To enable, add `imagebind: <weight>` and set
+# `scorers.imagebind.mode` to text_video or all (audio_video does not relate
 # the prompt to the video and the composite will refuse to start).
 #
 # With audio_joint_sde=true, audio is part of the SDE policy AND now receives a
@@ -126,27 +126,12 @@ reward:
       _target_: unirl.reward.local.t2av_composite.T2AVCompositeSpec
       batch_size: 4
       device: auto
-      # videopickscore reads the video (prompt-frame alignment); clap reads the
-      # parallel audio side-channel. Inner fields (frame_selection, mode, ...)
-      # live on the nested spec, not on the composite.
+      # Inner scorer name -> blend weight. videopickscore reads the video,
+      # clap reads the parallel audio side-channel. To add imagebind, install
+      # ImageBind and set `imagebind: <w>` plus `scorers.imagebind.mode: all`.
       weights:
         videopickscore: 0.5
         clap: 0.5
-      scorers:
-        videopickscore:
-          _target_: unirl.reward.local.video_pickscore.VideoPickScoreScorer
-          base_device: cuda
-          config:
-            _target_: unirl.reward.local.video_pickscore.VideoPickScoreSpec
-            batch_size: 4
-            device: auto
-        clap:
-          _target_: unirl.reward.local.clap.CLAPRewardScorer
-          base_device: cuda
-          config:
-            _target_: unirl.reward.local.clap.CLAPSpec
-            batch_size: 4
-            device: auto
 
 algorithm:
   _target_: unirl.algorithms.flowgrpo.FlowGRPO
