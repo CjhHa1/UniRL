@@ -112,6 +112,7 @@ def _preflight_trainside_geometry(
     samples_per_prompt: int,
     num_updates_per_batch: int,
     prompt_local_rollout: bool,
+    has_reward: bool,
     backend_cfg: DictConfig,
     rollout_cfg: DictConfig,
 ) -> None:
@@ -145,9 +146,10 @@ def _preflight_trainside_geometry(
     )
     shared_dp_size = shared_devices // sp_size
 
-    # Mirror the runtime call below: a colocated reward is not a separate role,
-    # so DiffusionTrainer scores it with dp_size 1.
-    reward_dp_size = 1
+    # Mirror the runtime call below, which reads self.reward.dp_size. A reward
+    # Handle carries no sp/tp/pp, so its dp_size is its slab width: the reward
+    # slab when reward_fraction carves one, else the shared devices it colocates
+    # on. Only a recipe with no reward: block at all scores with dp_size 1.
     if reward_fraction > 0.0:
         reward_devices_f = reward_fraction * num_devices
         reward_dp_size = int(round(reward_devices_f))
@@ -156,6 +158,8 @@ def _preflight_trainside_geometry(
                 f"Static trainside geometry: reward_fraction={reward_fraction} of num_devices={num_devices} "
                 f"requests {reward_devices_f} reward devices, not an integer."
             )
+    else:
+        reward_dp_size = shared_devices if has_reward else 1
 
     _validate_dp_geometry(
         batch_size=batch_size,
@@ -418,6 +422,7 @@ class DiffusionTrainer(BaseTrainer):
             samples_per_prompt=total_samples_per_prompt(self.sampling_params),
             num_updates_per_batch=int(stack_cfg.get("num_updates_per_batch", 1)),
             prompt_local_rollout=self._prompt_local_rollout,
+            has_reward=reward_cfg is not None,
             backend_cfg=backend_cfg,
             rollout_cfg=rollout_cfg,
         )
