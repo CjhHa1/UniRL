@@ -35,6 +35,16 @@ def _average_ranks(values: List[float]) -> List[float]:
     return ranks
 
 
+def _expected_selection(rewards: List[float], *, top_k: int, bottom_k: int) -> Dict[int, str]:
+    """Recompute the trainer's stable, disjoint top/bottom labels."""
+    descending = sorted(range(len(rewards)), key=lambda index: (-rewards[index], index))
+    top = descending[:top_k]
+    top_set = set(top)
+    ascending = sorted(range(len(rewards)), key=lambda index: (rewards[index], index))
+    bottom = [index for index in ascending if index not in top_set][:bottom_k]
+    return {**{index: "top" for index in top}, **{index: "bottom" for index in bottom}}
+
+
 def _pearson(left: List[float], right: List[float]) -> float:
     left_mean, right_mean = fmean(left), fmean(right)
     numerator = sum((x - left_mean) * (y - right_mean) for x, y in zip(left, right))
@@ -135,6 +145,7 @@ def _load_traces(path: Path, *, rollout_id: int) -> Dict[Tuple[int, str], dict]:
                 raise ValueError(f"Trace group {key} must contain candidates.")
             sample_ids: set[str] = set()
             selection_counts = {"top": 0, "bottom": 0}
+            rewards: List[float] = []
             for candidate in candidates:
                 sample_id = candidate.get("sample_id")
                 if not isinstance(sample_id, str) or not sample_id or sample_id in sample_ids:
@@ -147,6 +158,7 @@ def _load_traces(path: Path, *, rollout_id: int) -> Dict[Tuple[int, str], dict]:
                 if not math.isfinite(reward):
                     raise ValueError(f"Trace group {key} has non-finite reward for {sample_id!r}.")
                 candidate["reward"] = reward
+                rewards.append(reward)
                 selection = candidate.get("selection")
                 if selection not in {None, "top", "bottom"}:
                     raise ValueError(f"Trace group {key} has unknown selection label {selection!r}.")
@@ -157,6 +169,14 @@ def _load_traces(path: Path, *, rollout_id: int) -> Dict[Tuple[int, str], dict]:
                     f"Trace group {key} selection counts {selection_counts} "
                     f"do not match top_k/bottom_k={top_k}/{bottom_k}."
                 )
+            expected_selection = _expected_selection(rewards, top_k=top_k, bottom_k=bottom_k)
+            actual_selection = {
+                index: candidate["selection"]
+                for index, candidate in enumerate(candidates)
+                if candidate["selection"] is not None
+            }
+            if actual_selection != expected_selection:
+                raise ValueError(f"Trace group {key} selection labels do not match its recorded rewards.")
             traces[key] = {**group, "_trace_meta": trace_meta}
             sources[key] = file
     return traces
@@ -218,6 +238,10 @@ def compare(proxy_dir: Path, oracle_dir: Path, *, rollout_id: int = 0) -> dict:
 
         proxy_candidates = proxy_group["candidates"]
         oracle_candidates = oracle_group["candidates"]
+        proxy_ids_in_order = [item["sample_id"] for item in proxy_candidates]
+        oracle_ids_in_order = [item["sample_id"] for item in oracle_candidates]
+        if proxy_ids_in_order != oracle_ids_in_order:
+            raise ValueError(f"Candidate id order differs for trace group {key}.")
         proxy_by_id = {item["sample_id"]: item for item in proxy_candidates}
         oracle_by_id = {item["sample_id"]: item for item in oracle_candidates}
         ids = [sample_id for sample_id in proxy_by_id if sample_id in oracle_by_id]
@@ -225,6 +249,8 @@ def compare(proxy_dir: Path, oracle_dir: Path, *, rollout_id: int = 0) -> dict:
             raise ValueError(f"Candidate id mismatch for trace group {key}.")
         proxy_rewards = [proxy_by_id[sample_id]["reward"] for sample_id in ids]
         oracle_rewards = [oracle_by_id[sample_id]["reward"] for sample_id in ids]
+        if len(set(proxy_rewards)) < 2 or len(set(oracle_rewards)) < 2:
+            raise ValueError(f"Trace group {key} has undefined rank correlation because all rewards are tied.")
         spearman.append(_pearson(_average_ranks(proxy_rewards), _average_ranks(oracle_rewards)))
         kendall.append(_kendall_tau_b(proxy_rewards, oracle_rewards))
 

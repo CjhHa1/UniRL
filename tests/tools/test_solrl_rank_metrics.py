@@ -153,3 +153,42 @@ def test_trace_identity_and_later_policy_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Only rollout_id=0"):
         compare(proxy, oracle, rollout_id=1)
+
+
+def test_incorrect_selection_and_degenerate_ranks_are_rejected(tmp_path: Path) -> None:
+    proxy, oracle = tmp_path / "proxy", tmp_path / "oracle"
+    _write_trace(proxy, [0.0, 0.2, 0.4, 0.6])
+    _write_trace(oracle, [0.0, 0.2, 0.4, 0.6])
+    payload = json.loads((proxy / "rollout_000000.json").read_text(encoding="utf-8"))
+    candidates = payload["groups"][0]["candidates"]
+    candidates[2]["selection"] = "top"
+    candidates[3]["selection"] = None
+    (proxy / "rollout_000000.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="do not match its recorded rewards"):
+        compare(proxy, oracle)
+
+    tied_proxy, tied_oracle = tmp_path / "tied-proxy", tmp_path / "tied-oracle"
+    _write_trace(tied_proxy, [1.0, 1.0, 1.0, 1.0])
+    _write_trace(tied_oracle, [1.0, 1.0, 1.0, 1.0])
+    for path in (tied_proxy / "rollout_000000.json", tied_oracle / "rollout_000000.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        candidates = payload["groups"][0]["candidates"]
+        for candidate in candidates:
+            candidate["selection"] = None
+        candidates[0]["selection"] = "top"
+        candidates[1]["selection"] = "bottom"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="undefined rank correlation"):
+        compare(tied_proxy, tied_oracle)
+
+
+def test_candidate_order_mismatch_is_rejected(tmp_path: Path) -> None:
+    proxy, oracle = tmp_path / "proxy", tmp_path / "oracle"
+    _write_trace(proxy, [0.0, 0.2, 0.4, 0.6])
+    _write_trace(oracle, [0.0, 0.2, 0.4, 0.6])
+    payload = json.loads((oracle / "rollout_000000.json").read_text(encoding="utf-8"))
+    candidates = payload["groups"][0]["candidates"]
+    candidates[1], candidates[2] = candidates[2], candidates[1]
+    (oracle / "rollout_000000.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="Candidate id order differs"):
+        compare(proxy, oracle)

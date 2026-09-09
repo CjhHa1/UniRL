@@ -84,7 +84,9 @@ class NCCLWeightSync(FullWeightSync):
         self, *, master_addr: str, master_port: int, num_rollout_gpus: int, tp_size: int = 1, pp_size: int = 1
     ) -> None:
         """Bring up the broadcast group (rank 0 + all rollout engine GPUs)."""
-        from unirl.utils.distributed_utils import init_process_group
+        import torch
+
+        from unirl.utils.distributed_utils import eager_connect_process_group, init_process_group
 
         if self._rollout_role is None:
             raise RuntimeError("NCCLWeightSync.connect: call set_rollout_targets() first")
@@ -141,9 +143,14 @@ class NCCLWeightSync(FullWeightSync):
                 group_name=self._group_name,
                 timeout=timedelta(seconds=self._operation_timeout_s),
             )
+            eager_connect_process_group(
+                self._model_update_group,
+                torch.device("cuda", torch.cuda.current_device()),
+            )
             self._collect_rollout_refs(refs, phase="connect")
         except BaseException:
             self._broken = True
+            self._abort_model_group()
             raise
         self._connected = True
         self._broken = False
@@ -195,6 +202,7 @@ class NCCLWeightSync(FullWeightSync):
                         },
                     )
                 except BaseException as exc:
+                    self._abort_model_group()
                     prepare_error = f"{type(exc).__name__}: {exc}"
             self._raise_if_rank0_phase_failed(prepare_error, phase="prepare bucket")
 
@@ -213,11 +221,23 @@ class NCCLWeightSync(FullWeightSync):
                             "track_prefix": self._track_prefix,
                         },
                     )
-                    for _, tensor in bucket:
-                        dist.broadcast(tensor.data.contiguous(), 0, group=self._model_update_group)
+                    works = [
+                        dist.broadcast(
+                            tensor.data.contiguous(),
+                            0,
+                            group=self._model_update_group,
+                            async_op=True,
+                        )
+                        for _, tensor in bucket
+                    ]
+                    timeout = timedelta(seconds=self._operation_timeout_s)
+                    for work in works:
+                        if not work.wait(timeout=timeout):
+                            raise TimeoutError("NCCLWeightSync timed out waiting for a source broadcast.")
                     self._collect_rollout_refs(refs, phase="receive bucket")
                 except BaseException as exc:
                     self._cancel_refs(refs)
+                    self._abort_model_group()
                     update_error = f"{type(exc).__name__}: {exc}"
             self._raise_if_rank0_phase_failed(update_error, phase="broadcast bucket")
 
@@ -296,6 +316,14 @@ class NCCLWeightSync(FullWeightSync):
             self._broken = True
             first = errors[0]
             raise RuntimeError(f"NCCLWeightSync {phase} failed on rank {first['rank']}: {first['error']}")
+
+    def _abort_model_group(self) -> None:
+        abort = getattr(self._model_update_group, "abort", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
 
     @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
     def cleanup(self) -> None:
