@@ -3,11 +3,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 import torch.distributed as dist
 from torch import nn
 
 from unirl.distributed.weight_sync.full.nccl import NCCLWeightSync
 from unirl.trainer.base import BaseTrainer
+from unirl.utils.distributed_utils import eager_connect_process_group
 
 
 def _sync(**kwargs) -> NCCLWeightSync:
@@ -56,3 +58,12 @@ def test_base_trainer_finish_invokes_weight_sync_cleanup() -> None:
     trainer.wandb_logger = None
     trainer._finish_wandb()
     assert calls == ["cleanup"]
+
+
+def test_eager_connect_resolves_generic_process_group_backend() -> None:
+    calls = []
+    backend = SimpleNamespace(eager_connect_single_device=lambda device: calls.append(device))
+    wrapper = SimpleNamespace(_get_backend=lambda device: backend)
+    device = torch.device("cuda", 0)
+    eager_connect_process_group(wrapper, device)
+    assert calls == [device]

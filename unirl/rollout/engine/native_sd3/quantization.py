@@ -185,8 +185,7 @@ def convert_transformer_for_fp8(
 ) -> tuple[Dict[str, torch.Tensor], FP8ConversionReport]:
     """Replace eligible linears and return original-name weight targets."""
 
-    original_names = tuple(name for name, _ in model.named_parameters())
-    original_buffer_names = tuple(name for name, _ in model.named_buffers())
+    original_state_names = tuple(model.state_dict(keep_vars=True))
     parameter_targets: Dict[str, torch.Tensor] = {}
     replaced: List[str] = []
     skipped: List[Tuple[str, str]] = []
@@ -231,18 +230,13 @@ def convert_transformer_for_fp8(
     if controller.enabled:
         recurse(model)
 
-    current = dict(model.named_parameters())
-    for name in original_names:
+    current = model.state_dict(keep_vars=True)
+    for name in original_state_names:
         if name in parameter_targets:
             continue
         if name not in current:
-            raise RuntimeError(f"FP8 conversion lost parameter {name!r} without registering a replacement target.")
+            raise RuntimeError(f"FP8 conversion lost state entry {name!r} without registering a replacement target.")
         parameter_targets[name] = current[name]
-    current_buffers = dict(model.named_buffers())
-    for name in original_buffer_names:
-        if name not in current_buffers:
-            raise RuntimeError(f"FP8 conversion lost buffer {name!r} without registering a replacement target.")
-        parameter_targets[name] = current_buffers[name]
     return parameter_targets, FP8ConversionReport(tuple(replaced), tuple(skipped))
 
 
