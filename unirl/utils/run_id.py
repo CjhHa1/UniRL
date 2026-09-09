@@ -17,9 +17,9 @@ def resolve_run_id(explicit: str | None = None) -> str:
 
 def _ray_job_id() -> str:
     """Current Ray job id. Recent releases hand back the hex string, older ones a ``JobID``."""
-    import ray
-
     try:
+        import ray
+
         job_id = ray.get_runtime_context().get_job_id()
     except Exception as exc:
         raise RuntimeError(
