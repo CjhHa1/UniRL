@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from unirl.config.require import require
 from unirl.reward.base import BaseRewardComponentSpec, RewardBackend
 from unirl.types.reward import RewardRequest, RewardResponse
 
@@ -32,26 +31,6 @@ class T2AVCompositeScorer(RewardBackend):
             # Propagate only fields BOTH the composite and the inner spec declare.
             shared = ("device", "batch_size", "frame_selection")
             overrides = {f: getattr(config, f) for f in shared if hasattr(inner_spec, f) and hasattr(config, f)}
-            model_overrides = {}
-            if name == "videopickscore":
-                model_overrides = {
-                    "processor_id": config.videopickscore_processor_id,
-                    "model_id": config.videopickscore_model_id,
-                }
-            elif name == "clap":
-                model_overrides = {"model_id": config.clap_model_id}
-            for spec_field, value in model_overrides.items():
-                if value is None:
-                    continue
-                # Dropping an override restores the Hub id, which a
-                # network-isolated job reports as a download hang rather than
-                # as the config error it is.
-                require(
-                    hasattr(inner_spec, spec_field),
-                    f"T2AVComposite: {name} spec {type(inner_spec).__name__} has no {spec_field!r} field "
-                    f"to override with {value!r}.",
-                )
-                overrides[spec_field] = value
             if overrides:
                 inner_spec = replace(inner_spec, **overrides)
             self._scorers[name] = inner_cls(config=inner_spec, base_device=base_device)
@@ -120,9 +99,4 @@ class T2AVCompositeSpec(BaseRewardComponentSpec):
     # keeps the historical behaviour; "middle" avoids scoring a blank opening
     # frame on clips that fade or reveal in.
     frame_selection: str = "first"
-    # Per-scorer identifiers allow offline paths without conflating the
-    # PickScore and CLAP model_id fields.
-    videopickscore_processor_id: Optional[str] = None
-    videopickscore_model_id: Optional[str] = None
-    clap_model_id: Optional[str] = None
     weights: Dict[str, float] = field(default_factory=lambda: {"videopickscore": 0.5, "clap": 0.5})
