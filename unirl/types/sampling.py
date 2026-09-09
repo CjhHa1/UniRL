@@ -194,7 +194,12 @@ class DiffusionSamplingParams(BaseSamplingParams):
             f"DiffusionSamplingParams.rollout_precision must be bf16|fp8, got {self.rollout_precision!r}",
         )
         require(
-            self.reward_image_size is None or int(self.reward_image_size) > 0,
+            self.reward_image_size is None
+            or (
+                isinstance(self.reward_image_size, int)
+                and not isinstance(self.reward_image_size, bool)
+                and self.reward_image_size > 0
+            ),
             f"DiffusionSamplingParams.reward_image_size must be positive when set, got {self.reward_image_size!r}",
         )
 

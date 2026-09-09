@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import threading
+from datetime import timedelta
 from typing import Dict, List, Optional
 
 import torch
@@ -15,7 +17,7 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.models.sd3.bundle import SD3Bundle
 from unirl.models.sd3.config import SD3PipelineConfig
 from unirl.models.sd3.pipeline import SD3Pipeline
-from unirl.rollout.engine.base import BaseRolloutEngine
+from unirl.rollout.engine.base import BaseRolloutEngine, RolloutCapabilities
 from unirl.sde.kernels import StepStrategy
 from unirl.sde.runtime import FlowMatchSchedulePolicy, ensure_sample_sigmas
 from unirl.types.primitives import Images
@@ -53,6 +55,11 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
     """A worker-local Diffusers SD3 pipeline plus raw-NCCL BF16 weight refresh."""
 
     _component_name = "native_sd3"
+    capabilities = RolloutCapabilities(
+        rollout_precisions=frozenset({"bf16", "fp8"}),
+        reward_image_resize=True,
+        transactional_weight_publication=True,
+    )
 
     def __init__(
         self,
@@ -61,14 +68,16 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         model_config: SD3PipelineConfig,
         strategy: StepStrategy,
         device: Optional[torch.device] = None,
-        rank: int = 0,
+        rank: Optional[int] = None,
     ) -> None:
         self.config = config
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.rank = int(rank)
+        if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int)):
+            raise TypeError(f"NativeSD3RolloutEngine.rank must be an integer or None, got {rank!r}.")
+        self.rank = 0 if rank is None else rank
         if bool(model_config.meta_init_transformer):
             raise ValueError("NativeSD3RolloutEngine requires meta_init_transformer=false for its eager model copy.")
-        if bool(config.fp8_enabled):
+        if config.fp8_enabled:
             model_dtype = parse_torch_dtype(model_config.model_precision, field_name="model_precision")
             autocast_dtype = parse_torch_dtype(model_config.autocast_precision, field_name="autocast_precision")
             if model_dtype != torch.bfloat16 or autocast_dtype != torch.bfloat16:
@@ -99,14 +108,16 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
             config=config,
             controller=self._controller,
         )
-        if bool(config.compile_model):
-            transformer = torch.compile(transformer, mode=str(config.compile_mode))
+        if config.compile_model:
+            transformer = torch.compile(transformer, mode=config.compile_mode)
         self.bundle.transformer = RoutedTransformer(transformer, self._controller).eval()
 
         self._weight_groups: Dict[str, dist.ProcessGroup] = {}
         self._generate_lock = threading.Lock()
         self._shutdown = False
         self._weights_valid = True
+        self._publication_names: Optional[set[str]] = None
+        self._prepared_bucket = None
         self._version = 0
         logger.info(
             "NativeSD3 rollout ready rank=%d fp8=%s converted=%d skipped=%d",
@@ -133,13 +144,13 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         ensure_sample_sigmas(sample, self.schedule_policy)
         batch_size = int(gen.batch_size)
         fbs = self.config.forward_batch_size
-        if fbs is None or batch_size <= int(fbs):
+        if fbs is None or batch_size <= fbs:
             return self._generate_batch(sample)
 
         input_parts = sample.parts[:-1]
         chunks: List[Part] = []
-        for start in range(0, batch_size, int(fbs)):
-            end = min(start + int(fbs), batch_size)
+        for start in range(0, batch_size, fbs):
+            end = min(start + fbs, batch_size)
             request = Sample(parts=[*input_parts, gen.slice(start, end)])
             chunks.append(self._generate_batch(request).parts[-1])
         return sample.replace_frontier(Part.concat(chunks))
@@ -147,7 +158,7 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
     def _generate_batch(self, sample: Sample) -> Sample:
         params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
         with self._controller.rollout(
-            mode=str(params.rollout_precision),
+            mode=params.rollout_precision,
             total_steps=int(params.num_inference_steps),
         ):
             result = self.pipeline.generate(sample)
@@ -164,7 +175,7 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         dense = images.to_dense()
         resized = F.interpolate(
             dense,
-            size=(int(image_size), int(image_size)),
+            size=(image_size, image_size),
             mode="bicubic",
             align_corners=False,
             antialias=True,
@@ -183,28 +194,83 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         group_name: str,
         backend: str = "nccl",
         track_prefix: str = "",
+        timeout_s: Optional[float] = None,
     ) -> None:
         del track_prefix
         from unirl.utils.distributed_utils import init_process_group
 
-        group_name = str(group_name)
+        if not isinstance(master_address, str) or not master_address:
+            raise TypeError(f"master_address must be a non-empty string, got {master_address!r}.")
+        for name, value, minimum in (
+            ("master_port", master_port, 1),
+            ("rank_offset", rank_offset, 0),
+            ("world_size", world_size, 1),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}.")
+        if timeout_s is not None and (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+        ):
+            raise ValueError(f"timeout_s must be finite and > 0 when set, got {timeout_s!r}.")
+        if not isinstance(group_name, str) or not group_name:
+            raise TypeError(f"group_name must be a non-empty string, got {group_name!r}.")
         if group_name in self._weight_groups:
             raise RuntimeError(f"Native SD3 weight group {group_name!r} is already initialized.")
         group = init_process_group(
             backend=backend,
-            init_method=f"tcp://{master_address}:{int(master_port)}",
-            world_size=int(world_size),
-            rank=int(rank_offset),
+            init_method=f"tcp://{master_address}:{master_port}",
+            world_size=world_size,
+            rank=rank_offset,
             group_name=group_name,
+            timeout=timedelta(seconds=timeout_s) if timeout_s is not None else None,
         )
         self._weight_groups[group_name] = group
 
     def begin_weights_update(self, *, group_name: str, track_prefix: str = "") -> None:
         del track_prefix
-        if str(group_name) not in self._weight_groups:
+        if group_name not in self._weight_groups:
             raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
         with self._generate_lock:
             self._weights_valid = False
+            self._publication_names = set()
+            self._prepared_bucket = None
+
+    def prepare_weights_update(
+        self,
+        *,
+        names: List[str],
+        dtypes: List[str],
+        shapes: List[List[int]],
+        group_name: str,
+        track_prefix: str = "",
+    ) -> None:
+        """Allocate and validate a bucket before the sender enters NCCL broadcast."""
+        del track_prefix
+        if not (len(names) == len(dtypes) == len(shapes)):
+            raise ValueError(f"names/dtypes/shapes length mismatch: {len(names)}/{len(dtypes)}/{len(shapes)}")
+        if group_name not in self._weight_groups:
+            raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
+        with self._generate_lock:
+            if self._publication_names is None:
+                raise RuntimeError("Native SD3 weight bucket arrived outside begin_weights_update().")
+            if self._prepared_bucket is not None:
+                raise RuntimeError("Native SD3 already has a prepared weight bucket awaiting broadcast.")
+            signature = self._bucket_signature(names, dtypes, shapes)
+            received = [
+                (
+                    name,
+                    torch.empty(shape, dtype=_dtype_from_name(dtype_name), device=self.device),
+                )
+                for name, dtype_name, shape in zip(names, dtypes, signature[2])
+            ]
+            resolved, loaded_names = self._resolve_weight_targets(
+                received,
+                previously_received=self._publication_names,
+            )
+            self._prepared_bucket = (signature, resolved, loaded_names)
 
     def update_weights_from_distributed(
         self,
@@ -220,41 +286,64 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         del target_modules, flush_cache, track_prefix
         if not (len(names) == len(dtypes) == len(shapes)):
             raise ValueError(f"names/dtypes/shapes length mismatch: {len(names)}/{len(dtypes)}/{len(shapes)}")
-        group = self._weight_groups.get(str(group_name))
+        group = self._weight_groups.get(group_name)
         if group is None:
             raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
 
         with self._generate_lock:
+            if self._publication_names is None:
+                raise RuntimeError("Native SD3 weight bucket arrived outside begin_weights_update().")
             try:
-                received: List[tuple[str, torch.Tensor]] = []
-                for name, dtype_name, shape in zip(names, dtypes, shapes):
-                    tensor = torch.empty(
-                        tuple(int(dim) for dim in shape),
-                        dtype=_dtype_from_name(dtype_name),
-                        device=self.device,
-                    )
+                signature = self._bucket_signature(names, dtypes, shapes)
+                prepared = self._prepared_bucket
+                if prepared is None or prepared[0] != signature:
+                    raise RuntimeError("Native SD3 weight bucket was not prepared with matching metadata.")
+                _, resolved, loaded_names = prepared
+                for _, tensor in resolved:
                     dist.broadcast(tensor, src=0, group=group)
-                    received.append((str(name), tensor))
-                self._load_weights(received)
+                with torch.no_grad():
+                    for target, tensor in resolved:
+                        target.copy_(tensor.to(device=target.device, dtype=target.dtype))
+                self._publication_names.update(loaded_names)
             except Exception:
                 self._weights_valid = False
                 self._controller.mark_weights_dirty()
                 raise
-            self._controller.mark_weights_dirty()
+            finally:
+                self._prepared_bucket = None
 
     def finish_weights_update(self, *, group_name: str, track_prefix: str = "") -> None:
         del track_prefix
-        if str(group_name) not in self._weight_groups:
+        if group_name not in self._weight_groups:
             raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
         with self._generate_lock:
+            received = self._publication_names
+            received_names = received if received is not None else set()
+            expected = set(self._parameter_targets)
+            if self._prepared_bucket is not None or received is None or received != expected:
+                missing = sorted(expected - received_names)
+                unexpected = sorted(received_names - expected)
+                self._weights_valid = False
+                self._publication_names = None
+                raise RuntimeError(
+                    f"Native SD3 weight publication is incomplete: missing={missing[:8]}, unexpected={unexpected[:8]}."
+                )
             self._controller.mark_weights_dirty()
             self._weights_valid = True
+            self._publication_names = None
 
-    @torch.no_grad()
-    def _load_weights(self, tensors: List[tuple[str, torch.Tensor]]) -> None:
+    def _resolve_weight_targets(
+        self,
+        tensors: List[tuple[str, torch.Tensor]],
+        *,
+        previously_received: Optional[set[str]] = None,
+    ) -> tuple[List[tuple[torch.Tensor, torch.Tensor]], set[str]]:
         resolved: List[tuple[torch.Tensor, torch.Tensor]] = []
+        names: set[str] = set()
         for wire_name, tensor in tensors:
             name = wire_name.removeprefix("transformer.")
+            if name in names or (previously_received is not None and name in previously_received):
+                raise ValueError(f"NativeSD3 weight sync received duplicate parameter {wire_name!r}.")
             target = self._parameter_targets.get(name)
             if target is None:
                 raise KeyError(f"NativeSD3 weight sync has no target for {wire_name!r}.")
@@ -263,15 +352,31 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
                     f"NativeSD3 weight shape mismatch for {wire_name}: "
                     f"target={tuple(target.shape)} wire={tuple(tensor.shape)}."
                 )
+            names.add(name)
             resolved.append((target, tensor))
-        for target, tensor in resolved:
-            target.copy_(tensor.to(device=target.device, dtype=target.dtype))
+        return resolved, names
+
+    @staticmethod
+    def _bucket_signature(
+        names: List[str], dtypes: List[str], shapes: List[List[int]]
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[int, ...], ...]]:
+        if any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("Native SD3 weight names must be non-empty strings.")
+        if any(not isinstance(dtype, str) or not dtype for dtype in dtypes):
+            raise TypeError("Native SD3 weight dtypes must be non-empty strings.")
+        for shape in shapes:
+            if not isinstance(shape, (list, tuple)) or any(
+                isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in shape
+            ):
+                raise TypeError(f"Native SD3 weight shapes must contain non-negative integers, got {shape!r}.")
+        return tuple(names), tuple(dtypes), tuple(tuple(shape) for shape in shapes)
 
     def destroy_weights_update_group(self, *, group_name: str, track_prefix: str = "") -> None:
         del track_prefix
-        group = self._weight_groups.pop(str(group_name), None)
+        group = self._weight_groups.get(group_name)
         if group is not None:
             dist.destroy_process_group(group)
+            self._weight_groups.pop(group_name, None)
 
     def health_check(self) -> bool:
         return not self._shutdown and self._weights_valid and self.bundle.transformer is not None
@@ -279,10 +384,17 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
     def shutdown(self) -> None:
         with self._generate_lock:
             self._shutdown = True
-            groups = list(self._weight_groups.values())
-            self._weight_groups.clear()
-            for group in groups:
-                dist.destroy_process_group(group)
+            first_error: Optional[Exception] = None
+            for name, group in list(self._weight_groups.items()):
+                try:
+                    dist.destroy_process_group(group)
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    self._weight_groups.pop(name, None)
+            if first_error is not None:
+                raise first_error
 
 
 __all__ = ["NativeSD3RolloutEngine"]
