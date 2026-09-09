@@ -113,6 +113,8 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         self.bundle.transformer = RoutedTransformer(transformer, self._controller).eval()
 
         self._weight_groups: Dict[str, dist.ProcessGroup] = {}
+        self._weight_group_timeouts: Dict[str, float] = {}
+        self._failed_weight_groups: set[str] = set()
         self._generate_lock = threading.Lock()
         self._shutdown = False
         self._weights_valid = True
@@ -197,7 +199,7 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         timeout_s: Optional[float] = None,
     ) -> None:
         del track_prefix
-        from unirl.utils.distributed_utils import init_process_group
+        from unirl.utils.distributed_utils import eager_connect_process_group, init_process_group
 
         if not isinstance(master_address, str) or not master_address:
             raise TypeError(f"master_address must be a non-empty string, got {master_address!r}.")
@@ -227,12 +229,20 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
             group_name=group_name,
             timeout=timedelta(seconds=timeout_s) if timeout_s is not None else None,
         )
+        try:
+            eager_connect_process_group(group, torch.device(self.device))
+        except Exception:
+            dist.destroy_process_group(group)
+            raise
         self._weight_groups[group_name] = group
+        self._weight_group_timeouts[group_name] = float(timeout_s) if timeout_s is not None else 300.0
 
     def begin_weights_update(self, *, group_name: str, track_prefix: str = "") -> None:
         del track_prefix
         if group_name not in self._weight_groups:
             raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
+        if group_name in self._failed_weight_groups:
+            raise RuntimeError(f"Native SD3 weight group {group_name!r} is failed and cannot be reused.")
         with self._generate_lock:
             self._weights_valid = False
             self._publication_names = set()
@@ -247,12 +257,15 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         group_name: str,
         track_prefix: str = "",
     ) -> None:
-        """Allocate and validate a bucket before the sender enters NCCL broadcast."""
+        """Allocate, validate, and arm async receives before the sender broadcasts."""
         del track_prefix
         if not (len(names) == len(dtypes) == len(shapes)):
             raise ValueError(f"names/dtypes/shapes length mismatch: {len(names)}/{len(dtypes)}/{len(shapes)}")
-        if group_name not in self._weight_groups:
+        group = self._weight_groups.get(group_name)
+        if group is None:
             raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
+        if group_name in self._failed_weight_groups:
+            raise RuntimeError(f"Native SD3 weight group {group_name!r} is failed and cannot be reused.")
         with self._generate_lock:
             if self._publication_names is None:
                 raise RuntimeError("Native SD3 weight bucket arrived outside begin_weights_update().")
@@ -270,7 +283,12 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
                 received,
                 previously_received=self._publication_names,
             )
-            self._prepared_bucket = (signature, resolved, loaded_names)
+            try:
+                works = [dist.broadcast(tensor, src=0, group=group, async_op=True) for _, tensor in resolved]
+            except Exception:
+                self._fail_weight_group(group_name)
+                raise
+            self._prepared_bucket = (signature, resolved, loaded_names, works)
 
     def update_weights_from_distributed(
         self,
@@ -289,6 +307,8 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         group = self._weight_groups.get(group_name)
         if group is None:
             raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
+        if group_name in self._failed_weight_groups:
+            raise RuntimeError(f"Native SD3 weight group {group_name!r} is failed and cannot be reused.")
 
         with self._generate_lock:
             if self._publication_names is None:
@@ -298,16 +318,17 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
                 prepared = self._prepared_bucket
                 if prepared is None or prepared[0] != signature:
                     raise RuntimeError("Native SD3 weight bucket was not prepared with matching metadata.")
-                _, resolved, loaded_names = prepared
-                for _, tensor in resolved:
-                    dist.broadcast(tensor, src=0, group=group)
+                _, resolved, loaded_names, works = prepared
+                timeout = timedelta(seconds=self._weight_group_timeouts[group_name])
+                for work in works:
+                    if not work.wait(timeout=timeout):
+                        raise TimeoutError("Native SD3 timed out waiting for an armed weight receive.")
                 with torch.no_grad():
                     for target, tensor in resolved:
                         target.copy_(tensor.to(device=target.device, dtype=target.dtype))
                 self._publication_names.update(loaded_names)
             except Exception:
-                self._weights_valid = False
-                self._controller.mark_weights_dirty()
+                self._fail_weight_group(group_name)
                 raise
             finally:
                 self._prepared_bucket = None
@@ -316,6 +337,8 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         del track_prefix
         if group_name not in self._weight_groups:
             raise RuntimeError(f"No native SD3 weight group {group_name!r}; initialize it before sync.")
+        if group_name in self._failed_weight_groups:
+            raise RuntimeError(f"Native SD3 weight group {group_name!r} is failed and cannot be reused.")
         with self._generate_lock:
             received = self._publication_names
             received_names = received if received is not None else set()
@@ -323,8 +346,8 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
             if self._prepared_bucket is not None or received is None or received != expected:
                 missing = sorted(expected - received_names)
                 unexpected = sorted(received_names - expected)
-                self._weights_valid = False
                 self._publication_names = None
+                self._fail_weight_group(group_name)
                 raise RuntimeError(
                     f"Native SD3 weight publication is incomplete: missing={missing[:8]}, unexpected={unexpected[:8]}."
                 )
@@ -341,6 +364,8 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         resolved: List[tuple[torch.Tensor, torch.Tensor]] = []
         names: set[str] = set()
         for wire_name, tensor in tensors:
+            if not wire_name.startswith("transformer."):
+                raise ValueError(f"NativeSD3 weight sync requires 'transformer.' prefix, got {wire_name!r}.")
             name = wire_name.removeprefix("transformer.")
             if name in names or (previously_received is not None and name in previously_received):
                 raise ValueError(f"NativeSD3 weight sync received duplicate parameter {wire_name!r}.")
@@ -371,12 +396,27 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
                 raise TypeError(f"Native SD3 weight shapes must contain non-negative integers, got {shape!r}.")
         return tuple(names), tuple(dtypes), tuple(tuple(shape) for shape in shapes)
 
+    def _fail_weight_group(self, group_name: str) -> None:
+        self._failed_weight_groups.add(group_name)
+        self._weights_valid = False
+        self._prepared_bucket = None
+        self._controller.mark_weights_dirty()
+        group = self._weight_groups.get(group_name)
+        abort = getattr(group, "abort", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                logger.exception("Failed to abort Native SD3 weight group %r", group_name)
+
     def destroy_weights_update_group(self, *, group_name: str, track_prefix: str = "") -> None:
         del track_prefix
         group = self._weight_groups.get(group_name)
         if group is not None:
             dist.destroy_process_group(group)
             self._weight_groups.pop(group_name, None)
+            self._weight_group_timeouts.pop(group_name, None)
+            self._failed_weight_groups.discard(group_name)
 
     def health_check(self) -> bool:
         return not self._shutdown and self._weights_valid and self.bundle.transformer is not None
@@ -393,6 +433,8 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
                         first_error = exc
                 else:
                     self._weight_groups.pop(name, None)
+                    self._weight_group_timeouts.pop(name, None)
+                    self._failed_weight_groups.discard(name)
             if first_error is not None:
                 raise first_error
 

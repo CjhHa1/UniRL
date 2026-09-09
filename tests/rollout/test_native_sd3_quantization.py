@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
 from torch import nn
 
 from unirl.distributed.weight_sync.full.nccl import NCCLWeightSync
@@ -24,6 +25,7 @@ class _TinyTransformer(nn.Module):
         super().__init__()
         self.proj = nn.Linear(4, 4)
         self.register_buffer("position_table", torch.arange(4))
+        self.register_buffer("scratch", torch.arange(2), persistent=False)
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         return self.proj(values)
@@ -113,6 +115,8 @@ def test_weight_bucket_is_fully_validated_before_copy() -> None:
 def test_weight_publication_blocks_generation_until_finished() -> None:
     engine = NativeSD3RolloutEngine.__new__(NativeSD3RolloutEngine)
     engine._weight_groups = {"weights": object()}
+    engine._weight_group_timeouts = {"weights": 30.0}
+    engine._failed_weight_groups = set()
     engine._generate_lock = threading.Lock()
     engine._weights_valid = True
     engine._parameter_targets = {"weight": torch.zeros(1)}
@@ -128,6 +132,8 @@ def test_weight_publication_blocks_generation_until_finished() -> None:
 def test_incomplete_and_duplicate_weight_publications_are_rejected() -> None:
     engine = NativeSD3RolloutEngine.__new__(NativeSD3RolloutEngine)
     engine._weight_groups = {"weights": object()}
+    engine._weight_group_timeouts = {"weights": 30.0}
+    engine._failed_weight_groups = set()
     engine._generate_lock = threading.Lock()
     engine._weights_valid = True
     engine._parameter_targets = {"first": torch.zeros(1), "second": torch.zeros(1)}
@@ -146,15 +152,33 @@ def test_incomplete_and_duplicate_weight_publications_are_rejected() -> None:
         )
 
 
-def test_weight_bucket_is_allocated_and_validated_before_broadcast() -> None:
+def test_weight_bucket_is_allocated_and_armed_before_sender_broadcast(monkeypatch) -> None:
     engine = NativeSD3RolloutEngine.__new__(NativeSD3RolloutEngine)
     engine.device = torch.device("cpu")
     engine._weight_groups = {"weights": object()}
+    engine._weight_group_timeouts = {"weights": 30.0}
+    engine._failed_weight_groups = set()
     engine._generate_lock = threading.Lock()
     engine._weights_valid = True
     engine._parameter_targets = {"weight": torch.zeros(2, 2)}
     engine._controller = type("_Controller", (), {"mark_weights_dirty": lambda self: None})()
     engine.begin_weights_update(group_name="weights")
+    broadcasts = []
+
+    class _Work:
+        def wait(self, *, timeout):
+            return True
+
+    def _arm(tensor, **kwargs):
+        tensor.fill_(2.0)
+        broadcasts.append(tensor)
+        return _Work()
+
+    monkeypatch.setattr(
+        dist,
+        "broadcast",
+        _arm,
+    )
 
     with pytest.raises(KeyError, match="no target"):
         engine.prepare_weights_update(
@@ -170,6 +194,45 @@ def test_weight_bucket_is_allocated_and_validated_before_broadcast() -> None:
         group_name="weights",
     )
     assert engine._prepared_bucket is not None
+    assert len(broadcasts) == 1
+    engine.update_weights_from_distributed(
+        names=["transformer.weight"],
+        dtypes=["torch.float32"],
+        shapes=[[2, 2]],
+        group_name="weights",
+    )
+    assert torch.equal(engine._parameter_targets["weight"], torch.full((2, 2), 2.0))
+
+
+def test_failed_armed_receive_permanently_rejects_group_reuse(monkeypatch) -> None:
+    engine = NativeSD3RolloutEngine.__new__(NativeSD3RolloutEngine)
+    engine.device = torch.device("cpu")
+    engine._weight_groups = {"weights": object()}
+    engine._weight_group_timeouts = {"weights": 30.0}
+    engine._failed_weight_groups = set()
+    engine._generate_lock = threading.Lock()
+    engine._weights_valid = True
+    engine._parameter_targets = {"weight": torch.zeros(1)}
+    engine._controller = type("_Controller", (), {"mark_weights_dirty": lambda self: None})()
+    engine.begin_weights_update(group_name="weights")
+    work = SimpleNamespace(wait=lambda **kwargs: False)
+    monkeypatch.setattr(dist, "broadcast", lambda tensor, **kwargs: work)
+    engine.prepare_weights_update(
+        names=["transformer.weight"],
+        dtypes=["torch.float32"],
+        shapes=[[1]],
+        group_name="weights",
+    )
+    with pytest.raises(TimeoutError, match="armed weight receive"):
+        engine.update_weights_from_distributed(
+            names=["transformer.weight"],
+            dtypes=["torch.float32"],
+            shapes=[[1]],
+            group_name="weights",
+        )
+    assert "weights" in engine._failed_weight_groups
+    with pytest.raises(RuntimeError, match="failed and cannot be reused"):
+        engine.begin_weights_update(group_name="weights")
 
 
 def test_failed_fp8_forward_keeps_cache_dirty_for_retry() -> None:
