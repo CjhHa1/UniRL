@@ -19,7 +19,6 @@ import torch
 from unirl.config.require import require
 from unirl.types.conditions import TextEmbedCondition
 from unirl.types.primitives import Texts
-from unirl.utils.distributed_utils import init_gloo_group
 from unirl.utils.run_id import resolve_run_id
 
 from .vendor import MINIMAX_H3_TEXT_ENCODER_LAYER
@@ -155,8 +154,11 @@ class MiniMaxH3TextEmbedStage:
         # forward. The barrier spans the whole world rather than one shard group:
         # an onload stalls a whole node, and under HSDP the replica all-reduce
         # crosses nodes just as the shard reduce-scatter stays inside one.
+        # Its own group, not the memoized init_gloo_group(): an async DCP save
+        # hands that one to a background thread and keeps it, and two threads
+        # driving one process group concurrently is undefined.
         if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-            self._embedding_sync_group = init_gloo_group()
+            self._embedding_sync_group = dist.new_group(backend="gloo")
 
     def _synchronize_embedding_ranks(self) -> None:
         """Keep delayed conditioner loads out of the next FSDP NCCL collective."""
