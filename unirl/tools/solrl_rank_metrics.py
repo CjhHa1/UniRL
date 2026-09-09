@@ -10,6 +10,16 @@ from statistics import fmean
 from typing import Dict, Iterable, List, Tuple
 
 
+def _require_sha256(value: object, *, field: str, context: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{context} has invalid {field}; expected a lowercase SHA-256 hex digest.")
+    return value
+
+
 def _average_ranks(values: List[float]) -> List[float]:
     order = sorted(range(len(values)), key=lambda index: (values[index], index))
     ranks = [0.0] * len(values)
@@ -54,29 +64,116 @@ def _kendall_tau_b(left: List[float], right: List[float]) -> float:
     return (concordant - discordant) / denominator if denominator else 0.0
 
 
-def _load_traces(path: Path) -> Dict[Tuple[int, str], dict]:
+def _load_traces(path: Path, *, rollout_id: int) -> Dict[Tuple[int, str], dict]:
     traces: Dict[Tuple[int, str], dict] = {}
     sources: Dict[Tuple[int, str], Path] = {}
     for file in sorted(path.glob("rollout_*.json")):
         with file.open(encoding="utf-8") as handle:
             payload = json.load(handle)
-        rollout_id = int(payload["rollout_id"])
-        for group in payload["groups"]:
-            key = (rollout_id, str(group["group_id"]))
+        file_rollout_id = payload.get("rollout_id")
+        if isinstance(file_rollout_id, bool) or not isinstance(file_rollout_id, int) or file_rollout_id < 0:
+            raise ValueError(f"Invalid rollout_id in {file}: {file_rollout_id!r}.")
+        if file_rollout_id != rollout_id:
+            continue
+        if payload.get("schema_version") != 1:
+            raise ValueError(f"Unsupported or missing trace schema_version in {file}.")
+        policy_version = payload.get("policy_version")
+        if isinstance(policy_version, bool) or not isinstance(policy_version, int) or policy_version < 0:
+            raise ValueError(f"Invalid policy_version in {file}: {policy_version!r}.")
+        policy_snapshot_id = payload.get("policy_snapshot_id")
+        if not isinstance(policy_snapshot_id, str) or not policy_snapshot_id:
+            raise ValueError(f"Missing policy_snapshot_id in {file}.")
+        model_fingerprint = _require_sha256(
+            payload.get("model_fingerprint"),
+            field="model_fingerprint",
+            context=file,
+        )
+        pipeline_fingerprint = _require_sha256(
+            payload.get("pipeline_fingerprint"),
+            field="pipeline_fingerprint",
+            context=file,
+        )
+        reward_fingerprint = _require_sha256(
+            payload.get("reward_fingerprint"),
+            field="reward_fingerprint",
+            context=file,
+        )
+        comparison_fingerprint = _require_sha256(
+            payload.get("comparison_fingerprint"),
+            field="comparison_fingerprint",
+            context=file,
+        )
+        top_k = payload.get("top_k")
+        bottom_k = payload.get("bottom_k")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (top_k, bottom_k)):
+            raise ValueError(f"Invalid top_k/bottom_k in {file}: {top_k!r}/{bottom_k!r}.")
+        groups = payload.get("groups")
+        if not isinstance(groups, list) or not groups:
+            raise ValueError(f"Trace {file} must contain at least one group.")
+        trace_meta = {
+            "schema_version": 1,
+            "policy_version": policy_version,
+            "policy_snapshot_id": policy_snapshot_id,
+            "model_fingerprint": model_fingerprint,
+            "pipeline_fingerprint": pipeline_fingerprint,
+            "reward_fingerprint": reward_fingerprint,
+            "comparison_fingerprint": comparison_fingerprint,
+            "top_k": top_k,
+            "bottom_k": bottom_k,
+        }
+        for group in groups:
+            group_id = group.get("group_id")
+            if not isinstance(group_id, str) or not group_id:
+                raise ValueError(f"Trace {file} has an invalid group_id {group_id!r}.")
+            key = (file_rollout_id, group_id)
             if key in traces:
                 raise ValueError(f"Duplicate trace group {key} in {sources[key]} and {file}.")
-            traces[key] = group
+            for name in ("prompt_sha256", "noise_sha256"):
+                _require_sha256(group.get(name), field=name, context=f"trace group {key}")
+            candidates = group.get("candidates")
+            if not isinstance(candidates, list) or not candidates:
+                raise ValueError(f"Trace group {key} must contain candidates.")
+            sample_ids: set[str] = set()
+            selection_counts = {"top": 0, "bottom": 0}
+            for candidate in candidates:
+                sample_id = candidate.get("sample_id")
+                if not isinstance(sample_id, str) or not sample_id or sample_id in sample_ids:
+                    raise ValueError(f"Trace group {key} has an empty or duplicate sample_id {sample_id!r}.")
+                sample_ids.add(sample_id)
+                raw_reward = candidate.get("reward")
+                if isinstance(raw_reward, bool) or not isinstance(raw_reward, (int, float)):
+                    raise ValueError(f"Trace group {key} has non-numeric reward for {sample_id!r}.")
+                reward = float(raw_reward)
+                if not math.isfinite(reward):
+                    raise ValueError(f"Trace group {key} has non-finite reward for {sample_id!r}.")
+                candidate["reward"] = reward
+                selection = candidate.get("selection")
+                if selection not in {None, "top", "bottom"}:
+                    raise ValueError(f"Trace group {key} has unknown selection label {selection!r}.")
+                if selection is not None:
+                    selection_counts[selection] += 1
+            if selection_counts != {"top": top_k, "bottom": bottom_k}:
+                raise ValueError(
+                    f"Trace group {key} selection counts {selection_counts} "
+                    f"do not match top_k/bottom_k={top_k}/{bottom_k}."
+                )
+            traces[key] = {**group, "_trace_meta": trace_meta}
             sources[key] = file
     return traces
 
 
 def _selected_ids(candidates: Iterable[dict], kind: str) -> set[str]:
-    return {str(item["sample_id"]) for item in candidates if item.get("selection") == kind}
+    return {item["sample_id"] for item in candidates if item.get("selection") == kind}
 
 
-def compare(proxy_dir: Path, oracle_dir: Path) -> dict:
-    proxy = _load_traces(proxy_dir)
-    oracle = _load_traces(oracle_dir)
+def compare(proxy_dir: Path, oracle_dir: Path, *, rollout_id: int = 0) -> dict:
+    if rollout_id != 0:
+        raise ValueError(
+            "Only rollout_id=0 is safe for cross-run comparison: independently trained arms diverge after update zero. "
+            "Use a future paired-oracle trace mode for later policy versions."
+        )
+    proxy = _load_traces(proxy_dir, rollout_id=rollout_id)
+    oracle = _load_traces(oracle_dir, rollout_id=rollout_id)
     proxy_keys = set(proxy)
     oracle_keys = set(oracle)
     if proxy_keys != oracle_keys:
@@ -95,42 +192,59 @@ def compare(proxy_dir: Path, oracle_dir: Path) -> dict:
     bottom_overlap: List[float] = []
     top_true_gap: List[float] = []
     bottom_true_gap: List[float] = []
-    side_presence: Dict[str, bool | None] = {"top": None, "bottom": None}
     for key in keys:
-        proxy_candidates = proxy[key]["candidates"]
-        oracle_candidates = oracle[key]["candidates"]
-        proxy_by_id = {str(item["sample_id"]): item for item in proxy_candidates}
-        oracle_by_id = {str(item["sample_id"]): item for item in oracle_candidates}
+        proxy_group = proxy[key]
+        oracle_group = oracle[key]
+        proxy_meta = proxy_group["_trace_meta"]
+        oracle_meta = oracle_group["_trace_meta"]
+        for field in (
+            "schema_version",
+            "policy_version",
+            "policy_snapshot_id",
+            "model_fingerprint",
+            "pipeline_fingerprint",
+            "reward_fingerprint",
+            "comparison_fingerprint",
+            "top_k",
+            "bottom_k",
+        ):
+            if proxy_meta[field] != oracle_meta[field]:
+                raise ValueError(f"Trace metadata {field} differs for group {key}.")
+        if proxy_meta["policy_version"] != 0:
+            raise ValueError(f"Trace group {key} is not from the initial shared policy snapshot.")
+        for field in ("prompt_sha256", "noise_sha256"):
+            if proxy_group[field] != oracle_group[field]:
+                raise ValueError(f"Trace identity {field} differs for group {key}.")
+
+        proxy_candidates = proxy_group["candidates"]
+        oracle_candidates = oracle_group["candidates"]
+        proxy_by_id = {item["sample_id"]: item for item in proxy_candidates}
+        oracle_by_id = {item["sample_id"]: item for item in oracle_candidates}
         ids = [sample_id for sample_id in proxy_by_id if sample_id in oracle_by_id]
         if len(ids) != len(proxy_candidates) or len(ids) != len(oracle_candidates):
             raise ValueError(f"Candidate id mismatch for trace group {key}.")
-        proxy_rewards = [float(proxy_by_id[sample_id]["reward"]) for sample_id in ids]
-        oracle_rewards = [float(oracle_by_id[sample_id]["reward"]) for sample_id in ids]
+        proxy_rewards = [proxy_by_id[sample_id]["reward"] for sample_id in ids]
+        oracle_rewards = [oracle_by_id[sample_id]["reward"] for sample_id in ids]
         spearman.append(_pearson(_average_ranks(proxy_rewards), _average_ranks(oracle_rewards)))
         kendall.append(_kendall_tau_b(proxy_rewards, oracle_rewards))
 
-        oracle_reward_by_id = {sample_id: float(oracle_by_id[sample_id]["reward"]) for sample_id in ids}
+        oracle_reward_by_id = {sample_id: oracle_by_id[sample_id]["reward"] for sample_id in ids}
         for kind, overlaps, gaps in (
             ("top", top_overlap, top_true_gap),
             ("bottom", bottom_overlap, bottom_true_gap),
         ):
             proxy_ids = _selected_ids(proxy_candidates, kind)
             oracle_ids = _selected_ids(oracle_candidates, kind)
-            present = bool(proxy_ids or oracle_ids)
-            if side_presence[kind] is None:
-                side_presence[kind] = present
-            elif side_presence[kind] != present:
-                raise ValueError(f"Selection labels for {kind} are inconsistent across trace groups.")
-            if not present:
+            if not proxy_ids:
                 continue
-            if not proxy_ids or len(proxy_ids) != len(oracle_ids):
-                raise ValueError(f"Selection labels for {kind} do not align in trace group {key}.")
             overlaps.append(len(proxy_ids & oracle_ids) / len(oracle_ids))
             proxy_true = fmean(oracle_reward_by_id[sample_id] for sample_id in proxy_ids)
             oracle_true = fmean(oracle_reward_by_id[sample_id] for sample_id in oracle_ids)
             gaps.append(proxy_true - oracle_true)
 
     return {
+        "rollout_id": rollout_id,
+        "policy_version": 0,
         "groups": len(keys),
         "spearman_mean": fmean(spearman),
         "kendall_tau_b_mean": fmean(kendall),
@@ -145,9 +259,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--proxy-dir", type=Path, required=True)
     parser.add_argument("--oracle-dir", type=Path, required=True)
+    parser.add_argument("--rollout-id", type=int, default=0)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    metrics = compare(args.proxy_dir, args.oracle_dir)
+    metrics = compare(args.proxy_dir, args.oracle_dir, rollout_id=args.rollout_id)
     text = json.dumps(metrics, indent=2, sort_keys=True)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,7 @@ class ContrastiveRolloutConfig:
     prompt_chunk_size: int = 16
     trace_dir: Optional[str] = None
     trace_interval: int = 1
+    policy_snapshot_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"naive", "scout_regen"}:
@@ -37,12 +38,24 @@ class ContrastiveRolloutConfig:
             )
         if self.prompt_chunk_size < 1:
             raise ValueError(f"contrastive_rollout.prompt_chunk_size must be >= 1, got {self.prompt_chunk_size}.")
+        if self.trace_dir is not None and (not isinstance(self.trace_dir, str) or not self.trace_dir.strip()):
+            raise TypeError(
+                f"contrastive_rollout.trace_dir must be a non-empty string when set, got {self.trace_dir!r}."
+            )
+        if self.policy_snapshot_id is not None and (
+            not isinstance(self.policy_snapshot_id, str) or not self.policy_snapshot_id.strip()
+        ):
+            raise TypeError("contrastive_rollout.policy_snapshot_id must be a non-empty string when set.")
+        if self.policy_snapshot_id is not None:
+            object.__setattr__(self, "policy_snapshot_id", self.policy_snapshot_id.strip())
+        if self.trace_dir is not None and self.policy_snapshot_id is None:
+            raise ValueError("contrastive_rollout.policy_snapshot_id is required when trace_dir is enabled.")
         if self.trace_interval < 1:
             raise ValueError(f"contrastive_rollout.trace_interval must be >=1, got {self.trace_interval}.")
 
     @property
     def selected_count(self) -> int:
-        return int(self.top_k + self.bottom_k)
+        return self.top_k + self.bottom_k
 
 
 def build_contrastive_config(value: Any) -> ContrastiveRolloutConfig | None:
@@ -63,6 +76,7 @@ def build_contrastive_config(value: Any) -> ContrastiveRolloutConfig | None:
             "prompt_chunk_size",
             "trace_dir",
             "trace_interval",
+            "policy_snapshot_id",
         }
     )
     if unknown:
