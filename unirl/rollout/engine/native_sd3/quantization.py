@@ -24,7 +24,7 @@ class FP8Controller:
 
     def __init__(self, config: NativeSD3EngineConfig) -> None:
         self.config = config
-        self.enabled = bool(config.fp8_enabled)
+        self.enabled = config.fp8_enabled
         self._mode = "bf16"
         self._step = 0
         self._total_steps = 0
@@ -36,13 +36,18 @@ class FP8Controller:
         if self.enabled:
             try:
                 import transformer_engine.pytorch as te
-                from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Format
+                from transformer_engine.common.recipe import DelayedScaling, Format
             except (ImportError, OSError, RuntimeError) as exc:
                 raise RuntimeError(
                     "NativeSD3 FP8 rollout requires a working transformer-engine[pytorch] installation"
                 ) from exc
             self.te = te
             if config.fp8_recipe == "current":
+                try:
+                    from transformer_engine.common.recipe import Float8CurrentScaling
+                except ImportError as exc:
+                    raise RuntimeError("NativeSD3 current FP8 scaling requires transformer-engine>=2.2") from exc
+
                 self.recipe = Float8CurrentScaling(fp8_format=Format.E4M3)
             else:
                 self.recipe = DelayedScaling(
@@ -81,8 +86,8 @@ class FP8Controller:
     def _use_fp8(self) -> bool:
         if not self.enabled or self._mode != "fp8":
             return False
-        prefix = int(self.config.bf16_prefix_steps)
-        suffix = int(self.config.bf16_suffix_steps)
+        prefix = self.config.bf16_prefix_steps
+        suffix = self.config.bf16_suffix_steps
         return self._step >= prefix and self._step < max(prefix, self._total_steps - suffix)
 
     @contextmanager
@@ -98,15 +103,18 @@ class FP8Controller:
                 context = autocast(enabled=True, recipe=self.recipe)
             else:
                 context = self.te.fp8_autocast(enabled=True, fp8_recipe=self.recipe)
+        succeeded = False
         try:
             with context:
                 yield
+            succeeded = True
         finally:
-            if use_fp8 and self._weights_dirty:
+            if succeeded and use_fp8 and self._weights_dirty:
                 self._weights_dirty = False
             self._fp8_active = False
             self._first_microbatch = False
-            self._step += 1
+            if succeeded:
+                self._step += 1
 
 
 class RoutedTransformer(nn.Module):
@@ -193,11 +201,9 @@ def convert_transformer_for_fp8(
             reason: Optional[str] = None
             if any(pattern in fqn for pattern in config.fp8_skip_modules):
                 reason = "name"
-            elif max(int(child.in_features), int(child.out_features)) <= int(config.fp8_min_dim):
+            elif max(int(child.in_features), int(child.out_features)) <= config.fp8_min_dim:
                 reason = "small"
-            elif int(child.in_features) % int(config.fp8_dim_multiple) or int(child.out_features) % int(
-                config.fp8_dim_multiple
-            ):
+            elif int(child.in_features) % 16 or int(child.out_features) % 16:
                 reason = "alignment"
             if reason is not None:
                 skipped.append((fqn, reason))
@@ -215,7 +221,7 @@ def convert_transformer_for_fp8(
                 te_linear.weight.copy_(child.weight.to(dtype=torch.bfloat16))
                 if child.bias is not None and te_linear.bias is not None:
                     te_linear.bias.copy_(child.bias.to(dtype=torch.bfloat16))
-            replacement = TELinear(te_linear, controller)
+            replacement = TELinear(te_linear, controller).requires_grad_(False)
             setattr(module, name, replacement)
             parameter_targets[f"{fqn}.weight"] = te_linear.weight
             if child.bias is not None and te_linear.bias is not None:

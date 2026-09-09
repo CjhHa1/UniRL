@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -14,9 +15,10 @@ from omegaconf import DictConfig, OmegaConf
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
+from unirl.rollout.engine.base import RolloutCapabilities, resolve_rollout_capabilities
 from unirl.train.configs import FSDPConfig, resolve_fsdp_mesh_shape
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
+from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample, unwrap_replicated_int
 from unirl.trainer.contrastive import (
     ContrastiveRolloutConfig,
     build_contrastive_config,
@@ -24,6 +26,7 @@ from unirl.trainer.contrastive import (
 )
 from unirl.trainer.eval_suites import EvalRewardSuite, build_eval_suites
 from unirl.trainer.hydra import parse_hydra_cfg, remote_hydra
+from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import BaseSamplingParams, DiffusionSamplingParams, total_samples_per_prompt
@@ -31,6 +34,28 @@ from unirl.utils.wandb_metrics import pooled_window_reward_metrics
 
 logger = logging.getLogger(__name__)
 _AUTO_NOISE_LATENT_SHAPE = object()
+
+
+def _stable_fingerprint(value: Any) -> str:
+    """SHA-256 identity for a resolved config or JSON-compatible payload."""
+    value = OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_rollout_sampling_capabilities(
+    capabilities: RolloutCapabilities,
+    **sampling_by_label: DiffusionSamplingParams,
+) -> None:
+    """Reject request policies the selected rollout engine would ignore."""
+    for label, params in sampling_by_label.items():
+        if params.rollout_precision not in capabilities.rollout_precisions:
+            raise ValueError(
+                f"{label}.rollout_precision={params.rollout_precision!r} is unsupported by the rollout engine; "
+                f"supported={sorted(capabilities.rollout_precisions)}."
+            )
+        if params.reward_image_size is not None and not capabilities.reward_image_resize:
+            raise ValueError(f"{label}.reward_image_size requires a rollout engine with image-resize capability.")
 
 
 def _run_cleanup_steps(steps: List[Tuple[str, Callable[[], None]]]) -> None:
@@ -368,8 +393,12 @@ class DiffusionTrainer(BaseTrainer):
         self._eval_rewards_cfg = eval_rewards_cfg
         self._eval_suites: List[EvalRewardSuite] = []
         self._task_config: Dict[str, Any] = dict(task_config) if task_config else {}
+        self._trace_model_fingerprint = _stable_fingerprint(bundle_cfg)
+        self._trace_pipeline_fingerprint = _stable_fingerprint(pipeline_cfg)
+        self._trace_reward_fingerprint = _stable_fingerprint(reward_cfg)
         self._rollout_is_trainside = False
         self._uses_ema = False
+        self._rollout_rpc_blocked = False
 
         self.data_source = instantiate(data_source_cfg)
         self._data_source_cfg = data_source_cfg
@@ -579,6 +608,11 @@ class DiffusionTrainer(BaseTrainer):
 
         main = self.sampling_params.get("diffusion")
         scout = scout_params.get("diffusion")
+        _validate_rollout_sampling_capabilities(
+            self._rollout_capabilities,
+            sampling=main,
+            scout_sampling=scout,
+        )
         if total_samples_per_prompt(self.sampling_params) != config.selected_count:
             raise ValueError(
                 "sampling.samples_per_prompt must equal top_k + bottom_k for the BF16/train subset; "
@@ -589,21 +623,22 @@ class DiffusionTrainer(BaseTrainer):
             raise ValueError(
                 f"scout_sampling.samples_per_prompt={scout_count} is smaller than selected K={config.selected_count}."
             )
-        if main.seed != scout.seed:
-            raise ValueError(
-                f"scout and regeneration must share sampling.seed for identical x_T; got {scout.seed} vs {main.seed}."
-            )
         if main.rollout_precision != "bf16":
             raise ValueError(
                 "contrastive rollout requires sampling.rollout_precision=bf16 for the train subset; "
                 f"got {main.rollout_precision!r}."
             )
-        if (int(main.height), int(main.width)) != (int(scout.height), int(scout.width)):
-            raise ValueError(
-                "scout and regeneration must share latent geometry; "
-                f"got scout={scout.height}x{scout.width}, regen={main.height}x{main.width}."
-            )
         if config.mode == "scout_regen":
+            if main.seed != scout.seed:
+                raise ValueError(
+                    f"scout and regeneration must share sampling.seed for identical x_T; "
+                    f"got {scout.seed} vs {main.seed}."
+                )
+            if (int(main.height), int(main.width)) != (int(scout.height), int(scout.width)):
+                raise ValueError(
+                    "scout and regeneration must share latent geometry; "
+                    f"got scout={scout.height}x{scout.width}, regen={main.height}x{main.width}."
+                )
             if main.seed is None:
                 raise ValueError("scout_regen requires a non-null sampling.seed for deterministic x_T reuse.")
             if bool(main.disable_driver_xt) or bool(scout.disable_driver_xt):
@@ -621,7 +656,7 @@ class DiffusionTrainer(BaseTrainer):
             if bool(main.init_same_noise) != bool(scout.init_same_noise):
                 raise ValueError("scout and regeneration must use the same init_same_noise policy for identical x_T.")
 
-        chunk = int(config.prompt_chunk_size)
+        chunk = config.prompt_chunk_size
         if int(self.batch_size) % chunk:
             raise ValueError(
                 f"batch_size={self.batch_size} must be divisible by contrastive prompt_chunk_size={chunk}."
@@ -734,7 +769,16 @@ class DiffusionTrainer(BaseTrainer):
     def _build_rollout(self, rollout_cfg, *, allow_pipeline: bool):
         """Build the rollout remote in the currently active placement scope."""
         rollout_parsed = parse_hydra_cfg(rollout_cfg)
-        if "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters:
+        role_cls = rollout_parsed["role_cls"]
+        capabilities = getattr(role_cls, "capabilities", None)
+        if not isinstance(capabilities, RolloutCapabilities):
+            raise TypeError(f"{role_cls.__name__} must declare RolloutCapabilities.")
+        self._rollout_capabilities = resolve_rollout_capabilities(
+            rollout_parsed.get("config"),
+            fallback=capabilities,
+        )
+        self._rollout_config = rollout_parsed.get("config")
+        if "pipeline" in inspect.signature(role_cls).parameters:
             if not allow_pipeline:
                 raise ValueError(
                     "layout='separate' requires a dedicated-rollout engine "
@@ -751,7 +795,16 @@ class DiffusionTrainer(BaseTrainer):
         """One-time cross-slab handshake: hand rank 0 the rollout Worker handles."""
         if str(sync_cfg.get("_target_", "")).endswith("NCCLWeightSync"):
             addr, port = self.weight_sync.pick_master()[0]
-            self.weight_sync.set_rollout_targets(self.rollout.workers, self.rollout.role_name)
+            sync_capabilities = resolve_rollout_capabilities(
+                self._rollout_config,
+                fallback=self._rollout_capabilities,
+                track_prefix=str(sync_cfg.get("track_prefix", "") or ""),
+            )
+            self.weight_sync.set_rollout_targets(
+                self.rollout.workers,
+                self.rollout.role_name,
+                transactional=sync_capabilities.transactional_weight_publication,
+            )
             self.weight_sync.connect(
                 master_addr=addr,
                 master_port=port,
@@ -829,14 +882,11 @@ class DiffusionTrainer(BaseTrainer):
     def _selected_sampling_params(self, rollout_id: int) -> DiffusionSamplingParams:
         """Resolve the BF16/train params for a selected K-row prompt group."""
 
-        config = self._contrastive
         base = self.sampling_params.get("diffusion")
-        if config is None or not isinstance(base, DiffusionSamplingParams):
+        if self._contrastive is None or not isinstance(base, DiffusionSamplingParams):
             raise RuntimeError("_selected_sampling_params called without a diffusion contrastive config.")
         return dataclasses.replace(
             base,
-            samples_per_prompt=config.selected_count,
-            num_samples_per_prompt=config.selected_count,
             sde_indices=base.resolve_sde_indices(rollout_id),
             scheduler=None,
             sigmas=None,
@@ -882,25 +932,48 @@ class DiffusionTrainer(BaseTrainer):
             part.component_rewards = {name: hydrate(value) for name, value in part.component_rewards.items()}
         return sample.with_parts([*sample.parts[:-1], part])
 
-    def _write_contrastive_trace(self, rollout_id: int, groups: List[Dict[str, Any]]) -> None:
+    def _write_contrastive_trace(
+        self,
+        rollout_id: int,
+        *,
+        policy_version: int,
+        groups: List[Dict[str, Any]],
+    ) -> None:
         config = self._contrastive
-        if config is None or not config.trace_dir or rollout_id % int(config.trace_interval) or not groups:
+        if config is None or not config.trace_dir or rollout_id % config.trace_interval or not groups:
             return
         os.makedirs(config.trace_dir, exist_ok=True)
         scout = self._scout_sampling_params["diffusion"]
         payload = {
-            "rollout_id": int(rollout_id),
+            "schema_version": 1,
+            "rollout_id": rollout_id,
+            "policy_version": policy_version,
+            "policy_snapshot_id": config.policy_snapshot_id,
+            "model_fingerprint": self._trace_model_fingerprint,
+            "pipeline_fingerprint": self._trace_pipeline_fingerprint,
+            "reward_fingerprint": self._trace_reward_fingerprint,
+            "comparison_fingerprint": _stable_fingerprint(
+                {
+                    "guidance_scale": scout.guidance_scale,
+                    "height": scout.height,
+                    "width": scout.width,
+                    "num_frames": scout.num_frames,
+                    "eta": scout.eta,
+                    "init_same_noise": scout.init_same_noise,
+                    "reward_image_size": scout.reward_image_size,
+                }
+            ),
             "mode": config.mode,
-            "top_k": int(config.top_k),
-            "bottom_k": int(config.bottom_k),
+            "top_k": config.top_k,
+            "bottom_k": config.bottom_k,
             "scout_steps": int(scout.num_inference_steps),
-            "scout_precision": str(scout.rollout_precision),
+            "scout_precision": scout.rollout_precision,
             "groups": groups,
         }
         path = os.path.join(config.trace_dir, f"rollout_{rollout_id:06d}.json")
         temporary = f"{path}.tmp"
         with open(temporary, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
+            json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
         os.replace(temporary, path)
 
     def _contrastive_rollout_and_score(
@@ -919,11 +992,12 @@ class DiffusionTrainer(BaseTrainer):
 
         chunks: List[Sample] = []
         trace_groups: List[Dict[str, Any]] = []
+        trace_policy_versions: set[int] = set()
         sync_pending = bool(sync_weights)
         generation_succeeded = False
         try:
-            for start in range(0, int(inputs.batch_size), int(config.prompt_chunk_size)):
-                end = min(start + int(config.prompt_chunk_size), int(inputs.batch_size))
+            for start in range(0, inputs.batch_size, config.prompt_chunk_size):
+                end = min(start + config.prompt_chunk_size, inputs.batch_size)
                 input_chunk = inputs.slice(start, end)
                 scout_request = self._build_request_sample(
                     input_chunk,
@@ -944,24 +1018,44 @@ class DiffusionTrainer(BaseTrainer):
                     top_k=config.top_k,
                     bottom_k=config.bottom_k,
                 )
-                if config.trace_dir and rollout_id % int(config.trace_interval) == 0:
+                if config.trace_dir and rollout_id % config.trace_interval == 0:
+                    if scout_part.output_version is None:
+                        raise RuntimeError("Contrastive trace requires rollout output_version provenance.")
+                    trace_policy_versions.add(scout_part.output_version)
+                    texts = next((value for value in scout.conditioning() if isinstance(value, Texts)), None)
+                    if not isinstance(texts, Texts) or len(texts.texts) != scout_part.batch_size:
+                        raise RuntimeError("Contrastive trace requires one prompt per scout candidate.")
+                    noise_recipe = NoiseRecipe.from_sample(scout)
+                    if len(noise_recipe.noise_group_ids) != scout_part.batch_size:
+                        raise RuntimeError("Contrastive trace requires one deterministic noise key per candidate.")
                     selected_kind: Dict[int, str] = {}
                     selected_list = [int(index) for index in selected_indices.tolist()]
-                    selected_per_group = int(config.selected_count)
+                    selected_per_group = config.selected_count
                     for offset in range(0, len(selected_list), selected_per_group):
-                        for row in selected_list[offset : offset + int(config.top_k)]:
+                        for row in selected_list[offset : offset + config.top_k]:
                             selected_kind[row] = "top"
-                        for row in selected_list[offset + int(config.top_k) : offset + selected_per_group]:
+                        for row in selected_list[offset + config.top_k : offset + selected_per_group]:
                             selected_kind[row] = "bottom"
                     group_ids = scout_part.group_ids
                     for group_id in dict.fromkeys(group_ids):
                         rows = [row for row, value in enumerate(group_ids) if value == group_id]
+                        prompts = {texts.texts[row] for row in rows}
+                        if len(prompts) != 1:
+                            raise RuntimeError(f"Contrastive trace group {group_id!r} contains mixed prompts.")
                         trace_groups.append(
                             {
-                                "group_id": str(group_id),
+                                "group_id": group_id,
+                                "prompt_sha256": _stable_fingerprint(next(iter(prompts))),
+                                "noise_sha256": _stable_fingerprint(
+                                    {
+                                        "base_seed": noise_recipe.base_seed,
+                                        "latent_shape": noise_recipe.latent_shape,
+                                        "keys": [noise_recipe.noise_group_ids[row] for row in rows],
+                                    }
+                                ),
                                 "candidates": [
                                     {
-                                        "sample_id": str(scout_part.sample_ids[row]),
+                                        "sample_id": scout_part.sample_ids[row],
                                         "reward": float(scout_part.rewards[row].item()),
                                         "selection": selected_kind.get(row),
                                     }
@@ -998,7 +1092,7 @@ class DiffusionTrainer(BaseTrainer):
                 chunks.append(final)
             generation_succeeded = True
         finally:
-            if self._rollout_sleep_after_generate or not generation_succeeded:
+            if (self._rollout_sleep_after_generate or not generation_succeeded) and not self._rollout_rpc_blocked:
                 _run_cleanup_steps([("contrastive rollout sleep", self.rollout.sleep)])
 
         sample = Sample.concat(chunks)
@@ -1018,7 +1112,14 @@ class DiffusionTrainer(BaseTrainer):
                 part.metadata = [dict(md) if md else {} for md in root_md]
 
         mean_reward = float(part.rewards.to(torch.float32).mean().item())
-        self._write_contrastive_trace(rollout_id, trace_groups)
+        if trace_groups:
+            if len(trace_policy_versions) != 1:
+                raise RuntimeError(f"Contrastive trace combined policy versions {sorted(trace_policy_versions)}.")
+            self._write_contrastive_trace(
+                rollout_id,
+                policy_version=next(iter(trace_policy_versions)),
+                groups=trace_groups,
+            )
         self._drop_decoded(sample, rollout_id=rollout_id)
         return sample, mean_reward
 
@@ -1063,10 +1164,19 @@ class DiffusionTrainer(BaseTrainer):
         train_offload_attempted = False
         ema_apply_attempted = False
         generation_succeeded = False
+        weight_sync_attempted = False
+        weight_sync_succeeded = False
         try:
             self.rollout.wake_up()
             if sync_weights and self.weight_sync is not None:
+                weight_sync_attempted = True
                 self.weight_sync.sync()
+                weight_sync_succeeded = True
+                published_version = unwrap_replicated_int(
+                    self.backend.get_optimizer_step_count(),
+                    name="backend optimizer step count",
+                )
+                self.rollout.set_version(published_version)
             if should_offload_train:
                 train_offload_attempted = True
                 self.backend.offload()
@@ -1080,7 +1190,10 @@ class DiffusionTrainer(BaseTrainer):
             cleanup_steps: List[Tuple[str, Callable[[], None]]] = []
             if ema_apply_attempted:
                 cleanup_steps.append(("EMA restore", self.backend.restore_from_eval))
-            should_sleep_rollout = sleep_rollout or not generation_succeeded
+            publication_failed = weight_sync_attempted and not weight_sync_succeeded
+            if publication_failed:
+                self._rollout_rpc_blocked = True
+            should_sleep_rollout = (sleep_rollout or not generation_succeeded) and not publication_failed
             if should_sleep_rollout and train_offload_attempted:
                 # These operations are dependent: if sleep fails, loading FSDP
                 # into a still-resident rollout can turn the original error into
@@ -1248,7 +1361,7 @@ class DiffusionTrainer(BaseTrainer):
                 self.rollout.sleep()
             evaluation_succeeded = True
         finally:
-            if not evaluation_succeeded:
+            if not evaluation_succeeded and not self._rollout_rpc_blocked:
                 _run_cleanup_steps([("evaluation rollout sleep", self.rollout.sleep)])
         logger.info(
             "EVAL step %d  (%d samples/prompt, %d steps, %dx%d, cfg=%.1f eta=%.1f)  %s",
@@ -1267,13 +1380,20 @@ class DiffusionTrainer(BaseTrainer):
     def _prepare_empty_evaluation(self, *, sync_weights: bool, sleep_rollout: bool) -> None:
         """Preserve evaluation wake/sync/sleep semantics when every set is empty."""
         prepare_succeeded = False
+        weight_sync_attempted = False
+        weight_sync_succeeded = False
         try:
             self.rollout.wake_up()
             if sync_weights and self.weight_sync is not None:
+                weight_sync_attempted = True
                 self.weight_sync.sync()
+                weight_sync_succeeded = True
             prepare_succeeded = True
         finally:
-            if sleep_rollout or not prepare_succeeded:
+            publication_failed = weight_sync_attempted and not weight_sync_succeeded
+            if publication_failed:
+                self._rollout_rpc_blocked = True
+            if (sleep_rollout or not prepare_succeeded) and not publication_failed:
                 _run_cleanup_steps([("empty evaluation rollout sleep", self.rollout.sleep)])
 
     def _eval_pass(

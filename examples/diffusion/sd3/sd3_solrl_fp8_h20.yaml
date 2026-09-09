@@ -25,6 +25,7 @@ contrastive_rollout:
   prompt_chunk_size: 16
   trace_dir: ${oc.env:SOLRL_TRACE_DIR,null}
   trace_interval: 1
+  policy_snapshot_id: ${oc.env:SOLRL_POLICY_SNAPSHOT_ID,null}
 
 bundle:
   _target_: unirl.models.sd3.bundle.SD3Bundle.from_config
@@ -36,7 +37,9 @@ bundle:
     text_encoder_dtype: bf16
     shift: 3.0
     load_vae: false
-    trajectory_precision: bf16
+    autocast_precision: ${pipeline.autocast_precision}
+    trajectory_precision: ${pipeline.trajectory_precision}
+    logprob_precision: ${pipeline.logprob_precision}
 
 pipeline:
   _target_: unirl.models.sd3.pipeline.SD3Pipeline
@@ -80,7 +83,6 @@ backend:
     bias: none
     task_type: FEATURE_EXTRACTION
     shadow_adapter: old
-    ema_decay: 0.001
     ema_decay_type: warmup
     ema_flat_steps: 0
     ema_uprate: 0.001
@@ -108,7 +110,6 @@ rollout:
     fp8_enabled: true
     fp8_recipe: current
     fp8_min_dim: 1024
-    fp8_dim_multiple: 16
     bf16_prefix_steps: 0
     bf16_suffix_steps: 0
     compile_model: true
@@ -169,9 +170,6 @@ sampling:
   samples_per_prompt: 16
   seed: 42
   init_same_noise: false
-  autocast_precision: bf16
-  trajectory_precision: bf16
-  logprob_precision: fp32
   rollout_precision: bf16
   scheduler:
     _target_: unirl.sde.index_schedule.AllSDEScheduler
@@ -190,9 +188,6 @@ scout_sampling:
   samples_per_prompt: 128
   seed: 42
   init_same_noise: false
-  autocast_precision: bf16
-  trajectory_precision: bf16
-  logprob_precision: fp32
   rollout_precision: fp8
   reward_image_size: 224
   scheduler:

@@ -34,8 +34,8 @@ class HPSv2RewardScorer(LocalRewardBackend):
         except ImportError:
             raise ImportError("hpsv2 is required for HPSv2 reward")
 
-        open_clip_path = self.model_kwargs.get("open_clip_path", "./hps_ckpt/open_clip_pytorch_model.bin")
-        checkpoint_path = self.model_kwargs.get("checkpoint_path", "./hps_ckpt/HPS_v2.1_compressed.pt")
+        open_clip_path = self.model_kwargs["open_clip_path"]
+        checkpoint_path = self.model_kwargs["checkpoint_path"]
 
         model, _, preprocess_val = create_model_and_transforms(
             "ViT-H-14",
@@ -103,9 +103,7 @@ class HPSv2RewardScorer(LocalRewardBackend):
                     outputs = self.model(image_input, text_input)
                     image_features = outputs["image_features"]
                     text_features = outputs["text_features"]
-                    # Equivalent to diag(image_features @ text_features.T)
-                    # without materializing the quadratic BxB similarity matrix.
-                    hps_scores = (image_features * text_features).sum(dim=-1)
+                    hps_scores = torch.diagonal(image_features @ text_features.T)
                 all_rewards.extend(float(value) for value in hps_scores.float().cpu().tolist())
             except Exception as exc:
                 raise RuntimeError(
@@ -123,3 +121,11 @@ class HPSv2Spec(BaseRewardComponentSpec):
     device: str = "auto"
     open_clip_path: str = "./hps_ckpt/open_clip_pytorch_model.bin"
     checkpoint_path: str = "./hps_ckpt/HPS_v2.1_compressed.pt"
+
+    def __post_init__(self) -> None:
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size < 1:
+            raise ValueError(f"HPSv2Spec.batch_size must be a positive integer, got {self.batch_size!r}.")
+        for name in ("device", "open_clip_path", "checkpoint_path"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise TypeError(f"HPSv2Spec.{name} must be a non-empty string, got {value!r}.")

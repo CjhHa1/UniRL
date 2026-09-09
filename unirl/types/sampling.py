@@ -103,6 +103,11 @@ class DiffusionSamplingParams(BaseSamplingParams):
             object.__setattr__(self, "samples_per_prompt", self.num_samples_per_prompt)
         elif self.samples_per_prompt != 1 and self.num_samples_per_prompt == 1:
             object.__setattr__(self, "num_samples_per_prompt", self.samples_per_prompt)
+        elif self.samples_per_prompt != self.num_samples_per_prompt:
+            raise ValueError(
+                "DiffusionSamplingParams received conflicting samples_per_prompt and "
+                f"num_samples_per_prompt values: {self.samples_per_prompt} vs {self.num_samples_per_prompt}."
+            )
 
         reserved = {f.name for f in fields(self) if f.name != "sampler_kwargs"}
         shadowed = reserved & set(self.sampler_kwargs)
@@ -115,7 +120,12 @@ class DiffusionSamplingParams(BaseSamplingParams):
             f"DiffusionSamplingParams.rollout_precision must be bf16|fp8, got {self.rollout_precision!r}",
         )
         require(
-            self.reward_image_size is None or int(self.reward_image_size) > 0,
+            self.reward_image_size is None
+            or (
+                isinstance(self.reward_image_size, int)
+                and not isinstance(self.reward_image_size, bool)
+                and self.reward_image_size > 0
+            ),
             f"DiffusionSamplingParams.reward_image_size must be positive when set, got {self.reward_image_size!r}",
         )
 
