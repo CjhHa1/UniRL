@@ -177,25 +177,51 @@ class BucketedIPCReceiveMixin:
         from unirl.distributed.weight_sync.transfer.sgl_compat import (
             MultiprocessingSerializer,
         )
-        from unirl.rollout.engine.vllm_omni.patches.runtime import (
-            OmniTensorLoRARequest,
-        )
 
         lora_tensors = MultiprocessingSerializer.deserialize(lora_tensors_serialized)
-        if not isinstance(lora_tensors, dict):
-            raise TypeError(
-                f"{type(self).__name__}.set_lora_from_tensor_dict: "
-                f"deserialised lora_tensors expected dict, got "
-                f"{type(lora_tensors).__name__}"
-            )
-        request = OmniTensorLoRARequest(
-            lora_name=str(lora_name),
-            lora_int_id=int(lora_int_id),
-            lora_path=str(lora_path),
-            peft_config=dict(peft_config or {}),
-            lora_tensors=lora_tensors,
+        return self._diffrl_install_lora_tensors(
+            lora_name,
+            lora_int_id,
+            lora_path,
+            peft_config,
+            lora_tensors,
+            ready_token=None,
         )
-        return self.add_lora(request)
+
+    def set_lora_from_ranked_tensor_dicts(
+        self,
+        lora_name: str,
+        lora_int_id: int,
+        lora_path: str,
+        peft_config: dict,
+        lora_tensors_serialized: list[str],
+        ready_token: str,
+    ) -> bool:
+        """Open this worker's rank-private CUDA-IPC payload and install the adapter."""
+        from unirl.distributed.weight_sync.transfer.sgl_compat import (
+            MultiprocessingSerializer,
+        )
+
+        rank = int(getattr(self, "rank", getattr(self, "local_rank", 0)))
+        if rank < 0 or rank >= len(lora_tensors_serialized):
+            raise IndexError(
+                f"{type(self).__name__}.set_lora_from_ranked_tensor_dicts: "
+                f"rank={rank} but received {len(lora_tensors_serialized)} payloads"
+            )
+        lora_tensors = MultiprocessingSerializer.deserialize(lora_tensors_serialized[rank])
+        logger.info(
+            "[LoRA-IPC] rank=%d opened rank-private CUDA-IPC payload (%d tensors)",
+            rank,
+            len(lora_tensors) if isinstance(lora_tensors, dict) else -1,
+        )
+        return self._diffrl_install_lora_tensors(
+            lora_name,
+            lora_int_id,
+            lora_path,
+            peft_config,
+            lora_tensors,
+            ready_token=ready_token,
+        )
 
     def set_lora_from_tensor_dict_copy(
         self,

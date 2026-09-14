@@ -22,8 +22,9 @@ sync:
   _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
   param_prefix: "transformer."
   adapter_name: default
-  # The H3 engine has four sequence-parallel subprocesses per controller.
-  copy: true
+  # Each four-GPU rollout replica gets one rank-private CUDA-IPC payload per
+  # subprocess. Physical hosts remain isolated; every replica head exports
+  # handles only to workers on its own node.
   verify: false
 
 logging:

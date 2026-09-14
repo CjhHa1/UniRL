@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from unirl.distributed.group.dispatch import Dispatch, distributed
@@ -71,12 +72,14 @@ class LocalLoraWeightSync(LoraWeightSyncBase):
             return
 
         setter = self._rollout.set_lora_from_tensors_copy if self._copy else self._rollout.set_lora_from_tensors
+        started = time.monotonic()
         setter(self._adapter_name, lora_tensors, peft_config=peft_config)
         logger.info(
-            "[LoRA-SYNC] rank %s: pushed %d LoRA tensors to rollout via %s (adapter=%s, track=%s)",
+            "[LoRA-SYNC] rank %s: pushed %d LoRA tensors to rollout via %s in %.3fs (adapter=%s, track=%s)",
             rank,
             len(lora_tensors),
-            "copy" if self._copy else "handle",
+            "file-copy" if self._copy else "cuda-ipc",
+            time.monotonic() - started,
             self._adapter_name,
             self._track_prefix or "<single>",
         )

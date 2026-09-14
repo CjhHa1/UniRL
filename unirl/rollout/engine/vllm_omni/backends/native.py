@@ -513,7 +513,7 @@ class VLLMOmniBackend:
         lora_tensors: Dict[str, Any],
         peft_config: Optional[dict],
     ) -> None:
-        """Zero-copy LoRA push via ``MultiprocessingSerializer`` shm handles."""
+        """Zero-copy LoRA push via one CUDA-IPC payload per stage worker."""
         import torch
 
         from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
@@ -522,29 +522,37 @@ class VLLMOmniBackend:
             DIFFRL_LORA_PATH,
         )
 
-        omni = self._require_omni()
         lora_tensors = self._wrap_peft_envelope(lora_tensors)
-        self._remove_existing_lora(int(DIFFRL_LORA_INT_ID))
 
         from unirl.distributed.weight_sync.transfer.sgl_compat import (
             MultiprocessingSerializer,
         )
 
         for sid in self._stage_ids():
-            cloned = {
-                name: t.detach().clone() if isinstance(t, torch.Tensor) else t for name, t in lora_tensors.items()
-            }
-            serialized = MultiprocessingSerializer.serialize(cloned, output_str=True)
-            omni.engine.collective_rpc(
-                method="set_lora_from_tensor_dict",
+            worker_count = self._worker_count_for_stage(sid)
+            keepalive = []
+            ranked_payloads = []
+            for _ in range(worker_count):
+                cloned = {
+                    name: t.detach().clone() if isinstance(t, torch.Tensor) else t for name, t in lora_tensors.items()
+                }
+                keepalive.append(cloned)
+                ranked_payloads.append(MultiprocessingSerializer.serialize(cloned, output_str=True))
+            self._run_lora_install_rpc(
+                stage_id=sid,
+                method="set_lora_from_ranked_tensor_dicts",
                 args=(
                     str(adapter_name) or DIFFRL_LORA_NAME,
                     int(DIFFRL_LORA_INT_ID),
                     DIFFRL_LORA_PATH,
                     dict(peft_config or {}),
-                    serialized,
+                    ranked_payloads,
                 ),
-                stage_ids=[int(sid)],
+            )
+            logger.info(
+                "[LoRA-IPC] stage=%d installed %d rank-private CUDA-IPC payloads",
+                sid,
+                worker_count,
             )
 
     def set_lora_copy(
@@ -556,7 +564,6 @@ class VLLMOmniBackend:
     ) -> None:
         """File-backed LoRA push (one local ``torch.save``) — grouped-worker-safe."""
         import os
-        import time
         import uuid
 
         import torch
@@ -567,48 +574,61 @@ class VLLMOmniBackend:
             DIFFRL_LORA_PATH,
         )
 
-        omni = self._require_omni()
         lora_tensors = self._wrap_peft_envelope(lora_tensors)
 
         cpu_tensors = {
             name: t.detach().to("cpu") if isinstance(t, torch.Tensor) else t for name, t in lora_tensors.items()
         }
-        timeout_s = float(os.environ.get("DIFFRL_LORA_RPC_TIMEOUT_S", "1800"))
         for sid in self._stage_ids():
-            worker_count = self._worker_count_for_stage(sid)
-            ready_token = uuid.uuid4().hex
-            payload_path = f"/tmp/diffrl_lora_payload_{ready_token}.pt"
+            payload_path = f"/tmp/diffrl_lora_payload_{uuid.uuid4().hex}.pt"
             torch.save(cpu_tensors, payload_path)
-            markers = [f"/tmp/diffrl_lora_ready_{ready_token}_{rank}" for rank in range(worker_count)]
             try:
-                result = omni.engine.collective_rpc(
+                self._run_lora_install_rpc(
+                    stage_id=sid,
                     method="set_lora_from_tensor_file",
-                    timeout=timeout_s,
                     args=(
                         str(adapter_name) or DIFFRL_LORA_NAME,
                         int(DIFFRL_LORA_INT_ID),
                         DIFFRL_LORA_PATH,
                         dict(peft_config or {}),
                         payload_path,
-                        ready_token,
                     ),
-                    stage_ids=[int(sid)],
                 )
-                self._raise_for_control_rpc_error(result, method="set_lora_from_tensor_file")
-                deadline = time.monotonic() + timeout_s
-                while not all(os.path.exists(marker) for marker in markers):
-                    if time.monotonic() >= deadline:
-                        missing = [rank for rank, marker in enumerate(markers) if not os.path.exists(marker)]
-                        raise TimeoutError(f"LoRA installation timed out on stage {sid}, ranks {missing}")
-                    time.sleep(1.0)
             finally:
-                for marker in markers:
-                    try:
-                        os.unlink(marker)
-                    except FileNotFoundError:
-                        pass
                 try:
                     os.unlink(payload_path)
+                except FileNotFoundError:
+                    pass
+
+    def _run_lora_install_rpc(self, *, stage_id: int, method: str, args: tuple) -> None:
+        """Run one all-worker install and fail if any expected rank misses its completion marker."""
+        import os
+        import time
+        import uuid
+
+        omni = self._require_omni()
+        worker_count = self._worker_count_for_stage(stage_id)
+        timeout_s = float(os.environ.get("DIFFRL_LORA_RPC_TIMEOUT_S", "1800"))
+        ready_token = uuid.uuid4().hex
+        markers = [f"/tmp/diffrl_lora_ready_{ready_token}_{rank}" for rank in range(worker_count)]
+        try:
+            result = omni.engine.collective_rpc(
+                method=method,
+                timeout=timeout_s,
+                args=(*args, ready_token),
+                stage_ids=[int(stage_id)],
+            )
+            self._raise_for_control_rpc_error(result, method=method)
+            deadline = time.monotonic() + timeout_s
+            while not all(os.path.exists(marker) for marker in markers):
+                if time.monotonic() >= deadline:
+                    missing = [rank for rank, marker in enumerate(markers) if not os.path.exists(marker)]
+                    raise TimeoutError(f"{method} timed out on stage {stage_id}, ranks {missing}")
+                time.sleep(1.0)
+        finally:
+            for marker in markers:
+                try:
+                    os.unlink(marker)
                 except FileNotFoundError:
                     pass
 
@@ -642,19 +662,6 @@ class VLLMOmniBackend:
         if lora_tensors and not first_key.startswith("base_model.model."):
             return adapt_lora_for_vllm(lora_tensors)
         return lora_tensors
-
-    def _remove_existing_lora(self, adapter_id: int) -> None:
-        """Drop the existing adapter on every stage before re-adding."""
-        omni = self._require_omni()
-        for sid in self._stage_ids():
-            try:
-                omni.engine.collective_rpc(
-                    method="remove_lora",
-                    args=(int(adapter_id),),
-                    stage_ids=[int(sid)],
-                )
-            except Exception:
-                pass
 
     def param_checksums(self, *, names: List[str]) -> dict:
         """Fan ``_diffrl_loaded_param_checksums`` across stages and ranks."""

@@ -319,9 +319,9 @@ class MiniMaxH3T2VAAdapter(ModelAdapter):
     """MiniMax-H3 t2va, one HSDP4+UP4 engine per external DP replica."""
 
     needs_driver_tokenizer = False
-    # The grouped engine broadcasts one adapter to four subprocesses. Byte-copy
-    # avoids reusing a one-shot CUDA IPC file descriptor on ranks 2..4.
-    lora_copy_transport = True
+    # The grouped engine gives every subprocess a rank-private CUDA IPC payload,
+    # including adapter restoration after a sleep/wake cycle.
+    lora_copy_transport = False
 
     def boot_kwargs(self) -> dict[str, Any]:
         """Use the current vLLM-Omni direct diffusion-stage configuration."""

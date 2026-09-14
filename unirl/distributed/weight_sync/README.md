@@ -72,9 +72,10 @@ matching receiver on the engine side (`../../rollout/engine/`).
 - **`param_prefix` mismatch silently corrupts the load** (wrong/zero layers) —
   `verify` is designed to catch it, but it's vLLM-Omni-only and off by default, so
   most runs have no net at all.
-- **`RemoteLoraWeightSync` with `copy=False` breaks on TP>1 engines** — the zero-copy
-  adapter handle carries a one-shot file descriptor consumed by the first worker, so
-  the `collective_rpc` broadcast to ranks 2..N gets a dead handle (HI3). Set
-  `copy=True` for any TP>1 stage; `copy=False` is only safe for a TP=1 separate slab (SD3).
+- **CUDA IPC is host-local.** Colocated multi-node runs work by having every rollout
+  replica head export rank-private handles to its own stage workers; handles never
+  cross a physical-host boundary. A single serialized handle cannot be broadcast to
+  TP ranks because its file descriptor is one-shot, so the vLLM-Omni backend creates
+  one independently owned payload per physical worker.
 - **`CheckpointWeightSync.version` is a filename sequence**, not a receiver
   idempotency key. Other transports carry no independent version ledger.

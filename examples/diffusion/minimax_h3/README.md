@@ -57,6 +57,11 @@ follows the phase switches.
 video, audio and a sparse FP32 trajectory → rollout sleeps, reward scores →
 trainer replays, backwards and steps → next rollout.
 
+The LoRA sync uses CUDA IPC without crossing hosts. Each replica head retains
+one independently serialized CUDA allocation per physical stage worker, and
+each worker opens only the payload addressed to its stage-local rank. The same
+pattern repeats independently on every node in a multi-node run.
+
 The switches that make this fit are `layout: colocate`,
 `transport: colocate_store`, `enable_fsdp_offload: true`,
 `offload_train_during_reward: true` and `rollout.config.enable_sleep_mode: true`.
