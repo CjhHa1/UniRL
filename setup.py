@@ -1,7 +1,5 @@
 from setuptools import find_packages, setup
 
-# Compatibility metadata for older pip/setuptools editable installs.
-# Newer tooling uses pyproject.toml as the source of truth.
 setup(
     name="unirl",
     version="0.1.0",
@@ -15,6 +13,9 @@ setup(
             "unirl.*",
         ),
     ),
+    package_data={
+        "unirl.models.janus_pro.vendor": ["LICENSE-CODE", "VENDOR_COMMIT.txt"],
+    },
     install_requires=[
         "numpy>=1.24,<3",
         "torch>=2.1",
@@ -26,6 +27,7 @@ setup(
         "transformers>=5.6,<5.7",
         "peft>=0.14.0",
         "safetensors>=0.4",
+        "einops>=0.7",
         "Pillow>=10",
         "requests>=2.31",
         "psutil>=5.9",
@@ -36,12 +38,18 @@ setup(
             "wandb>=0.16,<0.20",
             "aiohttp>=3.9",
         ],
+        "cosmos3": [
+            "diffusers>=0.39",
+        ],
         "infer": [
             "accelerate>=0.30",
+            "timm>=0.9.16",
         ],
         "eval": [
             "torchvision>=0.16",
-            "easyocr>=1.7",
+            "paddlepaddle==3.2.2",
+            "paddleocr==3.5.0",
+            "python-Levenshtein>=0.27",
         ],
         "dev": [
             "pytest>=7.4",

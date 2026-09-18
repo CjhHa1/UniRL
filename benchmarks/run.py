@@ -1,17 +1,4 @@
-"""Evaluate one checkpoint across benchmarks. Run from the repo root:
-
-    python -m benchmarks.run --list
-    python -m benchmarks.run -b image/geneval2 -b image/preference \\
-        --ckpt stabilityai/stable-diffusion-3.5-medium --lora <unirl-ckpt-or-peft-dir> \\
-        --reward-url http://<reward-host>:8080
-    python -m benchmarks.run -b text/aime24 --endpoint http://127.0.0.1:30000
-    python -m benchmarks.run --report
-
-Stages: ``generate`` needs a GPU (t2i) or a serving endpoint (text); ``score``
-needs the reward service (t2i) and is CPU-only for text. Results land in
-``<out>/<ckpt-tag>/<benchmark>/`` (images/ or completions.jsonl, scores.jsonl,
-summary.json); ``--report`` renders every summary under ``--out`` as markdown.
-"""
+"""Evaluate one checkpoint across benchmarks. Run from the repo root:"""
 
 from __future__ import annotations
 
@@ -30,6 +17,21 @@ from benchmarks.core.score import (
     check_geneval2_metadata,
     score_images_local_geneval2,
 )
+
+_HELP = """Evaluate one checkpoint across benchmarks. Run from the repo root:
+
+    python -m benchmarks.run --list
+    python -m benchmarks.run -b image/geneval2 -b image/preference \\
+        --ckpt stabilityai/stable-diffusion-3.5-medium --lora <unirl-ckpt-or-peft-dir> \\
+        --reward-url http://<reward-host>:8080
+    python -m benchmarks.run -b text/aime24 --endpoint http://127.0.0.1:30000
+    python -m benchmarks.run --report
+
+Stages: ``generate`` needs a GPU (t2i) or a serving endpoint (text); ``score``
+needs the reward service (t2i) and is CPU-only for text. Results land in
+``<out>/<ckpt-tag>/<benchmark>/`` (images/ or completions.jsonl, scores.jsonl,
+summary.json); ``--report`` renders every summary under ``--out`` as markdown.
+"""
 
 
 def _parse_sim_even_batches(value: str) -> tuple[int, int]:
@@ -71,7 +73,7 @@ def _sim_even_metrics(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "-b", "--benchmark", action="append", default=[], help="benchmark name; repeatable (see --list)"
     )
@@ -168,9 +170,6 @@ def _run_t2i_benchmark(spec: BenchmarkSpec, tag: str, args, resolved: Optional[c
     if args.stage in ("all", "generate"):
         if resolved is None:
             raise SystemExit(f"{spec.name}: --ckpt is required to generate images")
-        # Spec generation defaults (diffusers kwarg names, e.g. geneval2 -> 512px/40-step/cfg1.0)
-        # under CLI overrides. Without this, t2i benchmarks silently used the diffusers pipeline
-        # defaults (~28 steps / cfg 7.0 / 1024px), a top cause of the issue #221 mismatch.
         gen_kwargs = dict(spec.gen)
         gen_kwargs.update({T2I_KWARGS[k_]: v for k_, v in vars(args).items() if k_ in T2I_KWARGS and v is not None})
         shard = tuple(int(x) for x in args.shard.split("/"))
@@ -206,9 +205,8 @@ def _run_t2i_benchmark(spec: BenchmarkSpec, tag: str, args, resolved: Optional[c
         metadatas = None
         if spec.send_metadata:
             per_prompt = load_metadata(spec)[: args.num_prompts or None]
-            metadatas = [per_prompt[p] for p in range(len(prompts)) for _ in range(k)]  # pairs are prompt-major
+            metadatas = [per_prompt[p] for p in range(len(prompts)) for _ in range(k)]
         if local_geneval2:
-            # Local transformers Qwen3-VL-8B (full-vocab softmax, GM) -- the DPPO reproduction scorer.
             rows, n_errors = score_images_local_geneval2(pairs, metadatas=metadatas, model_name=args.geneval2_model)
         else:
             client = RewardServiceClient(args.reward_url)
@@ -221,12 +219,9 @@ def _run_t2i_benchmark(spec: BenchmarkSpec, tag: str, args, resolved: Optional[c
                 f.write(json.dumps({"image": path.name, "prompt": prompt, "scores": row}) + "\n")
         scored = [row for row in rows if row]
         keys = sorted({k_ for row in scored for k_ in row})
-        # Config 1 (default): 800 unique prompts, plain mean.
         metrics = {
             k_: sum(row[k_] for row in scored if k_ in row) / max(1, sum(k_ in row for row in scored)) for k_ in keys
         }
-        # Config 2 (optional): simulate a distributed eval of WxB that repeats the last partial wave
-        # of batches to fill the world size, so a fixed prefix of prompts is double-counted.
         if args.sim_even_batches:
             world, batch_size = args.sim_even_batches
             metrics.update(_sim_even_metrics(rows, keys, world=world, batch_size=batch_size))
@@ -265,9 +260,6 @@ def _run_text_benchmark(spec: BenchmarkSpec, tag: str, args) -> None:
         responses: Dict[str, List[str]] = {}
         for row in read_completions(completions_file):
             responses.setdefault(row["id"], []).append(row["response"])
-        # Missing completions are a hard error (mirrors the t2i missing-images check):
-        # folding them in as acc=0 would silently deflate the score after a partial
-        # generate (a --num-prompts smoke run, or FAILED requests).
         n_short = sum(k - min(k, len(responses.get(item["id"], []))) for item in items)
         if n_short:
             raise SystemExit(f"{spec.name}: {n_short} completions missing — rerun --stage generate to fill them")
@@ -307,8 +299,7 @@ def main() -> None:
     resolved = None
     if t2i_specs and args.ckpt and not args.dry_run and args.stage in ("all", "generate"):
         resolved = checkpoints.resolve(args.ckpt, args.lora, Path(args.out))
-    # Tag derivation must stay side-effect-free (no adapter export) for dry runs
-    # and score-only stages.
+    # Tag derivation must stay side-effect-free (no adapter export) for dry runs and score-only stages.
     if args.tag:
         tag = args.tag
     elif args.ckpt:

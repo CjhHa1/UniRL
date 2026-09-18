@@ -1,29 +1,4 @@
-"""Cross-component recipe contracts — the rules that span recipe sections.
-
-A recipe is one flat YAML that Hydra type-checks nothing about, so the rules
-relating one section to another (does the rollout engine need a ``sync``
-handler? may it offload? may it live on its own device slab?) have to be
-enforced somewhere. :func:`validate_recipe` is that gate, and every
-``unirl/train_*.py`` calls it on the driver before constructing its trainer —
-so a contradictory recipe dies on the launching process in under a second
-instead of somewhere inside a half-built Ray cluster.
-
-Two properties are deliberate:
-
-- **Stdlib only** (like ``require.py``). This keeps the contract predicates
-  lightweight and lets the same code run as a static guard over every shipped
-  recipe without importing torch / sglang / vllm — see
-  ``scripts/check_recipe_contracts.py``, which is how this layer is kept honest
-  in a lint-only CI. Runtime entrypoints still import their trainer modules
-  before ``main`` executes; the gate promises to run before trainer
-  construction and Ray startup, not before all heavy Python imports.
-- **Recipe shape knowledge lives in one place** — :class:`RecipeFacts`. Every
-  contract is a predicate over normalized facts, never a hard-coded dotpath,
-  because the shapes differ per entry point: a diffusion recipe puts its engine
-  at ``rollout``, ``train_unified_model``'s two-engine mode uses ``ar_rollout``
-  + ``dit_rollout``, ``train_pe`` gives ``sync`` a per-track map instead of a
-  single block, and ``train_sft`` has no rollout at all.
-"""
+"""Dependency-free contracts spanning sections of a composed Hydra recipe."""
 
 from __future__ import annotations
 
@@ -35,26 +10,13 @@ from unirl.config.require import require
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Rollout engine families
-#
-# An engine is identified by the package it lives in --
-# ``unirl.rollout.engine.<family>.`` -- rather than by its class name, so
-# renaming a class cannot silently flip a recipe into the wrong mode.
-# ``scripts/check_recipe_contracts.py`` reads the engine classes statically and
-# fails if the declarations below drift from the code.
-# ---------------------------------------------------------------------------
-
 ENGINE_PACKAGE = "unirl.rollout.engine."
 
-#: Weight-sync receive entry points, named after the ``BaseRolloutEngine``
-#: methods a sync handler drives, so a declared capability can be checked
-#: against the engine class that is supposed to implement it.
 SYNC_VIA_IPC = "update_weights_from_ipc"
 SYNC_VIA_TENSOR = "update_weights_from_tensor"
 SYNC_VIA_NCCL = "init_weights_update_group"
 SYNC_VIA_LORA = "set_lora_from_tensors"
+SYNC_VIA_LORA_COPY = "set_lora_from_tensors_copy"
 SYNC_VIA_CHECKPOINT = "update_weights_from_path"
 
 SYNC_RECEIVE_METHODS = (
@@ -62,27 +24,46 @@ SYNC_RECEIVE_METHODS = (
     SYNC_VIA_TENSOR,
     SYNC_VIA_NCCL,
     SYNC_VIA_LORA,
+    SYNC_VIA_LORA_COPY,
     SYNC_VIA_CHECKPOINT,
 )
+
+SYNC_LOCAL = "local"
+SYNC_REMOTE = "remote"
+
+ENTRYPOINT_AR = "train_ar"
+ENTRYPOINT_ASYNC_AR = "train_async_ar"
+ENTRYPOINT_DIFFUSION = "train_diffusion"
+ENTRYPOINT_ASYNC_DIFFUSION = "train_async_diffusion"
+ENTRYPOINT_PE = "train_pe"
+ENTRYPOINT_SFT = "train_sft"
+ENTRYPOINT_UNIFIED = "train_unified_model"
+ENTRYPOINT_AGENTIC = "train_agentic"
+
+KNOWN_ENTRYPOINTS = frozenset(
+    {
+        ENTRYPOINT_AR,
+        ENTRYPOINT_ASYNC_AR,
+        ENTRYPOINT_DIFFUSION,
+        ENTRYPOINT_ASYNC_DIFFUSION,
+        ENTRYPOINT_PE,
+        ENTRYPOINT_SFT,
+        ENTRYPOINT_UNIFIED,
+        ENTRYPOINT_AGENTIC,
+    }
+)
+LAYOUT_ENTRYPOINTS = frozenset({ENTRYPOINT_DIFFUSION, ENTRYPOINT_ASYNC_DIFFUSION})
 
 
 @dataclass(frozen=True)
 class EngineFamily:
-    """What a rollout engine family is, as far as recipe contracts care.
-
-    ``direct_sampling`` means the engine samples inside the train actor and
-    takes the training ``pipeline`` as a local sibling (``trainside``). It is
-    the same distinction the trainers make at build time by checking the engine
-    class for a ``pipeline`` parameter.
-
-    ``weight_sync`` is the set of receive entry points the engine implements. A
-    recipe that pairs a sync handler with an engine implementing neither side
-    of that transport is a run that dies on the first weight push.
-    """
+    """Recipe-relevant capabilities shared by one rollout-engine package."""
 
     direct_sampling: bool
     weight_sync: frozenset[str]
 
+
+_IN_MEMORY_SYNC = frozenset({SYNC_VIA_IPC, SYNC_VIA_TENSOR, SYNC_VIA_NCCL, SYNC_VIA_LORA})
 
 ENGINE_FAMILIES: Mapping[str, EngineFamily] = {
     "trainside": EngineFamily(direct_sampling=True, weight_sync=frozenset()),
@@ -96,63 +77,61 @@ ENGINE_FAMILIES: Mapping[str, EngineFamily] = {
     ),
     "vllm_omni": EngineFamily(
         direct_sampling=False,
-        weight_sync=frozenset({SYNC_VIA_IPC, SYNC_VIA_TENSOR, SYNC_VIA_NCCL, SYNC_VIA_LORA}),
+        weight_sync=frozenset({*_IN_MEMORY_SYNC, SYNC_VIA_LORA_COPY}),
     ),
-    # PE coordinator: owns an ar + a diffusion child and forwards each push to
-    # the child named by the handler's ``track_prefix``.
-    "composed": EngineFamily(
-        direct_sampling=False,
-        weight_sync=frozenset({SYNC_VIA_IPC, SYNC_VIA_TENSOR, SYNC_VIA_NCCL, SYNC_VIA_LORA}),
-    ),
-    # Reloads from a checkpoint path; implements no in-memory receive path.
+    "composed": EngineFamily(direct_sampling=False, weight_sync=_IN_MEMORY_SYNC),
+    "agentic": EngineFamily(direct_sampling=False, weight_sync=_IN_MEMORY_SYNC),
     "fastvideo": EngineFamily(
         direct_sampling=False,
         weight_sync=frozenset({SYNC_VIA_CHECKPOINT}),
     ),
 }
 
-#: Which receive entry point each shipped sync handler drives.
-SYNC_HANDLER_NEEDS: Mapping[str, Optional[str]] = {
-    "IPCWeightSync": SYNC_VIA_IPC,
-    "TensorWeightSync": SYNC_VIA_TENSOR,
-    "NCCLWeightSync": SYNC_VIA_NCCL,
-    "LocalLoraWeightSync": SYNC_VIA_LORA,
-    "RemoteLoraWeightSync": SYNC_VIA_LORA,
-    "CheckpointWeightSync": SYNC_VIA_CHECKPOINT,
+
+@dataclass(frozen=True)
+class SyncHandler:
+    """Receive method and placement boundary owned by a sync-handler class."""
+
+    receive_method: str
+    topology: str
+
+
+SYNC_HANDLERS: Mapping[str, SyncHandler] = {
+    "IPCWeightSync": SyncHandler(SYNC_VIA_IPC, SYNC_LOCAL),
+    "TensorWeightSync": SyncHandler(SYNC_VIA_TENSOR, SYNC_LOCAL),
+    "NCCLWeightSync": SyncHandler(SYNC_VIA_NCCL, SYNC_REMOTE),
+    "LocalLoraWeightSync": SyncHandler(SYNC_VIA_LORA, SYNC_LOCAL),
+    "RemoteLoraWeightSync": SyncHandler(SYNC_VIA_LORA, SYNC_REMOTE),
+    "CheckpointWeightSync": SyncHandler(SYNC_VIA_CHECKPOINT, SYNC_LOCAL),
 }
 
-#: Recipe sections that may hold a rollout engine ``_target_`` block. Flat
-#: recipes use ``rollout``; ``train_unified_model``'s two-engine mode splits it
-#: into ``ar_rollout`` + ``dit_rollout``.
 ENGINE_SECTIONS = ("rollout", "ar_rollout", "dit_rollout")
-
 LAYOUTS = ("colocate", "separate")
 
 
-def engine_family(target: str) -> Optional[EngineFamily]:
-    """Look up the family of an engine ``_target_``, or ``None`` if unknown.
-
-    ``None`` for any dotpath outside ``unirl.rollout.engine.<family>`` — an
-    out-of-tree engine, whose mode this module cannot know. Callers skip the
-    engine-dependent contracts for it rather than guess.
-    """
+def engine_family_name(target: str) -> Optional[str]:
+    """Return the declared package family for an engine or engine-config target."""
     if not target.startswith(ENGINE_PACKAGE):
         return None
     family = target[len(ENGINE_PACKAGE) :].split(".", 1)[0]
-    return ENGINE_FAMILIES.get(family)
+    return family if family in ENGINE_FAMILIES else None
 
 
-# ---------------------------------------------------------------------------
-# Normalized recipe view
-# ---------------------------------------------------------------------------
+def engine_family(target: str) -> Optional[EngineFamily]:
+    """Return the declared capabilities for an engine or engine-config target."""
+    family = engine_family_name(target)
+    return None if family is None else ENGINE_FAMILIES[family]
 
 
 @dataclass(frozen=True)
 class Block:
-    """A ``_target_`` block found in the recipe, tagged with where it was read."""
+    """A targeted recipe block tagged with its source path and sync options."""
 
     path: str
     target: str
+    track: Optional[str] = None
+    track_prefix: Optional[str] = None
+    copy: bool = False
 
     @property
     def class_name(self) -> str:
@@ -161,53 +140,53 @@ class Block:
 
 @dataclass(frozen=True)
 class RecipeFacts:
-    """The cross-cutting facts a recipe states, normalized across entry points.
+    """Normalized facts consumed by every cross-component contract."""
 
-    :meth:`from_cfg` is the only code here that knows *where* an entry point
-    puts things; every contract reads these fields instead.
-    """
-
-    #: Engine blocks in section order. Empty for a recipe with no rollout at all
-    #: (``train_sft``) or one that names its sampler differently (``train_refl``
-    #: uses ``policy``) — such recipes have no engine contracts to check.
     engines: tuple[Block, ...]
-    #: Sync handler blocks; more than one when ``sync`` is a per-track map.
+    nested_engines: tuple[Block, ...]
     syncs: tuple[Block, ...]
-    #: Whether a ``sync`` section is present at all, even one declaring no
-    #: handler — distinct from ``syncs`` being empty, and worth distinguishing
-    #: in the error message.
     has_sync_section: bool
-    layout: str
-    #: ``None`` when the recipe is silent and the entry point's default applies
-    #: (``train_unified_model`` defaults it to ``True``, the rest to ``False``),
-    #: so a contract can judge only what the recipe itself asked for.
+    has_layout: bool
+    layout: Optional[str]
     offload: Optional[bool]
+    rollout_anchor_device: Any
+    freeze_llm: bool
 
     @classmethod
     def from_cfg(cls, cfg: Any) -> "RecipeFacts":
-        """Read the facts out of a composed recipe (a ``DictConfig`` or a dict)."""
+        """Read normalized facts from a DictConfig or plain mapping."""
         engines = tuple(block for path in ENGINE_SECTIONS if (block := _read_block(cfg, path)) is not None)
+        nested_paths = (
+            "rollout.config.ar",
+            "rollout.config.diffusion",
+            "rollout.config.inner",
+        )
+        nested_engines = tuple(block for path in nested_paths if (block := _read_block_path(cfg, path)) is not None)
         sync_section = _get(cfg, "sync")
+        raw_layout = _get(cfg, "layout")
         offload = _get(cfg, "enable_fsdp_offload")
         return cls(
             engines=engines,
+            nested_engines=nested_engines,
             syncs=tuple(_read_sync_blocks(sync_section)),
             has_sync_section=sync_section is not None,
-            layout=str(_get(cfg, "layout") or "colocate"),
+            has_layout=_has(cfg, "layout"),
+            layout=None if raw_layout is None else str(raw_layout),
             offload=None if offload is None else bool(offload),
+            rollout_anchor_device=_get(cfg, "rollout_anchor_device"),
+            freeze_llm=bool(_get(cfg, "freeze_llm")),
         )
 
-    def families(self) -> tuple[tuple[Block, EngineFamily], ...]:
-        """Engine blocks paired with their family, dropping unknown dotpaths."""
+    def families(self, blocks: Optional[tuple[Block, ...]] = None) -> tuple[tuple[Block, EngineFamily], ...]:
+        """Pair known engine blocks with their declared families."""
         known = []
-        for block in self.engines:
+        for block in self.engines if blocks is None else blocks:
             family = engine_family(block.target)
             if family is None:
                 logger.info(
-                    "cfg.%s._target_=%r is not a %s* dotpath; skipping the engine-dependent recipe contracts for it.",
+                    "cfg.%s._target_=%r has no declared engine family; skipping dependent checks.",
                     block.path,
                     block.target,
-                    ENGINE_PACKAGE,
                 )
                 continue
             known.append((block, family))
@@ -215,11 +194,29 @@ class RecipeFacts:
 
 
 def _get(cfg: Any, key: str) -> Any:
-    """``cfg.get(key)`` that tolerates a missing section or a non-mapping value."""
+    """Read one optional mapping key without importing OmegaConf."""
     if cfg is None:
         return None
     getter = getattr(cfg, "get", None)
     return getter(key) if callable(getter) else None
+
+
+def _has(cfg: Any, key: str) -> bool:
+    """Return whether a mapping explicitly contains one key."""
+    if cfg is None:
+        return False
+    try:
+        return key in cfg
+    except TypeError:
+        return False
+
+
+def _get_path(cfg: Any, path: str) -> Any:
+    """Read a dotted mapping path without importing OmegaConf."""
+    value = cfg
+    for key in path.split("."):
+        value = _get(value, key)
+    return value
 
 
 def _read_block(cfg: Any, path: str) -> Optional[Block]:
@@ -227,155 +224,243 @@ def _read_block(cfg: Any, path: str) -> Optional[Block]:
     return None if target is None else Block(path=path, target=str(target))
 
 
-def _read_sync_blocks(sync_section: Any) -> list[Block]:
-    """Normalize both ``sync`` shapes into a flat list of handler blocks.
+def _read_block_path(cfg: Any, path: str) -> Optional[Block]:
+    target = _get(_get_path(cfg, path), "_target_")
+    return None if target is None else Block(path=path, target=str(target), track=path.rsplit(".", 1)[-1])
 
-    A single handler (``sync: {_target_: ...}``) yields one block; the per-track
-    map ``train_pe`` uses (``sync: {diffusion: {...}, ar: {...}}``) yields one
-    block per track.
-    """
+
+def _read_sync_blocks(sync_section: Any) -> list[Block]:
+    """Normalize a single handler or per-track handler map without losing track names."""
     if sync_section is None:
         return []
     if (target := _get(sync_section, "_target_")) is not None:
-        return [Block(path="sync", target=str(target))]
+        prefix = _get(sync_section, "track_prefix")
+        return [
+            Block(
+                path="sync",
+                target=str(target),
+                track_prefix=None if prefix is None else str(prefix),
+                copy=bool(_get(sync_section, "copy")),
+            )
+        ]
     tracks = sync_section.keys() if hasattr(sync_section, "keys") else ()
-    return [
-        Block(path=f"sync.{track}", target=str(target))
-        for track in tracks
-        if (target := _get(_get(sync_section, track), "_target_")) is not None
-    ]
+    blocks = []
+    for track in tracks:
+        handler = _get(sync_section, track)
+        target = _get(handler, "_target_")
+        if target is None:
+            continue
+        prefix = _get(handler, "track_prefix")
+        blocks.append(
+            Block(
+                path=f"sync.{track}",
+                target=str(target),
+                track=str(track),
+                track_prefix=None if prefix is None else str(prefix),
+                copy=bool(_get(handler, "copy")),
+            )
+        )
+    return blocks
 
 
-# ---------------------------------------------------------------------------
-# Contracts
-# ---------------------------------------------------------------------------
+def _effective_sync_topology(facts: RecipeFacts, entrypoint: Optional[str]) -> str:
+    if entrypoint in (ENTRYPOINT_ASYNC_AR, ENTRYPOINT_ASYNC_DIFFUSION):
+        return SYNC_REMOTE
+    if entrypoint == ENTRYPOINT_AR and facts.rollout_anchor_device is not None:
+        return SYNC_REMOTE
+    if entrypoint == ENTRYPOINT_UNIFIED and {block.path for block in facts.engines} == {
+        "ar_rollout",
+        "dit_rollout",
+    }:
+        return SYNC_REMOTE
+    if entrypoint == ENTRYPOINT_DIFFUSION:
+        return SYNC_REMOTE if facts.layout == "separate" else SYNC_LOCAL
+    if entrypoint is None:
+        return SYNC_REMOTE if facts.layout == "separate" else SYNC_LOCAL
+    return SYNC_LOCAL
+
+
+def _nested_engine(facts: RecipeFacts, track: str) -> tuple[Block, ...]:
+    suffix = f".{track}"
+    return tuple(block for block in facts.nested_engines if block.path.endswith(suffix))
+
+
+def _sync_engine_blocks(facts: RecipeFacts, sync: Block) -> tuple[Block, ...]:
+    rollout = next((block for block in facts.engines if block.path == "rollout"), None)
+    family = None if rollout is None else engine_family_name(rollout.target)
+    if family == "composed" and sync.track is not None:
+        return _nested_engine(facts, sync.track)
+    if family == "agentic":
+        return _nested_engine(facts, "inner")
+    return facts.engines
+
+
+def _validate_sync_shape(facts: RecipeFacts, *, entrypoint: Optional[str]) -> None:
+    """Validate the handler-map shape consumed by each trainer."""
+    if entrypoint == ENTRYPOINT_PE:
+        required = {"diffusion"} if facts.freeze_llm else {"ar", "diffusion"}
+        actual = {sync.track for sync in facts.syncs}
+        require(
+            actual == required, f"train_pe requires sync tracks {sorted(required)}; found {sorted(actual, key=str)}."
+        )
+        for sync in facts.syncs:
+            require(
+                sync.track_prefix == sync.track,
+                f"cfg.{sync.path}.track_prefix must be {sync.track!r}; got {sync.track_prefix!r}.",
+            )
+            require(
+                bool(_nested_engine(facts, str(sync.track))),
+                f"cfg.rollout.config.{sync.track} must declare an engine config for cfg.{sync.path}.",
+            )
+        return
+    require(
+        all(sync.track is None for sync in facts.syncs),
+        f"{entrypoint or 'this recipe'} expects one cfg.sync handler, not a per-track map.",
+    )
+    if entrypoint == ENTRYPOINT_AGENTIC:
+        require(bool(_nested_engine(facts, "inner")), "cfg.rollout.config.inner must declare an engine config.")
+
+
+def _validate_engine_shape(facts: RecipeFacts, *, entrypoint: Optional[str]) -> None:
+    """Require the exact engine sections consumed by each entrypoint."""
+    paths = {block.path for block in facts.engines}
+    if entrypoint == ENTRYPOINT_UNIFIED:
+        require(
+            paths in ({"rollout"}, {"ar_rollout", "dit_rollout"}),
+            "train_unified_model requires either cfg.rollout or both cfg.ar_rollout and cfg.dit_rollout.",
+        )
+    elif entrypoint == ENTRYPOINT_SFT:
+        require(not paths, "train_sft does not consume rollout engine sections.")
+    elif entrypoint in KNOWN_ENTRYPOINTS:
+        require(paths == {"rollout"}, f"{entrypoint} requires exactly one cfg.rollout engine section.")
+
+
+def _validate_handler_topology(facts: RecipeFacts, *, entrypoint: Optional[str]) -> None:
+    topology = _effective_sync_topology(facts, entrypoint)
+    for sync in facts.syncs:
+        handler = SYNC_HANDLERS.get(sync.class_name)
+        if handler is None:
+            continue
+        require(
+            handler.topology == topology,
+            f"cfg.{sync.path}={sync.class_name} is a {handler.topology}-engine handler, but "
+            f"{entrypoint or 'this recipe'} wires rollout through the {topology} boundary.",
+        )
+        if entrypoint == ENTRYPOINT_ASYNC_AR:
+            require(sync.class_name == "NCCLWeightSync", "train_async_ar supports only NCCLWeightSync.")
+        if entrypoint == ENTRYPOINT_AGENTIC:
+            require(sync.class_name == "TensorWeightSync", "train_agentic supports only TensorWeightSync.")
+        if entrypoint == ENTRYPOINT_AR and facts.rollout_anchor_device is not None:
+            require(
+                sync.class_name == "RemoteLoraWeightSync",
+                "anchored train_ar rollout supports only RemoteLoraWeightSync.",
+            )
+        if entrypoint == ENTRYPOINT_UNIFIED and len(facts.engines) == 2:
+            require(
+                sync.class_name == "RemoteLoraWeightSync",
+                "two-engine train_unified_model supports only RemoteLoraWeightSync.",
+            )
 
 
 def is_direct_sampling(cfg: Any) -> bool:
-    """Whether the recipe samples inside the train actors.
-
-    True iff the recipe names at least one recognized engine and *every* one of
-    them is direct-sampling — today only ``TrainsideRolloutEngine``, the
-    in-process Pipeline adapter (see ``unirl/rollout/engine/trainside``). Every
-    other engine runs dedicated rollout actors.
-
-    A recipe mixing the two modes across its engine sections is neither;
-    :func:`validate_weight_sync_contract` rejects it by name.
-    """
+    """Return whether every recognized top-level engine samples in train actors."""
     families = RecipeFacts.from_cfg(cfg).families()
     return bool(families) and all(family.direct_sampling for _, family in families)
 
 
-def validate_weight_sync_contract(cfg: Any) -> None:
-    """A ``sync`` section must be present iff rollout runs in its own actor.
-
-    Direct sampling shares the trainable module with the sampler, so there are
-    no separate rollout weights and a ``sync`` block is a contradiction. A
-    dedicated engine holds its own copy, so omitting ``sync`` silently trains
-    the policy while rollout keeps sampling the initial weights.
-
-    Also checks the pairing: a handler is only usable on an engine implementing
-    the receive path it drives — ``IPCWeightSync`` needs
-    ``update_weights_from_ipc``, which only the vllm-omni and composed engines
-    have.
-    """
+def validate_weight_sync_contract(cfg: Any, *, entrypoint: Optional[str] = None) -> None:
+    """Validate sampling mode, handler shape, topology, and receiver capabilities."""
     facts = RecipeFacts.from_cfg(cfg)
+    _validate_engine_shape(facts, entrypoint=entrypoint)
     families = facts.families()
     if not families:
+        if entrypoint in KNOWN_ENTRYPOINTS:
+            require(not facts.has_sync_section, f"{entrypoint} has no recognized rollout engine but declares cfg.sync.")
         return
 
     direct = [block.path for block, family in families if family.direct_sampling]
     dedicated = [block.path for block, family in families if not family.direct_sampling]
     require(
         not (direct and dedicated),
-        f"recipe mixes sampling modes: cfg.{', cfg.'.join(direct)} sample inside the train actors "
-        f"while cfg.{', cfg.'.join(dedicated)} run dedicated rollout actors. All engine sections "
-        "must be on the same side — the weight-sync and placement contracts differ between them.",
+        f"recipe mixes direct engines at cfg.{', cfg.'.join(direct)} with dedicated engines at "
+        f"cfg.{', cfg.'.join(dedicated)}.",
     )
 
     if direct:
-        found = _describe(facts.syncs) or "a sync section declaring no handler"
+        found = _describe(facts.syncs) or "a handler-less sync section"
         require(
             not facts.has_sync_section,
-            f"cfg.{direct[0]} samples inside the train actors, which share the trainable module "
-            f"with the sampler — there are no rollout weights to push. Remove the sync section "
-            f"(found {found}).",
+            f"cfg.{direct[0]} samples on the train actors and cannot use cfg.sync; found {found}.",
         )
         return
 
+    if entrypoint == ENTRYPOINT_UNIFIED and [block.path for block in facts.engines] == ["rollout"]:
+        raise ValueError(
+            "train_unified_model single-engine mode does not wire weight sync for a dedicated rollout engine; "
+            "use the trainside engine or the ar_rollout + dit_rollout mode."
+        )
+
     require(
         bool(facts.syncs),
-        f"cfg.{dedicated[0]} runs a dedicated rollout actor holding its own copy of the weights, "
-        f"so the recipe must declare a cfg.sync handler to push updates to it; found "
-        f"{'a sync section declaring no handler' if facts.has_sync_section else 'no sync section'}. "
-        "Without one the policy trains while rollout samples the initial weights forever.",
+        f"cfg.{dedicated[0]} runs a dedicated rollout copy and requires a cfg.sync handler.",
     )
+    _validate_sync_shape(facts, entrypoint=entrypoint)
+    _validate_handler_topology(facts, entrypoint=entrypoint)
+
     for sync in facts.syncs:
-        needed = SYNC_HANDLER_NEEDS.get(sync.class_name)
-        if needed is None:
+        handler = SYNC_HANDLERS.get(sync.class_name)
+        if handler is None:
             continue
-        for block, family in families:
-            supported = ", ".join(sorted(family.weight_sync)) or "none — it reloads from a checkpoint dir"
+        needed = (
+            SYNC_VIA_LORA_COPY if sync.class_name == "RemoteLoraWeightSync" and sync.copy else handler.receive_method
+        )
+        for block, family in facts.families(_sync_engine_blocks(facts, sync)):
             require(
                 needed in family.weight_sync,
-                f"cfg.{sync.path}={sync.class_name} pushes weights via {needed}(), which "
-                f"cfg.{block.path}._target_={block.target!r} does not implement. That engine's "
-                f"receive paths: {supported}.",
+                f"cfg.{sync.path}={sync.class_name} needs {needed}(), but "
+                f"cfg.{block.path}._target_={block.target!r} supports {sorted(family.weight_sync)}.",
             )
 
 
-def validate_rollout_layout(cfg: Any) -> None:
-    """``layout`` must name a real layout, and direct sampling implies colocate.
-
-    A direct-sampling engine reaches the training pipeline as a local sibling,
-    so it cannot be placed on a disjoint device slab. The trainers reject this
-    too, but only once the train slab's actors are already up; catching it here
-    keeps the failure on the driver, before Ray is touched.
-
-    An unrecognized ``layout`` is rejected because the trainers compare it
-    against ``"separate"`` exactly, so a typo silently means colocate.
-    """
+def validate_rollout_layout(cfg: Any, *, entrypoint: Optional[str] = None) -> None:
+    """Validate rollout layout values only where the selected entrypoint consumes them."""
     facts = RecipeFacts.from_cfg(cfg)
-    require(
-        facts.layout in LAYOUTS,
-        f"cfg.layout={facts.layout!r} is not a layout; expected one of {list(LAYOUTS)}. The "
-        "trainers compare against 'separate' exactly, so a typo silently colocates.",
-    )
-    if facts.layout != "separate":
+    if facts.has_layout:
+        require(
+            facts.layout is not None and facts.layout in LAYOUTS,
+            f"cfg.layout={facts.layout!r} is invalid; expected one of {list(LAYOUTS)}.",
+        )
+    if entrypoint is not None and entrypoint not in LAYOUT_ENTRYPOINTS:
+        require(facts.layout is None, f"{entrypoint} does not consume cfg.layout; remove it.")
+
+    if entrypoint == ENTRYPOINT_ASYNC_DIFFUSION:
+        require(
+            facts.layout in (None, "separate"),
+            f"train_async_diffusion requires cfg.layout='separate'; got {facts.layout!r}.",
+        )
+        effective = "separate"
+    else:
+        effective = facts.layout or "colocate"
+    if effective != "separate":
         return
     for block, family in facts.families():
         require(
             not family.direct_sampling,
-            f"cfg.layout='separate' puts rollout on its own device slab, but "
-            f"cfg.{block.path}._target_={block.target!r} samples inside the train actors and needs "
-            "the training pipeline as a local sibling. Use a dedicated engine (sglang / vllm-omni) "
-            "for a separate slab, or drop layout back to colocate.",
+            f"cfg.layout='separate' cannot place direct-sampling cfg.{block.path}._target_={block.target!r}.",
         )
 
 
-def validate_offload_contract(cfg: Any) -> None:
-    """Direct sampling forbids ``enable_fsdp_offload``.
-
-    Offload parks the base weights on CPU while a dedicated rollout actor
-    samples. Under direct sampling the sampler *is* the trainable module, so
-    there is no window in which the weights may leave the GPU; the trainers
-    force the flag off. Reject the recipe that asks for it instead of silently
-    ignoring what it asked for.
-
-    Only an explicit ``enable_fsdp_offload: true`` is rejected — when the recipe
-    is silent the value comes from the entry point's default, which is not the
-    recipe author's statement.
-    """
+def validate_offload_contract(cfg: Any, *, entrypoint: Optional[str] = None) -> None:
+    """Reject an explicit FSDP-offload request with direct sampling."""
+    del entrypoint
     facts = RecipeFacts.from_cfg(cfg)
     if facts.offload is not True:
         return
     for block, family in facts.families():
         require(
             not family.direct_sampling,
-            f"cfg.enable_fsdp_offload=true is incompatible with "
-            f"cfg.{block.path}._target_={block.target!r}: direct sampling generates on the live "
-            "FSDP modules, so the base weights can never sit on CPU. Drop the flag or set it "
-            "false — the trainers force it off for this engine anyway.",
+            f"cfg.enable_fsdp_offload=true is incompatible with direct-sampling "
+            f"cfg.{block.path}._target_={block.target!r}.",
         )
 
 
@@ -387,15 +472,11 @@ CONTRACTS = (
 
 
 def validate_recipe(cfg: Any, *, entrypoint: str) -> None:
-    """Run every cross-component contract against a composed recipe.
-
-    The single gate each ``unirl/train_*.py`` calls before building its trainer.
-    A recipe with no rollout engine section (``train_sft``) simply has no engine
-    contracts to check.
-    """
+    """Run every cross-component contract before trainer construction."""
+    require(entrypoint in KNOWN_ENTRYPOINTS, f"unknown training entrypoint {entrypoint!r}")
     for contract in CONTRACTS:
         try:
-            contract(cfg)
+            contract(cfg, entrypoint=entrypoint)
         except ValueError as exc:
             raise ValueError(f"{entrypoint}: invalid recipe. {exc}") from exc
 
@@ -411,16 +492,20 @@ __all__ = [
     "ENGINE_PACKAGE",
     "ENGINE_SECTIONS",
     "EngineFamily",
+    "KNOWN_ENTRYPOINTS",
     "LAYOUTS",
-    "SYNC_HANDLER_NEEDS",
+    "RecipeFacts",
+    "SYNC_HANDLERS",
     "SYNC_RECEIVE_METHODS",
     "SYNC_VIA_CHECKPOINT",
     "SYNC_VIA_IPC",
     "SYNC_VIA_LORA",
+    "SYNC_VIA_LORA_COPY",
     "SYNC_VIA_NCCL",
     "SYNC_VIA_TENSOR",
-    "RecipeFacts",
+    "SyncHandler",
     "engine_family",
+    "engine_family_name",
     "is_direct_sampling",
     "validate_offload_contract",
     "validate_recipe",

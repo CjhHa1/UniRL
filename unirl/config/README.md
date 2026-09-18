@@ -40,7 +40,7 @@ interpolations. There is no ConfigStore and no registration step.
 
 Instantiation is a **driver-routes / worker-materializes** split:
 
-- `parse_hydra_cfg` (`../utils/hydra.py`) resolves only the *top-level* `_target_`
+- `parse_hydra_cfg` (`../trainer/hydra.py`) resolves only the *top-level* `_target_`
   on the driver and passes nested blocks through as plain dicts.
 - `Worker._resolve_init_kwargs` (`../distributed/group/worker.py`) walks the tree on
   the worker and builds each nested `_target_` with `get_method(_target_)(**children)`
@@ -62,15 +62,15 @@ it enforces three contracts, all keyed off which rollout engine the recipe picke
 
 | Contract | Rejects |
 | --- | --- |
-| `validate_weight_sync_contract` | a `sync:` block on a direct-sampling engine; a dedicated engine with no `sync` handler; a handler whose transport the engine cannot receive (`IPCWeightSync` outside vllm-omni / composed); engine sections split across both sampling modes |
-| `validate_rollout_layout` | `layout: separate` with a direct-sampling engine; a `layout` value that is neither `colocate` nor `separate` |
+| `validate_weight_sync_contract` | missing or extra sync; local/remote handler topology mismatches; unsupported receive methods; incomplete or misrouted PE track maps; unsupported entrypoint-specific sync modes |
+| `validate_rollout_layout` | invalid layout values; separate direct sampling; layout fields on entrypoints that do not consume them |
 | `validate_offload_contract` | an explicit `enable_fsdp_offload: true` with a direct-sampling engine |
 
 **Recipe shapes live in exactly one place.** Contracts never read a hard-coded
 dotpath; they read `RecipeFacts.from_cfg(cfg)`, which absorbs the per-entrypoint
 differences — `rollout` vs `ar_rollout` + `dit_rollout`, a single `sync` block vs
-`train_pe`'s per-track map, and `train_sft`/`train_refl` having no rollout engine
-at all (those simply have no engine contracts to check).
+`train_pe`'s per-track map, nested composed/agentic child engines, and
+`train_sft` having no rollout engine at all.
 
 **Engines are identified by package, not class name.** `ENGINE_FAMILIES` maps
 `unirl.rollout.engine.<family>` to whether the family samples in-process and
@@ -87,7 +87,7 @@ reaching into `cfg` from the contract.
 ## Verification
 
 `scripts/check_recipe_contracts.py` (pre-commit hook `check-recipe-contracts`,
-so it rides the lint-only CI alongside `check-recipe-targets`) asserts three
+so it rides the lint-only CI alongside `check-recipe-targets`) asserts five
 things on every run:
 
 1. Every shipped recipe satisfies every contract.
@@ -98,23 +98,24 @@ things on every run:
    duck-typed test the trainers use), and `weight_sync` off the receive methods
    the concrete class overrides. Adding an engine family without declaring it
    fails here rather than silently skipping its contracts.
+4. Sync-handler local/remote metadata still matches whether its constructor owns
+   a local `rollout` sibling.
+5. Every `unirl/train_*.py` calls `validate_recipe` first, with its own entrypoint
+   name, so adding an entrypoint cannot silently bypass the gate.
 
-All three run with `ast` + `yaml` only, no torch — which is why `contracts.py`
+All five run with `ast` + `yaml` only, no torch — which is why `contracts.py`
 and `require.py` stay stdlib-only.
 
 ## Gotchas
 
-- **The gate is per-entrypoint, one line.** A new `train_*.py` that forgets
-  `validate_recipe(cfg, ...)` is simply ungated; nothing forces the call.
 - **`# @package _global_` on line 1 is mandatory** — omit it and Hydra nests the
   whole recipe under a bucket key, so `cfg.batch_size` won't resolve.
 - **Out-of-tree engines are not gated.** A `rollout._target_` outside
   `unirl.rollout.engine.*` has no known family, so the engine-dependent contracts
   log and skip rather than guess a mode for it.
 - **Only an explicit `enable_fsdp_offload: true` is rejected.** When a recipe is
-  silent the value comes from the entrypoint's default (`train_unified_model`
-  defaults it to `True`, the rest to `False`), which is not a statement by the
-  recipe author — and the trainers already force it off for direct sampling.
+  silent the value comes from the entrypoint's runtime default, which is not a
+  statement by the recipe author.
 - **Contracts see the recipe, not the run.** Anything that depends on resolved
   runtime topology — `batch_size * samples_per_prompt` divisibility by the actual
   rollout/reward `dp_size`, for instance — cannot be checked here and stays in
