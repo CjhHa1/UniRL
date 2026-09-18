@@ -5,52 +5,30 @@ from __future__ import annotations
 from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Sequence, Set
 
 from unirl.config.require import require
 
 if TYPE_CHECKING:
     import torch
 
-    from unirl.utils.scheduler_utils import TimestepScheduler
+    from unirl.sde.index_schedule import TimestepScheduler
 
 
 @dataclass
 class BaseSamplingParams(ABC):
-    """Marker base for all sampling config dataclasses.
-
-    Used as the type annotation / base class for the per-modality sampling
-    config dataclasses.
-
-    Holds the universal ``samples_per_prompt`` field — the per-prompt rollout
-    fanout for this modality (the samples generated per upstream input to it).
-    The fanout across a multi-modality ``{"diffusion": ..., "ar": ...}`` sampling
-    dict is their product; see :func:`total_samples_per_prompt`.
-    """
+    """Marker base for all sampling config dataclasses."""
 
     samples_per_prompt: int = 1
 
 
 def _is_param_dict(sampling: Any) -> bool:
-    """True iff ``sampling`` is a modality-keyed mapping (``"diffusion"`` / ``"ar"``)
-    rather than a single sampling-params object.
-
-    the gen Part's ``sampling_params`` is a ``Dict[str, BaseSamplingParams]``. A bare
-    ``DiffusionSamplingParams`` (or its raw OmegaConf node from a flat
-    ``cfg.sampling``) is NOT a param dict — :func:`total_samples_per_prompt` then
-    treats it as a single modality.
-    """
+    """True iff ``sampling`` is a modality-keyed mapping rather than a single sampling-params object."""
     return isinstance(sampling, Mapping) and ("diffusion" in sampling or "ar" in sampling)
 
 
 def total_samples_per_prompt(sampling: Any) -> int:
-    """Per-prompt rollout fan-out: the product of each modality's ``samples_per_prompt``.
-
-    For a modality dict this multiplies across modalities (each prompt →
-    ``ar.samples_per_prompt`` AR outputs, each AR output →
-    ``diffusion.samples_per_prompt`` diffusion samples). For a single params object
-    it is that object's ``samples_per_prompt``. ``None`` / empty → ``1``.
-    """
+    """Per-prompt rollout fan-out: the product of each modality's ``samples_per_prompt``."""
     if sampling is None:
         return 1
     if _is_param_dict(sampling):
@@ -62,33 +40,12 @@ def total_samples_per_prompt(sampling: Any) -> int:
 
 
 def is_forward_process(sde_indices: Optional[Sequence[int]]) -> bool:
-    """True when the rollout records no SDE steps (deterministic ODE forward process).
-
-    ``sde_indices`` (from :meth:`DiffusionSamplingParams.resolve_sde_indices`) names
-    the denoising steps that draw per-step SDE noise. A non-empty list is an SDE
-    rollout (FlowGRPO et al.); an empty list -- or ``None`` when no SDE params were
-    set -- means every step is deterministic ODE, i.e. the DiffusionNFT-style forward
-    process whose only output of interest is the final clean latent.
-
-    This is the single source of truth for that interpretation: call sites read
-    ``is_forward_process(sde_indices)`` instead of re-deriving it ad hoc from
-    ``not x`` / ``x is None`` / ``len(x) == 0`` (those idioms had drifted apart and
-    caused a trajectory-bandwidth regression once).
-    """
+    """True when the rollout records no SDE steps (deterministic ODE forward process)."""
     return not sde_indices
 
 
 def compute_trajectory_positions(sde_indices: Set[int], num_steps: int) -> List[int]:
-    """Return sorted positions needed for ``(x_t, x_{t+1})`` pairs at SDE boundaries.
-
-    For each SDE step index ``i`` in *sde_indices*, both position ``i`` and
-    ``i + 1`` are required.  Results are clamped to ``[0, num_steps]``.
-
-    >>> compute_trajectory_positions({0, 2, 4}, 5)
-    [0, 1, 2, 3, 4, 5]
-    >>> compute_trajectory_positions({3}, 5)
-    [3, 4]
-    """
+    """Return sorted positions needed for ``(x_t, x_{t+1})`` pairs at SDE boundaries."""
     positions: Set[int] = set()
     for i in sde_indices:
         positions.add(max(0, min(i, num_steps)))
@@ -98,10 +55,7 @@ def compute_trajectory_positions(sde_indices: Set[int], num_steps: int) -> List[
 
 @dataclass
 class DiffusionSamplingParams(BaseSamplingParams):
-    """Canonical diffusion sampling params — single source of truth.
-
-    Flows unchanged from YAML config → rollout pipeline → model pipeline.
-    """
+    """Canonical diffusion sampling params — single source of truth."""
 
     num_inference_steps: int = 50
     guidance_scale: float = 7.5
@@ -134,14 +88,7 @@ class DiffusionSamplingParams(BaseSamplingParams):
     guidance_scale_2: Optional[float] = None
     strength: Optional[float] = None
 
-    num_samples_per_prompt: int = 1
-
     def __post_init__(self) -> None:
-        if self.num_samples_per_prompt != 1 and self.samples_per_prompt == 1:
-            object.__setattr__(self, "samples_per_prompt", self.num_samples_per_prompt)
-        elif self.samples_per_prompt != 1 and self.num_samples_per_prompt == 1:
-            object.__setattr__(self, "num_samples_per_prompt", self.samples_per_prompt)
-
         reserved = {f.name for f in fields(self) if f.name != "sampler_kwargs"}
         shadowed = reserved & set(self.sampler_kwargs)
         require(
@@ -150,18 +97,7 @@ class DiffusionSamplingParams(BaseSamplingParams):
         )
 
     def resolve_sde_indices(self, rollout_id: int) -> List[int]:
-        """Resolve which denoising steps record SDE log-probs for ``rollout_id``.
-
-        Precedence: an explicit static ``sde_indices`` list wins; else a
-        ``scheduler`` instance (dynamic, keyed on ``rollout_id`` — window /
-        sparse curricula); else every step. Setting ``sde_indices`` thus
-        overrides any configured ``scheduler``.
-
-        Not resolved at construction: a ``scheduler`` returns a different set
-        per ``rollout_id``, so the result can't be frozen at init. The driver
-        calls this per rollout and stamps the result onto a per-request copy
-        (with ``scheduler=None``).
-        """
+        """Resolve which denoising steps record SDE log-probs for ``rollout_id``."""
         if self.sde_indices is not None:
             return [int(i) for i in self.sde_indices]
         scheduler: Optional[TimestepScheduler] = self.scheduler
@@ -174,8 +110,11 @@ class DiffusionSamplingParams(BaseSamplingParams):
 class ARSamplingParams(BaseSamplingParams):
     """AR (autoregressive) sampling parameters for LLM-based PE generation."""
 
+    emits_fixed_length: ClassVar[bool] = False
+
     temperature: float = 0.7
     max_new_tokens: int = 512
     top_p: float = 0.9
     top_k: int = 0
     stop_token_id: int | None = None
+    seed: Optional[int] = None  # engines with per-request seeded sampling derive child seeds from this + sample_id
