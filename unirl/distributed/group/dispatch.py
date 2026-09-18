@@ -1,27 +1,4 @@
-"""Dispatch modes, dispatch/collect functions, and @distributed decorator.
-
-All dispatch/collect logic lives here — single source of truth.
-Handle imports from this module and uses DISPATCH_MODE_REGISTRY.
-
-Design:
-  - Dispatch enum: declares how input flows to workers
-  - Execute enum: declares which workers run
-  - Each Dispatch mode is paired with dispatch_fn + collect_fn in DISPATCH_MODE_REGISTRY
-  - dispatch/collect functions take (wg, args, kwargs, batch_size) to access rank_info, dp_size, etc.
-  - @distributed decorator marks Remote methods with their dispatch/execute modes
-
-DP-aware dispatch (DP_SCATTER, DP_SCATTER_HEAD):
-  - Input is split by dp_size (not world_size) using recursive pytree_chunk
-  - Workers in the same DP group (varying TP/PP/SP rank) receive the SAME shard
-  - Collect filters: only tp_rank==0, pp_last_stage, sp_rank==0 results are kept
-  - Kept results are merged via pytree_cat to reconstruct the full batch
-
-Partial localization (``@distributed(reads=...)`` / ``(skips=...)``):
-  - A method may declare which subtrees of its arguments it actually reads
-    (whitelist) or which it provably does not (blacklist)
-  - required_store_keys turns that into a per-shard mask; the controller sends
-    the post-localization mask to the worker, so unread refs never move or fetch
-"""
+"""Dispatch modes, dispatch/collect functions, and @distributed decorator."""
 
 from __future__ import annotations
 
@@ -49,12 +26,7 @@ CollectFn: TypeAlias = Callable[["Handle", List[Any]], Any]
 
 
 def _unwrap_broadcast(args: tuple, kwargs: dict):
-    """Strip top-level Broadcast wrappers from args and kwargs.
-
-    Broadcast is a controller-side dispatch annotation: it must be consumed
-    here and never reach workers. Only top-level args/kwargs values can be
-    Broadcast — nesting is not supported.
-    """
+    """Strip top-level Broadcast wrappers from args and kwargs."""
     clean_args = tuple(v.value if isinstance(v, Broadcast) else v for v in args)
     clean_kwargs = {k: (v.value if isinstance(v, Broadcast) else v) for k, v in kwargs.items()}
     return clean_args, clean_kwargs
@@ -93,10 +65,7 @@ def _dispatch_scatter(
     kwargs: Dict[str, Any],
     batch_size: Optional[int],
 ) -> List[Shard]:
-    """Split args/kwargs by world_size (treat every worker as its own DP rank).
-
-    Equivalent to DP_SCATTER with dp_size == world_size.
-    """
+    """Split args/kwargs by world_size (treat every worker as its own DP rank)."""
     if batch_size is None:
         args, kwargs = _unwrap_broadcast(args, kwargs)
         return [(args, kwargs)] * wg.world_size
@@ -116,14 +85,7 @@ def _dispatch_dp_scatter(
     kwargs: Dict[str, Any],
     batch_size: Optional[int],
 ) -> List[Shard]:
-    """Split args/kwargs by dp_size, assign by dp_rank.
-
-    Workers in the same DP group (different TP/PP/SP ranks) receive
-    the identical data shard. Each worker is responsible for internal
-    slicing (TP slices hidden dim, PP runs its own layers, etc.).
-
-    If batch_size is None (all broadcast), replicate to all workers.
-    """
+    """Split args/kwargs by dp_size, assign by dp_rank."""
     dp_size = wg.dp_size
 
     if batch_size is None:
@@ -148,11 +110,7 @@ def _dispatch_dp_scatter_head(
     kwargs: Dict[str, Any],
     batch_size: Optional[int],
 ) -> List[Shard]:
-    """Like DP_SCATTER, but non-head ranks receive empty args/kwargs.
-
-    DP head rank per group: tp_rank==0, pp_rank==0, sp_rank==0.
-    This saves RPC bandwidth when workers broadcast data internally.
-    """
+    """Like DP_SCATTER, but non-head ranks receive empty args/kwargs."""
     dp_size = wg.dp_size
 
     if batch_size is None:
@@ -183,13 +141,7 @@ def _collect_passthrough(wg, results: List) -> List:
 
 
 def _collect_dp_merge(wg, results: List) -> Any:
-    """Collect only DP-head results per DP group, then merge.
-
-    DP head: tp_rank==0, is_pipeline_last_stage, sp_rank==0.
-    Returns the pytree_cat'd result across DP ranks.
-
-    Handles Execute.RANK_ZERO case where len(results) < world_size.
-    """
+    """Collect only DP-head results per DP group, then merge."""
     dp_results = []
     for i in range(len(results)):
         ri = wg.rank_infos[i]
@@ -217,19 +169,7 @@ def resolve_backward_dispatch_mode(
     fwd_dispatch_mode: Dispatch,
     rank_infos: list,
 ) -> Dispatch:
-    """Return the dispatch mode for the backward RPC, or raise if unsupported.
-
-    Rules:
-      DP_SCATTER      + pp_size==1 → DP_SCATTER (grad shards align with output shards)
-      DP_SCATTER_HEAD + pp_size==1 → DP_SCATTER (all ranks must participate in backward)
-      DP_SCATTER / DP_SCATTER_HEAD + pp_size>1 → Error (autograd graph broken across PP)
-      BROADCAST → Error
-      SCATTER   → Error
-
-    !! IMPORTANT — adding a new Dispatch variant !!
-    Update this function to decide whether DP_SCATTER backward is correct,
-    or a hard error is needed.  Also check Remote._auto_backward's dispatch_mode.
-    """
+    """Return the dispatch mode for the backward RPC, or raise if unsupported."""
     if fwd_dispatch_mode in (Dispatch.BROADCAST, Dispatch.SCATTER):
         raise ValueError(
             f"Method '{method_name}' uses dispatch_mode={fwd_dispatch_mode.name}, "
@@ -251,8 +191,8 @@ def resolve_backward_dispatch_mode(
 # ── Partial localization (``reads=`` / ``skips=``) ──
 
 
-def _subtree_store_keys(selector: Callable, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Set[str]:
-    keys: Set[str] = set()
+def _subtree_store_keys(selector: Callable, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Set[Any]:
+    keys: Set[Any] = set()
     for ref in collect_leaves(selector(*args, **kwargs), TensorRef):
         keys |= ref_store_keys(ref)
     return keys
@@ -265,30 +205,8 @@ def has_partial_localization(config: Optional[Dict[str, Any]]) -> bool:
 
 def required_store_keys(
     config: Optional[Dict[str, Any]], args: Tuple[Any, ...], kwargs: Dict[str, Any]
-) -> Optional[Set[str]]:
-    """Store keys one shard must have resolvable on its worker, or ``None`` for all.
-
-    ``None`` — the default when a method declares neither selector — means
-    "localize the whole argument tree", the historical behavior.
-
-    ``reads=`` is a whitelist: the named subtrees are localized and every other
-    ref rides along dehydrated. ``skips=`` is the complement, for a method that
-    reads most of its argument and only wants a known-dead payload held back;
-    a field nobody named is localized, so extending the schema stays safe.
-
-    Both errors bend the same way — toward moving too much. Store keys ALIAS: a
-    backend that sees one tensor object at two tree paths emits two handles over
-    one key (``GPUStoreTransport.put_batch``), so a whitelisted key may drag an
-    unread twin along, and a skipped key is withheld only when no ref outside the
-    skipped subtrees also carries it. Over-localizing costs bandwidth;
-    under-localizing would hand the method a ``TensorRef`` where it wants a
-    tensor.
-
-    ``Handle`` evaluates the selector before localization to decide what to move,
-    then remaps the selected refs onto the localized shard and sends that mask to
-    ``Worker.call``. An empty shard (``DP_SCATTER_HEAD`` gives non-head ranks no
-    args) needs nothing.
-    """
+) -> Optional[Set[Any]]:
+    """Return the storage keys one shard must resolve, or ``None`` to resolve all."""
     if not has_partial_localization(config):
         return None
     if not args and not kwargs:
@@ -306,9 +224,9 @@ def required_store_keys(
     skipped_refs = collect_leaves(skips_fn(*args, **kwargs), TensorRef)
     all_counts = Counter(id(ref) for ref in all_refs)
     skipped_counts = Counter(id(ref) for ref in skipped_refs)
-    everything: Set[str] = set()
-    skipped: Set[str] = set()
-    claimed_elsewhere: Set[str] = set()
+    everything: Set[Any] = set()
+    skipped: Set[Any] = set()
+    claimed_elsewhere: Set[Any] = set()
     for ref in all_refs:
         keys = ref_store_keys(ref)
         everything |= keys
@@ -321,19 +239,19 @@ def required_store_keys(
 
 
 def remap_required_store_keys(
-    required: Set[str],
+    required: Set[Any],
     before_args: Tuple[Any, ...],
     before_kwargs: Dict[str, Any],
     after_args: Tuple[Any, ...],
     after_kwargs: Dict[str, Any],
-) -> Set[str]:
+) -> Set[Any]:
     """Translate a pre-localization mask onto structurally identical localized refs."""
     before_refs = collect_leaves(before_args, TensorRef) + collect_leaves(before_kwargs, TensorRef)
     after_refs = collect_leaves(after_args, TensorRef) + collect_leaves(after_kwargs, TensorRef)
     if len(before_refs) != len(after_refs):
         raise RuntimeError("TensorTransport.localize changed the TensorRef tree structure")
 
-    remapped: Set[str] = set()
+    remapped: Set[Any] = set()
     for before, after in zip(before_refs, after_refs):
         if ref_is_required(before, required):
             remapped |= ref_store_keys(after)
@@ -353,46 +271,7 @@ def distributed(
     reads: Optional[Callable] = None,
     skips: Optional[Callable] = None,
 ) -> Callable:
-    """Declare SPMD dispatch/execute mode on a Role method.
-
-    Handle scans for this attribute and auto-generates proxy methods.
-    Default dispatch mode is DP_SCATTER.
-
-    ``reads`` / ``skips`` opt the method into PARTIAL LOCALIZATION. By default
-    every tensor in the argument tree is shipped to the callee's worker, which is
-    pure waste for a cross-slab method that touches one field of a big pytree (a
-    reward scoring one decoded image off a Sample also drags the training
-    trajectory across the slab boundary). Both selectors take the method's own
-    arguments (no ``self``) and name subtrees:
-
-    * ``reads`` — a whitelist, for a method reading a small slice of its
-      argument. Anything unnamed rides along dehydrated and, if the method
-      returns it, comes back still owned by its producing worker.
-    * ``skips`` — the complement, for a method that reads most of its argument
-      and only wants a known-dead payload held back. Safer against schema
-      growth: a field nobody named is still localized.
-
-    Declaring both is a config error. Partial localization is incompatible with
-    ``enable_grad()`` because an unlocalized input has no worker-side grad leaf.
-
-    Usage:
-        class DiffusionRemote(Remote):
-            @distributed
-            def rollout(self, samples, prompts):
-                ...
-
-            @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
-            def get_metrics(self):
-                ...
-
-            @distributed(reads=lambda sample: sample.parts[-1].primitives)
-            def score(self, sample):
-                ...
-
-            @distributed(skips=lambda part, **_: part.primitives)
-            def train(self, part):
-                ...
-    """
+    """Declare SPMD dispatch/execute mode and optional tensor-read selectors on a Role method."""
     if reads is not None and skips is not None:
         raise ValueError("@distributed takes reads= or skips=, not both: the mask would be ambiguous.")
 

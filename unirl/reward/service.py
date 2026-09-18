@@ -1,11 +1,4 @@
-"""Reward service: score a response :class:`~unirl.types.sample.Sample` in place.
-
-Holds exactly one :class:`~unirl.reward.base.RewardBackend` — a local in-process
-scorer or the remote RewardService HTTP client. Builds a :class:`RewardRequest`
-from the Sample's frontier Part (the generated output) plus its conditioning (the
-input context), scores it, and returns a copy of the Sample with the rewards
-attached to the frontier Part, under DP-sharded distributed dispatch.
-"""
+"""Reward service: score a response :class:`~unirl.types.sample.Sample` in place."""
 
 from __future__ import annotations
 
@@ -16,9 +9,9 @@ import torch
 
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
-from unirl.types.primitives import primitive_modality_key
+from unirl.types.primitives import PrimitiveValue, primitive_modality_key
 from unirl.types.reward import RewardRequest, RewardResponse
-from unirl.types.sample import Primitive, Sample, _part_with_field
+from unirl.types.sample import Sample, _part_with_field
 from unirl.types.sampling import ARSamplingParams
 
 from .base import DifferentiableReward, RewardBackend
@@ -27,19 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 def _build_reward_request(sample: Sample, preferred_input_kind: str) -> RewardRequest:
-    """Assemble a :class:`RewardRequest` from a response ``Sample``.
-
-    The frontier (last) Part is the generated output being scored; the input
-    context is :meth:`Sample.conditioning` — each ancestor primitive keyed by its
-    modality slot with the NEAREST ancestor winning, so a PE/recaption image
-    scores against the rewrite and an it2i edit against the instruction (plain T2I
-    has a single ancestor, so the choice is moot). Prompt metadata is the root's,
-    aligned to the frontier (:meth:`Sample.root_metadata`). Everything is already
-    row-aligned to the frontier, so there is no request/track expansion to
-    reconcile.
-    """
+    """Assemble a :class:`RewardRequest` from a response ``Sample``."""
     frontier = sample.parts[-1]
-    primitives: Dict[str, Primitive] = {}
+    primitives: Dict[str, PrimitiveValue] = {}
     for prim in sample.conditioning():
         primitives[primitive_modality_key(prim)] = prim
 
@@ -67,21 +50,7 @@ def _build_reward_request(sample: Sample, preferred_input_kind: str) -> RewardRe
 
 
 def _score_reads(sample: Sample) -> list:
-    """Tensors :meth:`RewardService.score_and_attach` reads — its ``reads=`` selector.
-
-    Scoring touches the decoded output and the decoded input context and nothing
-    else: the frontier's ``segment`` (the denoising trajectory / token payload),
-    its ``conditions`` (encoded prompt embeddings) and ``media_preview`` are
-    training- and logging-side fields that the reward only carries through. On a
-    disaggregated run that makes the difference between shipping the whole
-    rollout across the slab boundary and shipping just the media being scored —
-    and the media is dropped (``BaseTrainer._drop_decoded``) before training ever
-    sees it, so under the old whole-tree localize it crossed only to be freed.
-
-    Must stay in sync with what :func:`_build_reward_request` reads. Segment
-    lengths (the ``truncated_reward`` shaping below) come from framework-managed
-    ``cu_seqlens``, which travels by value and needs no localization.
-    """
+    """Select decoded output, input context, and root metadata tensors read by scoring."""
     return [sample.parts[-1].primitives, sample.conditioning(), sample.root_metadata(-1)]
 
 
@@ -128,18 +97,7 @@ class RewardService(Remote):
         prompts: List[str],
         records: Optional[List[dict]] = None,
     ) -> torch.Tensor:
-        """ReFL scoring: score grad-carrying ``media_tensor`` (image ``[B, C, H, W]``
-        or video ``[B, C, T, H, W]``) against ``prompts`` and return a ``[B]`` reward
-        tensor with ``grad_fn`` intact.
-
-        Deliberately bypasses :meth:`score_and_attach` / ``RewardRequest`` media
-        conversion (those go through ``tensor_frame_to_pil`` + ``torch.tensor(...)``,
-        which detach). Under ``enable_grad()`` the framework marks ``media_tensor`` as
-        a grad leaf and chains the returned reward's grad back to it. ``records``
-        carries optional per-sample metadata (e.g. ``ref_video_path`` for recipe-local
-        video rewards). The backend must satisfy the
-        :class:`~unirl.reward.base.DifferentiableReward` Protocol.
-        """
+        """ReFL scoring of grad-carrying ``media_tensor`` against ``prompts``; returns ``[B]`` with grad_fn intact."""
         if not isinstance(self.backend, DifferentiableReward):
             raise TypeError(
                 f"RewardService.score_differentiable: backend "
@@ -150,23 +108,7 @@ class RewardService(Remote):
 
     @distributed(dispatch_mode=Dispatch.DP_SCATTER, reads=_score_reads)
     def score_and_attach(self, sample: Sample) -> Sample:
-        """Score the frontier (last) Part's generated media and return the updated Sample.
-
-        The frontier is the generated output; its :meth:`Sample.conditioning` is the
-        input context and :meth:`Sample.root_metadata` the per-sample spec — both
-        already row-aligned to the frontier, so there is no request/track expansion
-        to reconcile. DP_SCATTER shards the whole Sample by prompt-tree
-        (:meth:`Sample.slice`), keeping each shard's conditioning and frontier
-        co-resident. ``reads=_score_reads`` keeps the rest of the Sample — the
-        trajectory and encoded conditions training will consume — from being
-        dragged onto the reward's workers just to be handed straight back.
-
-        Returns a new :class:`~unirl.types.sample.Sample` with ``rewards`` and
-        ``component_rewards`` on the frontier Part; the other parts are untouched
-        (the trainer credit-assigns upward via :meth:`Sample.propagate_rewards`).
-        Fail-fast on per-sample failure flags so partial/corrupt rewards cannot
-        silently enter advantage computation.
-        """
+        """Score the frontier (last) Part's generated media and return the updated Sample."""
         frontier = sample.parts[-1]
         if frontier.rewards is not None:
             raise RuntimeError("Actor-side reward compute does not accept precomputed rewards on the frontier Part.")
@@ -185,17 +127,24 @@ class RewardService(Remote):
 
         rewards = torch.tensor(reward_response.rewards, dtype=torch.float32)
 
-        sp = frontier.sampling_params
-        if self.truncated_reward != "keep" and isinstance(sp, ARSamplingParams) and frontier.segment is not None:
+        # Hitting max_new_tokens means truncated text, but fixed-length AR media
+        # reaches that length by construction and must keep its reward.
+        sampling_params = frontier.sampling_params
+        if (
+            self.truncated_reward != "keep"
+            and isinstance(sampling_params, ARSamplingParams)
+            and not sampling_params.emits_fixed_length
+            and frontier.segment is not None
+        ):
             seg_lengths = getattr(frontier.segment, "lengths", None)
             if seg_lengths is not None and seg_lengths.numel() == rewards.numel():
                 seg_lengths = seg_lengths.to(rewards.device).float()
-                max_len = float(int(sp.max_new_tokens))
+                max_len = sampling_params.max_new_tokens
                 if self.truncated_reward == "zero":
                     truncated = seg_lengths >= max_len
                     rewards = torch.where(truncated, torch.zeros_like(rewards), rewards)
                 else:
-                    buf = float(self.overlong_buffer_len)
+                    buf = self.overlong_buffer_len
                     exceed = seg_lengths - (max_len - buf)
                     penalty = torch.clamp(-exceed / buf * self.overlong_penalty_factor, max=0.0)
                     rewards = rewards + penalty
@@ -219,6 +168,10 @@ class RewardService(Remote):
 
     def dispose(self) -> None:
         self.backend.dispose()
+
+    def shutdown(self) -> None:
+        """Worker teardown hook: release backend sessions and managed children."""
+        self.dispose()
 
 
 __all__ = [

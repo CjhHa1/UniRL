@@ -8,8 +8,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from unirl.config.require import require
-from unirl.models.qwen3_omni.media import omni_processor_media_kwargs, prepare_omni_media
-from unirl.models.types.conversations import build_omni_messages
+from unirl.models.qwen3_omni.media import build_omni_messages, omni_processor_media_kwargs, prepare_omni_media
 from unirl.rollout.engine.vllm_omni.adapters.base import ModelAdapter, register_adapter
 from unirl.rollout.engine.vllm_omni.adapters.hi3 import Hi3TextOutputAdapter
 from unirl.rollout.engine.vllm_omni.backends import (
@@ -38,12 +37,7 @@ def _compress_qwen3_omni_prompt_ids(
     audio_eos_token_id: int,
     use_audio_in_video: bool,
 ) -> List[int]:
-    """Undo HF multimodal expansion before vLLM processes the raw media.
-
-    This mirrors vLLM's
-    ``Qwen3OmniMoeThinkerMultiModalProcessor._get_raw_input_ids``. Replay
-    keeps the original expanded IDs; only the IDs sent to vLLM are compressed.
-    """
+    """Undo HF multimodal expansion before vLLM processes the raw media."""
     result = list(token_ids)
     if use_audio_in_video:
         while True:
@@ -256,7 +250,7 @@ class Qwen3OmniThinkerInputAdapter:
         ar = frontier.sampling_params
         assert isinstance(ar, ARSamplingParams)
 
-        chat_overrides = dict((sample.parts[0].control or {}).get("chat") or {})
+        chat_overrides = dict(sample.parts[0].control.get("chat") or {})
         system_instruction = chat_overrides.get("system_instruction", self.system_instruction)
         template_overrides = dict(chat_overrides.get("template_kwargs") or {})
         conversations = build_omni_messages(
@@ -502,7 +496,6 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
     """Qwen3-Omni Thinker — text/video → AR text (single stage, TP>1, LoRA)."""
 
     stage_yaml = "qwen3_omni_thinker_only_rl_1x4.yaml"
-    stage_yaml_source = "local"
     omni_mode = None
     needs_sigmas = False
     needs_driver_tokenizer = False

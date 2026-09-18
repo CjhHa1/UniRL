@@ -1,18 +1,4 @@
-"""i2t — image-to-text autoregressive generation.
-
-Reads ``primitives["text"]: Texts`` (the prompt) and
-``primitives["image"]: Images`` (the image to caption / answer about),
-plus ``stage_params["ar"]: dict`` (optional). Builds chat-templated
-``input_ids`` with embedded ``<img>`` markers via the chat-template
-wrapper, then runs ``HunyuanImage3ARStage.autoregress`` against the
-backbone in ``mode="gen_text"`` -- the unified MM forward scatters
-ViT patch embeddings into the prompt's ``<img>`` slots via
-``instantiate_vit_image_tokens``.
-
-Conditions on the response carry the chat-templated ``input_ids`` plus
-the ``cond_vit_*`` / ``vit_kwargs`` tensors that drove the ViT-tokens
-scatter.
-"""
+"""i2t — image-to-text autoregressive generation."""
 
 from __future__ import annotations
 
@@ -52,7 +38,7 @@ def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
             "HunyuanImage3Pipeline.generate (i2t): expected a chained Images input in sample.conditioning(), found none"
         )
 
-    model_cfg: Dict[str, Any] = dict((sample.parts[0].control or {}).get("ar") or {})
+    model_cfg: Dict[str, Any] = dict(sample.parts[0].control.get("ar") or {})
     ar_params = HunyuanImage3ARParams(
         max_tokens=ar.max_new_tokens if ar is not None else model_cfg.get("max_tokens", 2048),
         temperature=ar.temperature if ar is not None else model_cfg.get("temperature", 0.6),

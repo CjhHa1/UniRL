@@ -2,7 +2,7 @@
 # Qwen3-8B LoRA SFT on multi-turn tool-calling trajectories.
 #
 # Prepare:
-#   python -m unirl.utils.prepare_sft_agent \
+#   python datasets/sft_manifests/prepare_sft_agent.py \
 #     --out-dir datasets/sft_agent_toolcall_12k
 #
 # Launch (1x8):
@@ -100,6 +100,6 @@ track_builder:
 
 data_source:
   _target_: unirl.data.sft.SupervisedDataSource
-  manifest_path: ${oc.env:SFT_DATA,datasets/sft_agent_toolcall_12k/train.jsonl}
+  train_manifest_path: ${oc.env:SFT_DATA,datasets/sft_agent_toolcall_12k/train.jsonl}
   eval_manifest_path: ${oc.env:SFT_EVAL_DATA,datasets/sft_agent_toolcall_12k/val.jsonl}
   seed: 42

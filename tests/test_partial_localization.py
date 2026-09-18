@@ -5,10 +5,11 @@ import torch
 
 import unirl.distributed.group.handle as handle_module
 from unirl.distributed.group.dispatch import Dispatch, remap_required_store_keys, required_store_keys
-from unirl.distributed.group.handle import Handle
+from unirl.distributed.group.handle import Handle, PendingHandleCall
 from unirl.distributed.group.worker import Worker
 from unirl.distributed.tensor import TensorRef, TensorSpan, TensorTransportRuntime
 from unirl.distributed.tensor.backend.gpu_store.handle import GPUTensorHandle
+from unirl.distributed.tensor.ref import ref_is_required
 from unirl.distributed.tensor.worker_local import WorkerLocalTransport
 
 
@@ -35,6 +36,26 @@ def _ref(key: str, *, source_id: str = "dw0") -> TensorRef:
         device="cuda:0",
     )
     return TensorRef(spans=[TensorSpan(handle, 0, 1)], shape=(1,), dtype=torch.float32, device="cuda:0")
+
+
+class _ObjectRef:
+    def __init__(self, key: bytes) -> None:
+        self.key = key
+
+    def binary(self) -> bytes:
+        return self.key
+
+
+def _plasma_ref(key: bytes) -> TensorRef:
+    handle = GPUTensorHandle(
+        store_key=None,
+        source_id="dw0",
+        shape=(1,),
+        dtype=torch.float32,
+        device="cpu",
+        object_ref=_ObjectRef(key),
+    )
+    return TensorRef(spans=[TensorSpan(handle, 0, 1)], shape=(1,), dtype=torch.float32, device="cpu")
 
 
 def _partial_config(*, reads=None, skips=None) -> dict:
@@ -77,6 +98,20 @@ def test_remap_preserves_requiredness_for_same_key_views() -> None:
     assert remapped == {"first", "second"}
 
 
+def test_required_store_keys_distinguishes_plasma_refs() -> None:
+    selected = _plasma_ref(b"selected")
+    skipped = _plasma_ref(b"skipped")
+
+    required = required_store_keys(
+        _partial_config(reads=lambda first, second: first),
+        (selected, skipped),
+        {},
+    )
+
+    assert ref_is_required(selected, required)
+    assert not ref_is_required(skipped, required)
+
+
 def test_launch_call_sends_post_localization_store_keys() -> None:
     class MovingTransport(WorkerLocalTransport):
         @classmethod
@@ -92,14 +127,14 @@ def test_launch_call_sends_post_localization_store_keys() -> None:
         return ["rpc-ref"]
 
     handle = object.__new__(Handle)
-    handle.pool = SimpleNamespace(transport_cls=MovingTransport)
+    handle.pool = SimpleNamespace(transport_cls=MovingTransport, assert_usable=lambda: None)
     handle.device_ids = [0]
     handle.worker_ids = ["dw0"]
     handle.rank_infos = []
     handle.world_size = 1
     source = _ref("source", source_id="dw1")
 
-    refs, worker_local, passthrough = handle._launch_call(
+    refs, worker_local, leases, passthrough = handle._launch_call(
         "method",
         Dispatch.BROADCAST,
         lambda *_: [((source,), {})],
@@ -113,6 +148,7 @@ def test_launch_call_sends_post_localization_store_keys() -> None:
 
     assert refs == ["rpc-ref"]
     assert worker_local is True
+    assert leases[0][0][0].spans[0].handle.store_key == "destination"
     assert set(passthrough) == {"destination"}
     assert passthrough["destination"].store_key == "destination"
     assert captured["required"] == [{"destination"}]
@@ -148,14 +184,50 @@ def test_worker_uses_controller_mask_without_recomputing_selector() -> None:
     assert result == (True, True)
 
 
+def test_worker_does_not_fetch_unselected_plasma_ref() -> None:
+    selected = _plasma_ref(b"selected")
+    skipped = _plasma_ref(b"skipped")
+    required = required_store_keys(
+        _partial_config(reads=lambda first, second: first),
+        (selected, skipped),
+        {},
+    )
+    fetched_metas = {}
+
+    class FakeTransport:
+        def get_batch(self, metas):
+            fetched_metas.update(metas)
+            return {key: torch.ones(1) for key in metas}
+
+        def put_batch(self, tensors):
+            assert tensors == {}
+            return {}
+
+    class Role:
+        def inspect(self, required_value, passthrough_value):
+            return isinstance(required_value, torch.Tensor), isinstance(passthrough_value, TensorRef)
+
+    worker = object.__new__(Worker)
+    worker._init_local(transport=FakeTransport())
+    worker._roles["role"] = Role()
+    try:
+        result = worker.call("role", "inspect", (selected, skipped), {}, required=required)
+    finally:
+        TensorTransportRuntime.clear_current()
+
+    assert result == (True, True)
+    assert list(fetched_metas.values()) == [selected]
+
+
 def test_rebind_validates_all_results_before_mutating(monkeypatch) -> None:
     first = _ref("first", source_id="dw0")
     foreign = _ref("foreign", source_id="dw2")
     handle = object.__new__(Handle)
     handle.pool = _Pool()
+    handle.role_name = "role"
     handle.workers = [object(), object()]
     handle.worker_ids = ["dw0_s1", "dw1"]
-    monkeypatch.setattr(handle_module.ray, "get", lambda refs, timeout=None: refs)
+    monkeypatch.setattr(handle_module, "get_actor_results", lambda refs, **_: refs)
 
     with pytest.raises(RuntimeError, match="returned a ref owned by 'dw2'"):
         handle._resolve_call(
@@ -173,9 +245,10 @@ def test_rebind_accepts_same_device_gpu_store_handle(monkeypatch) -> None:
     worker_handle = object()
     handle = object.__new__(Handle)
     handle.pool = _Pool()
+    handle.role_name = "role"
     handle.workers = [worker_handle]
     handle.worker_ids = ["dw0_s1"]
-    monkeypatch.setattr(handle_module.ray, "get", lambda refs, timeout=None: refs)
+    monkeypatch.setattr(handle_module, "get_actor_results", lambda refs, **_: refs)
 
     resolved = handle._resolve_call(
         lambda _, results: results[0],
@@ -201,3 +274,23 @@ def test_passthrough_restore_reuses_original_handle() -> None:
 
     assert restored.spans[0].handle is original.spans[0].handle
     assert returned_copy.spans[0].handle._finalized is False
+
+
+def test_pending_result_releases_argument_leases() -> None:
+    class FakeHandle:
+        def _resolve_call(self, collect_fn, refs, **kwargs):
+            return collect_fn(self, refs)
+
+    pending = PendingHandleCall(
+        FakeHandle(),
+        "method",
+        ["done"],
+        worker_local=True,
+        passthrough={"input": object()},
+        collect_fn=lambda _, results: results[0],
+        leases=[object()],
+    )
+
+    assert pending.result() == "done"
+    assert pending._passthrough is None
+    assert pending._leases is None

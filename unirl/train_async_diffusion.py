@@ -1,24 +1,5 @@
 #!/usr/bin/env python
-"""UniRL async diffusion training entry point (Hydra-native).
-
-Sibling of ``train_diffusion.py`` that drives
-:class:`unirl.trainer.async_diffusion.AsyncDiffusionTrainer` — the disaggregated,
-async variant of the diffusion path (training and rollout on DISJOINT GPU slabs,
-generation overlapped with training, reward scored synchronously at reap time
-rather than overlapped, weights pushed via cross-slab weight sync). The synchronous
-diffusion trainer is unchanged.
-
-Launch (single node):
-  BAGEL_PATH=/path/to/BAGEL-7B-MoT \
-  python -m unirl.train_async_diffusion \
-    --config-name=diffusion/bagel/bagel_vllmomni_async num_devices=8
-
-Extra config knobs vs the synchronous separate recipe:
-  * ``max_inflight`` — must be ``1``; other values fail during trainer initialization.
-  * ``weight_sync_interval`` — trained batches between publications; also derives
-    the default output-version lag filter.
-``layout`` is forced to ``separate`` (async needs disjoint train/rollout slabs).
-"""
+"""UniRL async diffusion training entry point (Hydra-native)."""
 
 from __future__ import annotations
 
@@ -62,8 +43,9 @@ def main(cfg: DictConfig) -> None:
         # Any DiffusionSamplingParams field; everything it omits inherits `sampling`.
         eval_sampling_cfg=cfg.get("eval_sampling"),
         eval_rewards_cfg=cfg.get("eval_rewards"),
-        task_config=cfg.get("task_config"),
+        control=cfg.get("control"),
         max_inflight=int(cfg.get("max_inflight", 1)),
+        per_worker_inflight=int(cfg.get("per_worker_inflight", 1)),
         weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
     )
     trainer.train(

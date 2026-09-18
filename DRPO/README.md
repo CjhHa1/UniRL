@@ -146,16 +146,16 @@ Unlike FlowGRPO/FlowDPPO, `DRPO` does **not** freeze a train-side `old_logp` in
 | Knob | Meaning |
 |---|---|
 | `drpo_epsilon` | Regularization threshold `ε` (code) / `δ` (paper). Default `12.5` (paper §4). Larger ⇒ weaker regularization; per-token trust region is `ε_t = ε / µ`. |
-| `sampling_temperature` | **MUST equal `sampling.temperature`** (and the rollout engine's). Replay tempers logits so `π` and `µ` share a distribution (`ratio_mean ≈ 1`). |
+| `sampling_temperature` | **MUST equal `sampling.temperature`**. Replay tempers logits so `π` and `µ` share a distribution (`ratio_mean ≈ 1`). |
 | `loss_agg_mode` | `token-mean`, or the recipe's `seq-mean-token-sum-norm`. |
-| `horizon` | Fixed normalizer for `seq-mean-token-sum-norm`; recipe `8192`. |
+| `horizon` | Fixed normalizer for `seq-mean-token-sum-norm`; the recipe derives it from `${sampling.max_new_tokens}`. |
 | `normalize_adv_by_std` | Recipe `false` → mean-center only (no std division). |
 
 ## Debug checklist
 
 | Symptom | First files / variables to check |
 |---|---|
-| `ratio_mean` far from 1 at first update | `sampling_temperature` vs. `sampling.temperature` vs. rollout `temperature`; SGLang logprob config |
+| `ratio_mean` far from 1 at first update | `sampling_temperature` vs. `sampling.temperature`; SGLang logprob config |
 | Large `rollout_replay_logp_absdiff_mean` | train/rollout mismatch, weight sync, tokenization/chat-template mismatch |
 | No gradient on many tokens | `segment.loss_mask`; zero advantages from all-correct/all-wrong groups |
 | `drpo_penalty_mean` very large | `drpo_epsilon` too small for the model's off-policy gap |
@@ -170,7 +170,7 @@ emitted by `_drpo_loss`.
 
 ```bash
 # one-time: build the local jsonl from the raw DAPO-Math + AIME datasets
-python -m unirl.utils.prepare_dapo_math --out-dir data/dapo_math
+python datasets/dapo_math/prepare_dapo_math.py --out-dir data/dapo_math
 
 DATA_PATH=data/dapo_math/train.jsonl EVAL_DATA_PATH=data/dapo_math/aime_eval.jsonl \
 python -m unirl.train_ar --config-name=ar/qwen3_drpo_4b_base_dapo_sglang num_devices=64
