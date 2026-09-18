@@ -349,6 +349,9 @@ class BagelPipeline(Pipeline):
         segments: List[LatentSegment] = []
         for start in range(0, len(contexts), self.forward_batch_size):
             end = min(start + self.forward_batch_size, len(contexts))
+            initial_chunk = None
+            if initial is not None:
+                initial_chunk = initial[start:end] if end - start > 1 else initial[start]
             condition = BagelDiffusionConditions(
                 gen_contexts=gen_list[start:end],
                 cfg_text_contexts=cfg_text_list[start:end],
@@ -362,7 +365,7 @@ class BagelPipeline(Pipeline):
                     condition,
                     schedule=schedule,
                     params=params,
-                    initial_latents=initial[start:end] if initial is not None else None,
+                    initial_latents=initial_chunk,
                 )
             )
 
