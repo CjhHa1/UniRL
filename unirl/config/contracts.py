@@ -223,9 +223,10 @@ class RecipeFacts:
     syncs: tuple[Block, ...]
     has_sync_section: bool
     has_layout: bool
+    layout_is_dynamic: bool
     layout: Optional[str]
     offload: Optional[bool]
-    rollout_anchor_device: Optional[int]
+    rollout_anchor_device: Any
     freeze_llm: bool
     samplings: tuple[Block, ...]
     rollout_backend: Optional[str]
@@ -246,17 +247,6 @@ class RecipeFacts:
         raw_layout = _get(cfg, "layout")
         offload = _get(cfg, "enable_fsdp_offload")
         raw_anchor = _get(cfg, "rollout_anchor_device")
-        anchor = None
-        if raw_anchor is not None:
-            require(
-                not isinstance(raw_anchor, bool) and isinstance(raw_anchor, (int, str)),
-                f"cfg.rollout_anchor_device must be a positive integer; got {raw_anchor!r}.",
-            )
-            try:
-                anchor = int(raw_anchor)
-            except ValueError as exc:
-                raise ValueError(f"cfg.rollout_anchor_device must be a positive integer; got {raw_anchor!r}.") from exc
-            require(anchor > 0, f"cfg.rollout_anchor_device must be positive; got {anchor}.")
         raw_backend = _get_path(cfg, "rollout.config.backend")
         return cls(
             engines=engines,
@@ -264,12 +254,15 @@ class RecipeFacts:
             syncs=tuple(_read_sync_blocks(sync_section)),
             has_sync_section=sync_section is not None,
             has_layout=_has(cfg, "layout"),
-            layout=None if raw_layout is None else str(raw_layout),
-            offload=None if offload is None else bool(offload),
-            rollout_anchor_device=anchor,
+            layout_is_dynamic=_is_interpolation(raw_layout),
+            layout=None if raw_layout is None or _is_interpolation(raw_layout) else str(raw_layout),
+            offload=None if offload is None or _is_interpolation(offload) else bool(offload),
+            rollout_anchor_device=raw_anchor,
             freeze_llm=bool(_get(cfg, "freeze_llm")),
             samplings=tuple(_read_sampling_blocks(_get(cfg, "sampling"))),
-            rollout_backend=None if raw_backend is None else str(raw_backend).strip().lower(),
+            rollout_backend=(
+                None if raw_backend is None or _is_interpolation(raw_backend) else str(raw_backend).strip().lower()
+            ),
             rollout_dp_size=_get_path(cfg, "rollout.config.dp_size"),
             rollout_engine_kwargs=_get_path(cfg, "rollout.config.engine_kwargs"),
         )
@@ -296,6 +289,10 @@ def _get(cfg: Any, key: str) -> Any:
         return None
     getter = getattr(cfg, "get", None)
     return getter(key) if callable(getter) else None
+
+
+def _is_interpolation(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().startswith("${") and value.strip().endswith("}")
 
 
 def _has(cfg: Any, key: str) -> bool:
@@ -381,7 +378,7 @@ def _read_sync_blocks(sync_section: Any) -> list[Block]:
     return blocks
 
 
-def _effective_sync_topology(facts: RecipeFacts, entrypoint: str) -> str:
+def _effective_sync_topology(facts: RecipeFacts, entrypoint: str) -> Optional[str]:
     if entrypoint in (ENTRYPOINT_ASYNC_AR, ENTRYPOINT_ASYNC_DIFFUSION):
         return SYNC_REMOTE
     if entrypoint == ENTRYPOINT_AR and facts.rollout_anchor_device is not None:
@@ -392,6 +389,8 @@ def _effective_sync_topology(facts: RecipeFacts, entrypoint: str) -> str:
     }:
         return SYNC_REMOTE
     if entrypoint == ENTRYPOINT_DIFFUSION:
+        if facts.layout_is_dynamic:
+            return None
         return SYNC_REMOTE if facts.layout == "separate" else SYNC_LOCAL
     return SYNC_LOCAL
 
@@ -472,9 +471,6 @@ def _validate_handler_topology(facts: RecipeFacts, *, entrypoint: str) -> None:
                 sync.class_name == "RemoteLoraWeightSync",
                 "anchored train_ar rollout supports only RemoteLoraWeightSync.",
             )
-            rollout = next(block for block in facts.engines if block.path == "rollout")
-            if engine_family_name(rollout.target) == "vllm_omni":
-                require(sync.copy is True, "anchored vLLM-Omni rollout requires cfg.sync.copy=true.")
         if entrypoint == ENTRYPOINT_UNIFIED and len(facts.engines) == 2:
             require(
                 sync.class_name == "RemoteLoraWeightSync",
@@ -487,7 +483,7 @@ def _validate_handler_topology(facts: RecipeFacts, *, entrypoint: str) -> None:
         if handler is None:
             continue
         require(
-            handler.topology == topology,
+            topology is None or handler.topology == topology,
             f"cfg.{sync.path}={sync.class_name} is a {handler.topology}-engine handler, but "
             f"{entrypoint} wires rollout through the {topology} boundary.",
         )
@@ -512,10 +508,6 @@ def validate_sampling_contract(cfg: Any, *, entrypoint: str) -> None:
     if top_level:
         require(len(top_level) == 1, "cfg.sampling must declare exactly one top-level _target_.")
         expected = ENTRYPOINT_SAMPLING_DOMAINS.get(entrypoint)
-        if entrypoint == ENTRYPOINT_UNIFIED:
-            paths = {block.path for block in facts.engines}
-            require(paths == {"rollout"}, "split train_unified_model requires ar and diffusion sampling tracks.")
-            expected = SAMPLING_DIFFUSION
         require(expected is not None, f"{entrypoint} requires modality-keyed cfg.sampling tracks.")
         actual = _sampling_domain(top_level[0].target)
         require(
@@ -524,12 +516,14 @@ def validate_sampling_contract(cfg: Any, *, entrypoint: str) -> None:
         )
         return
 
+    if entrypoint == ENTRYPOINT_AGENTIC:
+        raise ValueError("train_agentic requires a top-level cfg.sampling._target_, not modality-keyed tracks.")
+
     expected_tracks = {
         ENTRYPOINT_AR: {SAMPLING_AR},
         ENTRYPOINT_ASYNC_AR: {SAMPLING_AR},
         ENTRYPOINT_DIFFUSION: {SAMPLING_DIFFUSION},
         ENTRYPOINT_ASYNC_DIFFUSION: {SAMPLING_DIFFUSION},
-        ENTRYPOINT_AGENTIC: {SAMPLING_AR},
         ENTRYPOINT_PE: {SAMPLING_AR, SAMPLING_DIFFUSION},
         ENTRYPOINT_UNIFIED: {SAMPLING_AR, SAMPLING_DIFFUSION},
     }[entrypoint]
@@ -550,8 +544,26 @@ def validate_weight_sync_contract(cfg: Any, *, entrypoint: str) -> None:
     """Validate sampling mode, handler shape, topology, and receiver capabilities."""
     facts = RecipeFacts.from_cfg(cfg)
     _validate_engine_shape(facts, entrypoint=entrypoint)
+    anchor = facts.rollout_anchor_device
+    if entrypoint != ENTRYPOINT_AR:
+        require(anchor is None, f"{entrypoint} does not consume cfg.rollout_anchor_device; remove it.")
+    elif anchor is not None:
+        if _is_interpolation(anchor):
+            pass
+        else:
+            require(
+                not isinstance(anchor, bool) and isinstance(anchor, (int, str)),
+                f"cfg.rollout_anchor_device must be a positive integer; got {anchor!r}.",
+            )
+            try:
+                normalized_anchor = int(anchor)
+            except ValueError as exc:
+                raise ValueError(f"cfg.rollout_anchor_device must be a positive integer; got {anchor!r}.") from exc
+            require(normalized_anchor > 0, f"cfg.rollout_anchor_device must be positive; got {normalized_anchor}.")
     families = facts.families()
     if not families:
+        if not facts.engines:
+            require(not facts.has_sync_section, f"{entrypoint} does not consume cfg.sync; remove it.")
         return
     for block, family in families:
         require(
@@ -607,8 +619,8 @@ def validate_weight_sync_contract(cfg: Any, *, entrypoint: str) -> None:
             if server_dp is None:
                 server_dp = _get(facts.rollout_engine_kwargs, "dp_size")
             require(
-                server_dp is None or int(server_dp) == 1,
-                f"CkptEngineIPCWeightSync requires SGLang server dp_size=1; got {server_dp!r}.",
+                server_dp is None or _is_interpolation(server_dp) or (type(server_dp) is int and server_dp == 1),
+                f"CkptEngineIPCWeightSync requires integer SGLang server dp_size=1; got {server_dp!r}.",
             )
             engine_kwargs = facts.rollout_engine_kwargs
             keys = engine_kwargs.keys() if hasattr(engine_kwargs, "keys") else ()
@@ -617,6 +629,7 @@ def validate_weight_sync_contract(cfg: Any, *, entrypoint: str) -> None:
                 for key in keys
                 if str(key).startswith("speculative")
                 and (value := _get(engine_kwargs, key))
+                and not _is_interpolation(value)
                 and (not isinstance(value, str) or value.strip().lower() != "none")
             ]
             require(
@@ -639,13 +652,15 @@ def validate_weight_sync_contract(cfg: Any, *, entrypoint: str) -> None:
 def validate_rollout_layout(cfg: Any, *, entrypoint: str) -> None:
     """Validate rollout layout values only where the selected entrypoint consumes them."""
     facts = RecipeFacts.from_cfg(cfg)
+    if entrypoint not in LAYOUT_ENTRYPOINTS:
+        require(not facts.has_layout, f"{entrypoint} does not consume cfg.layout; remove it.")
     if facts.has_layout:
+        if facts.layout_is_dynamic:
+            return
         require(
             facts.layout is not None and facts.layout in LAYOUTS,
             f"cfg.layout={facts.layout!r} is invalid; expected one of {list(LAYOUTS)}.",
         )
-    if entrypoint not in LAYOUT_ENTRYPOINTS:
-        require(facts.layout is None, f"{entrypoint} does not consume cfg.layout; remove it.")
 
     if entrypoint == ENTRYPOINT_ASYNC_DIFFUSION:
         effective = "separate"
@@ -697,35 +712,11 @@ def _describe(blocks: tuple[Block, ...]) -> str:
 
 
 __all__ = [
-    "Block",
-    "CONTRACTS",
     "ENGINE_CAPABILITY_METHODS",
     "ENGINE_FAMILIES",
-    "ENGINE_PACKAGE",
-    "ENGINE_SECTIONS",
-    "ENGINE_SHUTDOWN",
-    "EngineFamily",
     "KNOWN_ENTRYPOINTS",
-    "LAYOUTS",
-    "RecipeFacts",
     "SYNC_HANDLERS",
-    "SYNC_MARK_CHECKPOINT_ENGINE_FAILURE",
-    "SYNC_VIA_CHECKPOINT",
-    "SYNC_VIA_CHECKPOINT_ENGINE_IPC",
-    "SYNC_VIA_IPC",
-    "SYNC_VIA_LORA",
-    "SYNC_VIA_LORA_COPY",
-    "SYNC_VIA_NCCL",
-    "SYNC_VIA_NCCL_UPDATE",
-    "SYNC_VIA_TENSOR",
-    "SYNC_VERIFY_LORA",
-    "SYNC_VERIFY_TOPOLOGY",
-    "SyncHandler",
-    "engine_family",
-    "engine_family_name",
-    "validate_offload_contract",
+    "SYNC_LOCAL",
+    "SYNC_REMOTE",
     "validate_recipe",
-    "validate_rollout_layout",
-    "validate_sampling_contract",
-    "validate_weight_sync_contract",
 ]

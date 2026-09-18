@@ -12,9 +12,12 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SCAN_DIRS = ["examples", "CPPO", "DRPO", "FlowDPPO"]
+SCAN_DIRS = ["examples"]
 ENGINE_ROOT = ROOT / "unirl" / "rollout" / "engine"
-NON_RECIPE_CONFIGS = frozenset({"FlowDPPO/config.yaml"})
+ENTRYPOINT_OVERRIDES = {
+    "examples/unified_model/hi3_it2i.yaml": "train_diffusion",
+    "examples/unified_model/hi3_trainside_t2i.yaml": "train_diffusion",
+}
 
 
 def _load_contracts() -> types.ModuleType:
@@ -84,10 +87,8 @@ def _load_recipe(path: Path, stack: tuple[Path, ...] = ()) -> dict:
 def _entrypoint_for(path: Path) -> str | None:
     """Infer the repository entrypoint that owns one shipped recipe."""
     rel = path.relative_to(ROOT)
-    if rel.parts[0] in ("CPPO", "DRPO"):
-        return "train_ar"
-    if rel.parts[0] == "FlowDPPO":
-        return "train_diffusion"
+    if override := ENTRYPOINT_OVERRIDES.get(rel.as_posix()):
+        return override
     if rel.parts[0] != "examples" or len(rel.parts) < 3:
         return None
     domain = rel.parts[1]
@@ -107,15 +108,14 @@ def check_recipes() -> tuple[list[str], int]:
     """Run the runtime gate over every shipped training recipe."""
     failures: list[str] = []
     checked = 0
+    unseen_overrides = set(ENTRYPOINT_OVERRIDES)
     for scan_dir in SCAN_DIRS:
         for path in sorted((ROOT / scan_dir).rglob("*.y*ml")):
-            relative = path.relative_to(ROOT)
-            if relative.as_posix() in NON_RECIPE_CONFIGS:
-                continue
+            unseen_overrides.discard(path.relative_to(ROOT).as_posix())
             try:
                 recipe = _load_recipe(path)
             except ValueError as exc:
-                failures.append(str(exc))
+                failures.append(f"{path.relative_to(ROOT)}: {exc}")
                 continue
             entrypoint = _entrypoint_for(path)
             if entrypoint is None:
@@ -126,9 +126,7 @@ def check_recipes() -> tuple[list[str], int]:
                 contracts.validate_recipe(recipe, entrypoint=entrypoint)
             except ValueError as exc:
                 failures.append(f"{path.relative_to(ROOT)}: {exc}")
-    for relative in sorted(NON_RECIPE_CONFIGS):
-        if not (ROOT / relative).is_file():
-            failures.append(f"NON_RECIPE_CONFIGS declares missing path {relative}")
+    failures.extend(f"ENTRYPOINT_OVERRIDES declares missing path {path}" for path in sorted(unseen_overrides))
     return failures, checked
 
 
@@ -200,6 +198,9 @@ def check_sync_handlers() -> list[str]:
         return ["SYNC_HANDLER_FILES and SYNC_HANDLERS must declare identical handler classes"]
     for name, relative in SYNC_HANDLER_FILES.items():
         path = ROOT / relative
+        if not path.is_file():
+            failures.append(f"{relative} is missing")
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         cls = next((node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == name), None)
         if cls is None:
@@ -396,6 +397,46 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
             "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
         },
     ),
+    "checkpoint-engine IPC with string server DP": (
+        "train_ar",
+        {
+            "rollout": {
+                "_target_": SGLANG,
+                "config": {"_target_": SGLANG_CONFIG, "engine_kwargs": {"dp_size": "1"}},
+            },
+            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
+        },
+    ),
+    "checkpoint-engine IPC with boolean server DP": (
+        "train_ar",
+        {
+            "rollout": {
+                "_target_": SGLANG,
+                "config": {"_target_": SGLANG_CONFIG, "engine_kwargs": {"dp_size": True}},
+            },
+            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
+        },
+    ),
+    "checkpoint-engine IPC with floating server DP": (
+        "train_ar",
+        {
+            "rollout": {
+                "_target_": SGLANG,
+                "config": {"_target_": SGLANG_CONFIG, "engine_kwargs": {"dp_size": 1.0}},
+            },
+            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
+        },
+    ),
+    "checkpoint-engine IPC with list server DP": (
+        "train_ar",
+        {
+            "rollout": {
+                "_target_": SGLANG,
+                "config": {"_target_": SGLANG_CONFIG, "engine_kwargs": {"dp_size": [1]}},
+            },
+            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
+        },
+    ),
     "falsey layout": (
         "train_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": TENSOR_SYNC}, "layout": False},
@@ -550,14 +591,6 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_ar",
         {"rollout": {"_target_": TRAINSIDE}, "rollout_anchor_device": 1},
     ),
-    "anchored vLLM-Omni without copy": (
-        "train_ar",
-        {
-            "rollout": {"_target_": VLLM_OMNI},
-            "sync": {"_target_": REMOTE_LORA_SYNC},
-            "rollout_anchor_device": 1,
-        },
-    ),
     "negative rollout anchor": (
         "train_ar",
         {
@@ -601,6 +634,14 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
             "sync": {"_target_": LOCAL_LORA_SYNC},
         },
     ),
+    "agentic namespaced sampling": (
+        "train_agentic",
+        {
+            "sampling": {"ar": {"_target_": AR_SAMPLING}},
+            "rollout": {"_target_": AGENTIC, "config": {"inner": {"_target_": SGLANG_CONFIG}}},
+            "sync": {"_target_": TENSOR_SYNC},
+        },
+    ),
     "swapped PE sampling tracks": (
         "train_pe",
         {
@@ -627,6 +668,35 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
             "sync": {"_target_": REMOTE_LORA_SYNC, "copy": True},
         },
     ),
+    "unified diffusion-only sampling": (
+        "train_unified_model",
+        {
+            "sampling": {"diffusion": {"_target_": DIFFUSION_SAMPLING}},
+            "rollout": {"_target_": TRAINSIDE},
+        },
+    ),
+    "SFT with dead sync": (
+        "train_sft",
+        {
+            "bundle": {"_target_": "unirl.models.sd3.bundle.SD3Bundle"},
+            "sync": {"_target_": TENSOR_SYNC},
+        },
+    ),
+    "diffusion with dead rollout anchor": (
+        "train_diffusion",
+        {
+            "rollout": {"_target_": TRAINSIDE},
+            "rollout_anchor_device": 1,
+        },
+    ),
+    "AR with dynamic dead layout": (
+        "train_ar",
+        {
+            "rollout": {"_target_": SGLANG},
+            "sync": {"_target_": TENSOR_SYNC},
+            "layout": "${oc.env:LAYOUT,colocate}",
+        },
+    ),
 }
 
 MUST_ACCEPT: dict[str, tuple[str, dict]] = {
@@ -634,6 +704,13 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     "direct sampling declines offload": (
         "train_diffusion",
         {"rollout": {"_target_": TRAINSIDE}, "enable_fsdp_offload": False},
+    ),
+    "dynamic direct-sampling offload": (
+        "train_diffusion",
+        {
+            "rollout": {"_target_": TRAINSIDE},
+            "enable_fsdp_offload": "${oc.env:OFFLOAD,false}",
+        },
     ),
     "separate diffusion with NCCL": (
         "train_diffusion",
@@ -646,6 +723,19 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     "checkpoint-engine IPC on SGLang": (
         "train_ar",
         {"rollout": {"_target_": SGLANG}, "sync": {"_target_": CKPT_ENGINE_IPC_SYNC}},
+    ),
+    "checkpoint-engine IPC with dynamic server DP": (
+        "train_ar",
+        {
+            "rollout": {
+                "_target_": SGLANG,
+                "config": {
+                    "_target_": SGLANG_CONFIG,
+                    "engine_kwargs": {"dp_size": "${oc.env:SGLANG_DP,1}"},
+                },
+            },
+            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
+        },
     ),
     "two vLLM unified engines": (
         "train_unified_model",
@@ -681,6 +771,14 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
             "rollout_anchor_device": 1,
         },
     ),
+    "dynamic anchored AR remote LoRA": (
+        "train_ar",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": REMOTE_LORA_SYNC},
+            "rollout_anchor_device": "${oc.env:ANCHOR,1}",
+        },
+    ),
     "async AR NCCL": (
         "train_async_ar",
         {"rollout": {"_target_": SGLANG}, "sync": {"_target_": NCCL_SYNC}},
@@ -701,6 +799,14 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
         "train_diffusion",
         {
             "sampling": {"diffusion": {"_target_": DIFFUSION_SAMPLING}},
+            "rollout": {"_target_": SGLANG_DIFFUSION},
+            "sync": {"_target_": TENSOR_SYNC},
+        },
+    ),
+    "dynamic diffusion layout": (
+        "train_diffusion",
+        {
+            "layout": "${oc.env:LAYOUT,colocate}",
             "rollout": {"_target_": SGLANG_DIFFUSION},
             "sync": {"_target_": TENSOR_SYNC},
         },
