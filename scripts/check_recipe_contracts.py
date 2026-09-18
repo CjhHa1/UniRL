@@ -14,6 +14,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_DIRS = ["examples", "CPPO", "DRPO", "FlowDPPO"]
 ENGINE_ROOT = ROOT / "unirl" / "rollout" / "engine"
+NON_RECIPE_CONFIGS = frozenset({"FlowDPPO/config.yaml"})
 
 
 def _load_contracts() -> types.ModuleType:
@@ -45,14 +46,14 @@ def _merge(base: dict, override: dict) -> dict:
     return merged
 
 
-def _load_recipe(path: Path) -> dict | None:
+def _load_recipe(path: Path) -> dict:
     """Load the local string-only defaults form used by shipped composed recipes."""
     try:
         recipe = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError:
-        return None
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path.relative_to(ROOT)}: invalid YAML: {exc}") from exc
     if not isinstance(recipe, dict):
-        return None
+        raise ValueError(f"{path.relative_to(ROOT)}: recipe must be a mapping")
     defaults = recipe.pop("defaults", None)
     if defaults is None:
         return recipe
@@ -69,8 +70,6 @@ def _load_recipe(path: Path) -> dict | None:
             raise ValueError(f"{path.relative_to(ROOT)}: static contract composition supports string defaults only")
         parent = path.parent / f"{item}.yaml"
         parent_recipe = _load_recipe(parent)
-        if parent_recipe is None:
-            raise ValueError(f"{path.relative_to(ROOT)}: cannot load default {parent.relative_to(ROOT)}")
         merged = _merge(merged, parent_recipe)
     return merged if placed_self else _merge(merged, recipe)
 
@@ -103,24 +102,26 @@ def check_recipes() -> tuple[list[str], int]:
     checked = 0
     for scan_dir in SCAN_DIRS:
         for path in sorted((ROOT / scan_dir).rglob("*.y*ml")):
+            relative = path.relative_to(ROOT)
+            if relative.as_posix() in NON_RECIPE_CONFIGS:
+                continue
             try:
                 recipe = _load_recipe(path)
             except ValueError as exc:
                 failures.append(str(exc))
                 continue
-            if recipe is None:
-                continue
             entrypoint = _entrypoint_for(path)
             if entrypoint is None:
                 failures.append(f"{path.relative_to(ROOT)}: cannot infer the owning train_*.py entrypoint")
-                continue
-            if not contracts.RecipeFacts.from_cfg(recipe).engines and entrypoint != "train_sft":
                 continue
             checked += 1
             try:
                 contracts.validate_recipe(recipe, entrypoint=entrypoint)
             except ValueError as exc:
                 failures.append(f"{path.relative_to(ROOT)}: {exc}")
+    for relative in sorted(NON_RECIPE_CONFIGS):
+        if not (ROOT / relative).is_file():
+            failures.append(f"NON_RECIPE_CONFIGS declares missing path {relative}")
     return failures, checked
 
 
@@ -163,10 +164,10 @@ def check_engine_families() -> list[str]:
                 f"but {cls.name}.__init__ pipeline parameter says {actual_direct}"
             )
         defined = {node.name for node in cls.body if isinstance(node, ast.FunctionDef)}
-        actual_sync = frozenset(method for method in contracts.SYNC_RECEIVE_METHODS if method in defined)
-        if actual_sync != entry.weight_sync:
+        actual_sync = frozenset(method for method in contracts.ENGINE_SYNC_METHODS if method in defined)
+        if actual_sync != entry.sync_methods:
             failures.append(
-                f"ENGINE_FAMILIES[{family!r}].weight_sync={sorted(entry.weight_sync)}, "
+                f"ENGINE_FAMILIES[{family!r}].sync_methods={sorted(entry.sync_methods)}, "
                 f"but {cls.name} implements {sorted(actual_sync)}"
             )
     for family in sorted(declared):
@@ -181,6 +182,7 @@ SYNC_HANDLER_FILES = {
     "LocalLoraWeightSync": "unirl/distributed/weight_sync/lora/local.py",
     "RemoteLoraWeightSync": "unirl/distributed/weight_sync/lora/remote.py",
     "CheckpointWeightSync": "unirl/distributed/weight_sync/full/checkpoint.py",
+    "CkptEngineIPCWeightSync": "unirl/distributed/weight_sync/full/ckpt_engine_ipc.py",
 }
 
 
@@ -251,6 +253,17 @@ NCCL_SYNC = "unirl.distributed.weight_sync.full.nccl.NCCLWeightSync"
 LOCAL_LORA_SYNC = "unirl.distributed.weight_sync.lora.LocalLoraWeightSync"
 REMOTE_LORA_SYNC = "unirl.distributed.weight_sync.lora.RemoteLoraWeightSync"
 CHECKPOINT_SYNC = "unirl.distributed.weight_sync.full.checkpoint.CheckpointWeightSync"
+CKPT_ENGINE_IPC_SYNC = "unirl.distributed.weight_sync.full.ckpt_engine_ipc.CkptEngineIPCWeightSync"
+AR_SAMPLING = "unirl.types.sampling.ARSamplingParams"
+DIFFUSION_SAMPLING = "unirl.types.sampling.DiffusionSamplingParams"
+
+CASE_SAMPLING_TARGETS = {
+    "train_ar": AR_SAMPLING,
+    "train_async_ar": AR_SAMPLING,
+    "train_diffusion": DIFFUSION_SAMPLING,
+    "train_async_diffusion": DIFFUSION_SAMPLING,
+    "train_agentic": AR_SAMPLING,
+}
 
 
 def _composed_rollout() -> dict:
@@ -276,6 +289,46 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_diffusion",
         {"rollout": {"_target_": TRAINSIDE}, "layout": "separate"},
     ),
+    "direct sampling under async AR": ("train_async_ar", {"rollout": {"_target_": TRAINSIDE}}),
+    "AR SGLang under diffusion": (
+        "train_diffusion",
+        {"rollout": {"_target_": SGLANG}, "sync": {"_target_": TENSOR_SYNC}},
+    ),
+    "diffusion SGLang under AR": (
+        "train_ar",
+        {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": TENSOR_SYNC}},
+    ),
+    "FastVideo under AR": (
+        "train_ar",
+        {"rollout": {"_target_": FASTVIDEO}, "sync": {"_target_": CHECKPOINT_SYNC}},
+    ),
+    "composed PE engine under diffusion": (
+        "train_diffusion",
+        {"rollout": _composed_rollout(), "sync": {"_target_": TENSOR_SYNC}},
+    ),
+    "agentic engine under AR": (
+        "train_ar",
+        {
+            "rollout": {"_target_": AGENTIC, "config": {"inner": {"_target_": SGLANG_CONFIG}}},
+            "sync": {"_target_": TENSOR_SYNC},
+        },
+    ),
+    "AR sampling under diffusion with multi-domain engine": (
+        "train_diffusion",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": TENSOR_SYNC},
+            "sampling": {"_target_": AR_SAMPLING},
+        },
+    ),
+    "diffusion sampling under AR with multi-domain engine": (
+        "train_ar",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": TENSOR_SYNC},
+            "sampling": {"_target_": DIFFUSION_SAMPLING},
+        },
+    ),
     "dedicated engine without sync": ("train_diffusion", {"rollout": {"_target_": SGLANG_DIFFUSION}}),
     "handler-less sync section": (
         "train_diffusion",
@@ -292,6 +345,10 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
     "checkpoint sync on SGLang": (
         "train_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": CHECKPOINT_SYNC}},
+    ),
+    "checkpoint-engine IPC on vLLM-Omni": (
+        "train_ar",
+        {"rollout": {"_target_": VLLM_OMNI}, "sync": {"_target_": CKPT_ENGINE_IPC_SYNC}},
     ),
     "falsey layout": (
         "train_diffusion",
@@ -317,6 +374,20 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
             "layout": "separate",
         },
     ),
+    "copy option on tensor handler": (
+        "train_diffusion",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": TENSOR_SYNC, "copy": False},
+        },
+    ),
+    "LoRA verification on SGLang": (
+        "train_diffusion",
+        {
+            "rollout": {"_target_": SGLANG_DIFFUSION},
+            "sync": {"_target_": LOCAL_LORA_SYNC, "verify": True},
+        },
+    ),
     "mixed unified sampling modes": (
         "train_unified_model",
         {
@@ -332,6 +403,14 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
     "unified incomplete split engines": (
         "train_unified_model",
         {"ar_rollout": {"_target_": VLLM_OMNI}, "sync": {"_target_": REMOTE_LORA_SYNC}},
+    ),
+    "unified zero-copy LoRA": (
+        "train_unified_model",
+        {
+            "ar_rollout": {"_target_": VLLM_OMNI},
+            "dit_rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": REMOTE_LORA_SYNC},
+        },
     ),
     "PE missing AR sync": (
         "train_pe",
@@ -372,6 +451,18 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
             "rollout_anchor_device": 1,
         },
     ),
+    "anchored AR on rank zero": (
+        "train_ar",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": REMOTE_LORA_SYNC, "copy": True},
+            "rollout_anchor_device": 0,
+        },
+    ),
+    "anchored direct AR engine": (
+        "train_ar",
+        {"rollout": {"_target_": TRAINSIDE}, "rollout_anchor_device": 1},
+    ),
     "AR claims ignored layout": (
         "train_ar",
         {"rollout": {"_target_": SGLANG}, "sync": {"_target_": TENSOR_SYNC}, "layout": "separate"},
@@ -402,6 +493,10 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     "checkpoint sync on FastVideo": (
         "train_diffusion",
         {"rollout": {"_target_": FASTVIDEO}, "sync": {"_target_": CHECKPOINT_SYNC}},
+    ),
+    "checkpoint-engine IPC on SGLang": (
+        "train_ar",
+        {"rollout": {"_target_": SGLANG}, "sync": {"_target_": CKPT_ENGINE_IPC_SYNC}},
     ),
     "two vLLM unified engines": (
         "train_unified_model",
@@ -453,7 +548,14 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
         },
     ),
     "supervised recipe": ("train_sft", {"bundle": {"_target_": "unirl.models.sd3.bundle.SD3Bundle"}}),
-    "out-of-tree engine": ("train_diffusion", {"rollout": {"_target_": "acme.engines.MyEngine"}}),
+    "out-of-tree direct engine": ("train_diffusion", {"rollout": {"_target_": "acme.engines.MyEngine"}}),
+    "out-of-tree dedicated engine": (
+        "train_diffusion",
+        {
+            "rollout": {"_target_": "acme.engines.MyDedicatedEngine"},
+            "sync": {"_target_": "acme.sync.CustomWeightSync"},
+        },
+    ),
 }
 
 
@@ -461,17 +563,27 @@ def check_gate_bites() -> list[str]:
     """Prove every documented invalid and valid combination reaches the expected side."""
     failures = []
     for reason, (entrypoint, recipe) in MUST_REJECT.items():
+        recipe = _with_case_sampling(entrypoint, recipe)
         try:
             contracts.validate_recipe(recipe, entrypoint=entrypoint)
         except ValueError:
             continue
         failures.append(f"not rejected: {reason} ({recipe})")
     for reason, (entrypoint, recipe) in MUST_ACCEPT.items():
+        recipe = _with_case_sampling(entrypoint, recipe)
         try:
             contracts.validate_recipe(recipe, entrypoint=entrypoint)
         except ValueError as exc:
             failures.append(f"wrongly rejected: {reason} -- {exc}")
     return failures
+
+
+def _with_case_sampling(entrypoint: str, recipe: dict) -> dict:
+    completed = dict(recipe)
+    target = CASE_SAMPLING_TARGETS.get(entrypoint)
+    if target is not None:
+        completed.setdefault("sampling", {"_target_": target})
+    return completed
 
 
 def main() -> int:

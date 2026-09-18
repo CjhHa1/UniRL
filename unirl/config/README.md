@@ -19,10 +19,11 @@ that consume them — just the three things every recipe leans on:
 
 ## Why it exists
 
-A recipe is one flat YAML wired entirely by `_target_` dotpaths — there are **no**
-Hydra config groups and no `defaults:` lists. That keeps every run reproducible
-from a single file, but it also means Hydra type-checks nothing. This module is
-where invariants get enforced instead, at two scopes:
+A recipe is a flat YAML wired entirely by `_target_` dotpaths. Most recipes are
+self-contained; a small number of derived recipes use local, string-only
+`defaults:` entries plus `_self_` to override a sibling recipe. There are no Hydra
+config groups, and Hydra type-checks neither form. This module is where invariants
+get enforced instead, at two scopes:
 
 - **Within a field** — each dataclass fails fast in `__post_init__` via
   `require(...)`, with a clear `ValueError`. Every precision field accepts the
@@ -62,7 +63,8 @@ it enforces three contracts, all keyed off which rollout engine the recipe picke
 
 | Contract | Rejects |
 | --- | --- |
-| `validate_weight_sync_contract` | missing or extra sync; local/remote handler topology mismatches; unsupported receive methods; incomplete or misrouted PE track maps; unsupported entrypoint-specific sync modes |
+| `validate_sampling_contract` | AR/diffusion sampling-parameter types routed to the wrong entrypoint |
+| `validate_weight_sync_contract` | wrong engine family for an entrypoint; missing or extra sync; local/remote handler topology mismatches; unsupported receive/verification methods; incomplete or misrouted PE track maps; unsupported entrypoint-specific sync modes |
 | `validate_rollout_layout` | invalid layout values; separate direct sampling; layout fields on entrypoints that do not consume them |
 | `validate_offload_contract` | an explicit `enable_fsdp_offload: true` with a direct-sampling engine |
 
@@ -73,9 +75,9 @@ differences — `rollout` vs `ar_rollout` + `dit_rollout`, a single `sync` block
 `train_sft` having no rollout engine at all.
 
 **Engines are identified by package, not class name.** `ENGINE_FAMILIES` maps
-`unirl.rollout.engine.<family>` to whether the family samples in-process and
-which weight-sync receive paths it implements, so a class rename cannot flip a
-recipe into the wrong mode.
+`unirl.rollout.engine.<family>` to its valid entrypoints, whether it samples
+in-process, and the complete weight-sync protocol methods it implements, so a
+class rename cannot flip a recipe into the wrong mode.
 
 **Extending it:** a new component config is a plain `@dataclass` next to the
 component (not here), with `require(...)` checks in `__post_init__`. A new
@@ -95,7 +97,7 @@ things on every run:
    shapes are not — so a contract that quietly became a no-op fails CI.
 3. `ENGINE_FAMILIES` still matches the engine classes: `direct_sampling` is read
    back off each engine's `__init__` (does it take a `pipeline`? — the same
-   duck-typed test the trainers use), and `weight_sync` off the receive methods
+   duck-typed test the trainers use), and `sync_methods` off the protocol methods
    the concrete class overrides. Adding an engine family without declaring it
    fails here rather than silently skipping its contracts.
 4. Sync-handler local/remote metadata still matches whether its constructor owns
