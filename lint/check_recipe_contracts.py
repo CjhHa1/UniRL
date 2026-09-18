@@ -46,10 +46,17 @@ def _merge(base: dict, override: dict) -> dict:
     return merged
 
 
-def _load_recipe(path: Path) -> dict:
+def _load_recipe(path: Path, stack: tuple[Path, ...] = ()) -> dict:
     """Load the local string-only defaults form used by shipped composed recipes."""
+    if path in stack:
+        cycle = " -> ".join(str(item.relative_to(ROOT)) for item in (*stack, path))
+        raise ValueError(f"{path.relative_to(ROOT)}: cyclic defaults: {cycle}")
     try:
-        recipe = yaml.safe_load(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"{path.relative_to(ROOT)}: cannot load recipe: {exc}") from exc
+    try:
+        recipe = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise ValueError(f"{path.relative_to(ROOT)}: invalid YAML: {exc}") from exc
     if not isinstance(recipe, dict):
@@ -69,7 +76,7 @@ def _load_recipe(path: Path) -> dict:
         if not isinstance(item, str):
             raise ValueError(f"{path.relative_to(ROOT)}: static contract composition supports string defaults only")
         parent = path.parent / f"{item}.yaml"
-        parent_recipe = _load_recipe(parent)
+        parent_recipe = _load_recipe(parent, (*stack, path))
         merged = _merge(merged, parent_recipe)
     return merged if placed_self else _merge(merged, recipe)
 
@@ -164,11 +171,11 @@ def check_engine_families() -> list[str]:
                 f"but {cls.name}.__init__ pipeline parameter says {actual_direct}"
             )
         defined = {node.name for node in cls.body if isinstance(node, ast.FunctionDef)}
-        actual_sync = frozenset(method for method in contracts.ENGINE_SYNC_METHODS if method in defined)
-        if actual_sync != entry.sync_methods:
+        actual_capabilities = frozenset(method for method in contracts.ENGINE_CAPABILITY_METHODS if method in defined)
+        if actual_capabilities != entry.capabilities:
             failures.append(
-                f"ENGINE_FAMILIES[{family!r}].sync_methods={sorted(entry.sync_methods)}, "
-                f"but {cls.name} implements {sorted(actual_sync)}"
+                f"ENGINE_FAMILIES[{family!r}].capabilities={sorted(entry.capabilities)}, "
+                f"but {cls.name} implements {sorted(actual_capabilities)}"
             )
     for family in sorted(declared):
         failures.append(f"ENGINE_FAMILIES declares stale family {family!r}")
@@ -246,6 +253,8 @@ COMPOSED = "unirl.rollout.engine.composed.engine.ComposedRolloutEngine"
 AGENTIC = "unirl.rollout.engine.agentic.engine.AgenticRolloutEngine"
 SGLANG_CONFIG = "unirl.rollout.engine.sglang.config.SGLangEngineConfig"
 SGLANG_DIFFUSION_CONFIG = "unirl.rollout.engine.sglang_diffusion.config.SGLangDiffusionEngineConfig"
+VLLM_OMNI_CONFIG = "unirl.rollout.engine.vllm_omni.config.VLLMOmniEngineConfig"
+FASTVIDEO_CONFIG = "unirl.rollout.engine.fastvideo.config.FastVideoEngineConfig"
 
 TENSOR_SYNC = "unirl.distributed.weight_sync.full.tensor.TensorWeightSync"
 IPC_SYNC = "unirl.distributed.weight_sync.full.ipc.IPCWeightSync"
@@ -266,12 +275,16 @@ CASE_SAMPLING_TARGETS = {
 }
 
 
-def _composed_rollout() -> dict:
+def _composed_rollout(
+    *,
+    ar: str = SGLANG_CONFIG,
+    diffusion: str = SGLANG_DIFFUSION_CONFIG,
+) -> dict:
     return {
         "_target_": COMPOSED,
         "config": {
-            "ar": {"_target_": SGLANG_CONFIG},
-            "diffusion": {"_target_": SGLANG_DIFFUSION_CONFIG},
+            "ar": {"_target_": ar},
+            "diffusion": {"_target_": diffusion},
         },
     }
 
@@ -350,6 +363,39 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_ar",
         {"rollout": {"_target_": VLLM_OMNI}, "sync": {"_target_": CKPT_ENGINE_IPC_SYNC}},
     ),
+    "checkpoint-engine IPC on native SGLang": (
+        "train_ar",
+        {
+            "rollout": {
+                "_target_": SGLANG,
+                "config": {"_target_": SGLANG_CONFIG, "backend": "native"},
+            },
+            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
+        },
+    ),
+    "checkpoint-engine IPC with speculative decoding": (
+        "train_ar",
+        {
+            "rollout": {
+                "_target_": SGLANG,
+                "config": {
+                    "_target_": SGLANG_CONFIG,
+                    "engine_kwargs": {"speculative_algorithm": "EAGLE"},
+                },
+            },
+            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
+        },
+    ),
+    "checkpoint-engine IPC with server DP": (
+        "train_ar",
+        {
+            "rollout": {
+                "_target_": SGLANG,
+                "config": {"_target_": SGLANG_CONFIG, "engine_kwargs": {"dp_size": 2}},
+            },
+            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
+        },
+    ),
     "falsey layout": (
         "train_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": TENSOR_SYNC}, "layout": False},
@@ -386,6 +432,47 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         {
             "rollout": {"_target_": SGLANG_DIFFUSION},
             "sync": {"_target_": LOCAL_LORA_SYNC, "verify": True},
+        },
+    ),
+    "composed checkpoint-engine IPC": (
+        "train_pe",
+        {
+            "rollout": _composed_rollout(),
+            "sync": {
+                "ar": {"_target_": CKPT_ENGINE_IPC_SYNC, "track_prefix": "ar"},
+                "diffusion": {"_target_": LOCAL_LORA_SYNC, "track_prefix": "diffusion"},
+            },
+        },
+    ),
+    "composed LoRA verification": (
+        "train_pe",
+        {
+            "rollout": _composed_rollout(ar=VLLM_OMNI_CONFIG, diffusion=VLLM_OMNI_CONFIG),
+            "sync": {
+                "ar": {
+                    "_target_": LOCAL_LORA_SYNC,
+                    "track_prefix": "ar",
+                    "verify": True,
+                },
+                "diffusion": {
+                    "_target_": LOCAL_LORA_SYNC,
+                    "track_prefix": "diffusion",
+                    "verify": True,
+                },
+            },
+        },
+    ),
+    "composed checkpoint path sync": (
+        "train_pe",
+        {
+            "rollout": _composed_rollout(diffusion=FASTVIDEO_CONFIG),
+            "sync": {
+                "ar": {"_target_": TENSOR_SYNC, "track_prefix": "ar"},
+                "diffusion": {
+                    "_target_": CHECKPOINT_SYNC,
+                    "track_prefix": "diffusion",
+                },
+            },
         },
     ),
     "mixed unified sampling modes": (
@@ -463,6 +550,38 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_ar",
         {"rollout": {"_target_": TRAINSIDE}, "rollout_anchor_device": 1},
     ),
+    "anchored vLLM-Omni without copy": (
+        "train_ar",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": REMOTE_LORA_SYNC},
+            "rollout_anchor_device": 1,
+        },
+    ),
+    "negative rollout anchor": (
+        "train_ar",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": REMOTE_LORA_SYNC, "copy": True},
+            "rollout_anchor_device": -1,
+        },
+    ),
+    "floating rollout anchor": (
+        "train_ar",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": REMOTE_LORA_SYNC, "copy": True},
+            "rollout_anchor_device": 1.9,
+        },
+    ),
+    "boolean rollout anchor": (
+        "train_ar",
+        {
+            "rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": REMOTE_LORA_SYNC, "copy": True},
+            "rollout_anchor_device": True,
+        },
+    ),
     "AR claims ignored layout": (
         "train_ar",
         {"rollout": {"_target_": SGLANG}, "sync": {"_target_": TENSOR_SYNC}, "layout": "separate"},
@@ -471,11 +590,41 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_async_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "colocate"},
     ),
+    "async diffusion claims redundant separate layout": (
+        "train_async_diffusion",
+        {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "separate"},
+    ),
     "agentic with non-Tensor handler": (
         "train_agentic",
         {
             "rollout": {"_target_": AGENTIC, "config": {"inner": {"_target_": SGLANG_CONFIG}}},
             "sync": {"_target_": LOCAL_LORA_SYNC},
+        },
+    ),
+    "swapped PE sampling tracks": (
+        "train_pe",
+        {
+            "sampling": {
+                "ar": {"_target_": DIFFUSION_SAMPLING},
+                "diffusion": {"_target_": AR_SAMPLING},
+            },
+            "rollout": _composed_rollout(),
+            "sync": {
+                "ar": {"_target_": TENSOR_SYNC, "track_prefix": "ar"},
+                "diffusion": {"_target_": LOCAL_LORA_SYNC, "track_prefix": "diffusion"},
+            },
+        },
+    ),
+    "swapped unified sampling tracks": (
+        "train_unified_model",
+        {
+            "sampling": {
+                "ar": {"_target_": DIFFUSION_SAMPLING},
+                "diffusion": {"_target_": AR_SAMPLING},
+            },
+            "ar_rollout": {"_target_": VLLM_OMNI},
+            "dit_rollout": {"_target_": VLLM_OMNI},
+            "sync": {"_target_": REMOTE_LORA_SYNC, "copy": True},
         },
     ),
 }
@@ -538,7 +687,23 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     ),
     "async diffusion NCCL": (
         "train_async_diffusion",
-        {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "separate"},
+        {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}},
+    ),
+    "namespaced AR sampling": (
+        "train_ar",
+        {
+            "sampling": {"ar": {"_target_": AR_SAMPLING}},
+            "rollout": {"_target_": SGLANG},
+            "sync": {"_target_": TENSOR_SYNC},
+        },
+    ),
+    "namespaced diffusion sampling": (
+        "train_diffusion",
+        {
+            "sampling": {"diffusion": {"_target_": DIFFUSION_SAMPLING}},
+            "rollout": {"_target_": SGLANG_DIFFUSION},
+            "sync": {"_target_": TENSOR_SYNC},
+        },
     ),
     "agentic Tensor sync": (
         "train_agentic",
@@ -583,6 +748,14 @@ def _with_case_sampling(entrypoint: str, recipe: dict) -> dict:
     target = CASE_SAMPLING_TARGETS.get(entrypoint)
     if target is not None:
         completed.setdefault("sampling", {"_target_": target})
+    elif entrypoint in ("train_pe", "train_unified_model"):
+        completed.setdefault(
+            "sampling",
+            {
+                "ar": {"_target_": AR_SAMPLING},
+                "diffusion": {"_target_": DIFFUSION_SAMPLING},
+            },
+        )
     return completed
 
 

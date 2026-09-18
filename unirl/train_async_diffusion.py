@@ -27,7 +27,7 @@ def main(cfg: DictConfig) -> None:
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
         logging_cfg=cfg.get("logging"),
-        layout=cfg.get("layout", "separate"),
+        layout="separate",
         train_fraction=cfg.get("train_fraction", 0.5),
         reward_fraction=cfg.get("reward_fraction", 0.0),
         # Forwarded so the trainer can reject it — async scores at reap time outside

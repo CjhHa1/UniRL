@@ -59,7 +59,8 @@ validate_recipe(cfg, entrypoint="train_diffusion")
 It runs on the driver before the trainer is constructed — before Ray, before the
 engine's `_target_` is imported — so a contradictory recipe dies on the launching
 process in about a second instead of somewhere inside a half-built cluster. Today
-it enforces three contracts, all keyed off which rollout engine the recipe picked:
+it enforces four contracts across the entrypoint, sampling, engine, sync, and
+placement choices:
 
 | Contract | Rejects |
 | --- | --- |
@@ -70,9 +71,9 @@ it enforces three contracts, all keyed off which rollout engine the recipe picke
 
 **Recipe shapes live in exactly one place.** Contracts never read a hard-coded
 dotpath; they read `RecipeFacts.from_cfg(cfg)`, which absorbs the per-entrypoint
-differences — `rollout` vs `ar_rollout` + `dit_rollout`, a single `sync` block vs
-`train_pe`'s per-track map, nested composed/agentic child engines, and
-`train_sft` having no rollout engine at all.
+differences — `rollout` vs `ar_rollout` + `dit_rollout`, single vs modality-keyed
+sampling, a single `sync` block vs `train_pe`'s per-track map, nested
+composed/agentic child engines, and `train_sft` having no rollout engine at all.
 
 **Engines are identified by package, not class name.** `ENGINE_FAMILIES` maps
 `unirl.rollout.engine.<family>` to its valid entrypoints, whether it samples
@@ -88,7 +89,7 @@ reaching into `cfg` from the contract.
 
 ## Verification
 
-`scripts/check_recipe_contracts.py` (pre-commit hook `check-recipe-contracts`,
+`lint/check_recipe_contracts.py` (pre-commit hook `check-recipe-contracts`,
 so it rides the lint-only CI alongside `check-recipe-targets`) asserts five
 things on every run:
 
@@ -97,7 +98,7 @@ things on every run:
    shapes are not — so a contract that quietly became a no-op fails CI.
 3. `ENGINE_FAMILIES` still matches the engine classes: `direct_sampling` is read
    back off each engine's `__init__` (does it take a `pipeline`? — the same
-   duck-typed test the trainers use), and `sync_methods` off the protocol methods
+   duck-typed test the trainers use), and `capabilities` off the protocol methods
    the concrete class overrides. Adding an engine family without declaring it
    fails here rather than silently skipping its contracts.
 4. Sync-handler local/remote metadata still matches whether its constructor owns
