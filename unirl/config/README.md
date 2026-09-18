@@ -65,7 +65,7 @@ placement choices:
 | Contract | Rejects |
 | --- | --- |
 | `validate_sampling_contract` | AR/diffusion sampling-parameter types routed to the wrong entrypoint |
-| `validate_weight_sync_contract` | wrong engine family for an entrypoint; missing or extra sync; local/remote handler topology mismatches; unsupported receive/verification methods; incomplete or misrouted PE track maps; unsupported entrypoint-specific sync modes |
+| `validate_weight_sync_contract` | wrong engine family for an entrypoint; missing or extra sync/anchor fields; invalid anchor values; local/remote handler topology mismatches; unsupported receive/verification methods; incomplete or misrouted PE track maps; unsupported entrypoint-specific sync modes |
 | `validate_rollout_layout` | invalid layout values; separate direct sampling; layout fields on entrypoints that do not consume them |
 | `validate_offload_contract` | an explicit `enable_fsdp_offload: true` with a direct-sampling engine |
 
@@ -93,7 +93,9 @@ reaching into `cfg` from the contract.
 so it rides the lint-only CI alongside `check-recipe-targets`) asserts five
 things on every run:
 
-1. Every shipped recipe satisfies every contract.
+1. Every runnable recipe under `examples/` satisfies every contract. Two
+   diffusion recipes currently stored under `examples/unified_model/` carry
+   explicit `train_diffusion` ownership overrides.
 2. Every combination the contracts claim to reject **is** rejected, and the valid
    shapes are not — so a contract that quietly became a no-op fails CI.
 3. `ENGINE_FAMILIES` still matches the engine classes: `direct_sampling` is read
@@ -119,6 +121,9 @@ and `require.py` stay stdlib-only.
 - **Only an explicit `enable_fsdp_offload: true` is rejected.** When a recipe is
   silent the value comes from the entrypoint's runtime default, which is not a
   statement by the recipe author.
+- **Static lint defers unresolved `${...}` values.** The runtime gate sees the
+  Hydra-resolved value and validates it normally; interpolations must therefore
+  resolve to the same type the owning component expects.
 - **Contracts see the recipe, not the run.** Anything that depends on resolved
   runtime topology — `batch_size * samples_per_prompt` divisibility by the actual
   rollout/reward `dp_size`, for instance — cannot be checked here and stays in

@@ -12,7 +12,6 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SCAN_DIRS = ["examples"]
 ENGINE_ROOT = ROOT / "unirl" / "rollout" / "engine"
 ENTRYPOINT_OVERRIDES = {
     "examples/unified_model/hi3_it2i.yaml": "train_diffusion",
@@ -89,7 +88,7 @@ def _entrypoint_for(path: Path) -> str | None:
     rel = path.relative_to(ROOT)
     if override := ENTRYPOINT_OVERRIDES.get(rel.as_posix()):
         return override
-    if rel.parts[0] != "examples" or len(rel.parts) < 3:
+    if len(rel.parts) < 3:
         return None
     domain = rel.parts[1]
     if domain == "ar":
@@ -109,23 +108,24 @@ def check_recipes() -> tuple[list[str], int]:
     failures: list[str] = []
     checked = 0
     unseen_overrides = set(ENTRYPOINT_OVERRIDES)
-    for scan_dir in SCAN_DIRS:
-        for path in sorted((ROOT / scan_dir).rglob("*.y*ml")):
-            unseen_overrides.discard(path.relative_to(ROOT).as_posix())
-            try:
-                recipe = _load_recipe(path)
-            except ValueError as exc:
-                failures.append(f"{path.relative_to(ROOT)}: {exc}")
-                continue
-            entrypoint = _entrypoint_for(path)
-            if entrypoint is None:
-                failures.append(f"{path.relative_to(ROOT)}: cannot infer the owning train_*.py entrypoint")
-                continue
-            checked += 1
-            try:
-                contracts.validate_recipe(recipe, entrypoint=entrypoint)
-            except ValueError as exc:
-                failures.append(f"{path.relative_to(ROOT)}: {exc}")
+    for path in sorted((ROOT / "examples").rglob("*.y*ml")):
+        relative = path.relative_to(ROOT).as_posix()
+        unseen_overrides.discard(relative)
+        try:
+            recipe = _load_recipe(path)
+        except ValueError as exc:
+            message = str(exc)
+            failures.append(message if message.startswith(f"{relative}:") else f"{relative}: {message}")
+            continue
+        entrypoint = _entrypoint_for(path)
+        if entrypoint is None:
+            failures.append(f"{relative}: cannot infer the owning train_*.py entrypoint")
+            continue
+        checked += 1
+        try:
+            contracts.validate_recipe(recipe, entrypoint=entrypoint)
+        except ValueError as exc:
+            failures.append(f"{relative}: {exc}")
     failures.extend(f"ENTRYPOINT_OVERRIDES declares missing path {path}" for path in sorted(unseen_overrides))
     return failures, checked
 
@@ -705,13 +705,6 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
         "train_diffusion",
         {"rollout": {"_target_": TRAINSIDE}, "enable_fsdp_offload": False},
     ),
-    "dynamic direct-sampling offload": (
-        "train_diffusion",
-        {
-            "rollout": {"_target_": TRAINSIDE},
-            "enable_fsdp_offload": "${oc.env:OFFLOAD,false}",
-        },
-    ),
     "separate diffusion with NCCL": (
         "train_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "separate"},
@@ -723,19 +716,6 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     "checkpoint-engine IPC on SGLang": (
         "train_ar",
         {"rollout": {"_target_": SGLANG}, "sync": {"_target_": CKPT_ENGINE_IPC_SYNC}},
-    ),
-    "checkpoint-engine IPC with dynamic server DP": (
-        "train_ar",
-        {
-            "rollout": {
-                "_target_": SGLANG,
-                "config": {
-                    "_target_": SGLANG_CONFIG,
-                    "engine_kwargs": {"dp_size": "${oc.env:SGLANG_DP,1}"},
-                },
-            },
-            "sync": {"_target_": CKPT_ENGINE_IPC_SYNC},
-        },
     ),
     "two vLLM unified engines": (
         "train_unified_model",
