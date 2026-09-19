@@ -225,7 +225,6 @@ class RecipeFacts:
     has_layout: bool
     layout_is_dynamic: bool
     layout: Optional[str]
-    offload: Optional[bool]
     rollout_anchor_device: Any
     freeze_llm: bool
     samplings: tuple[Block, ...]
@@ -245,7 +244,6 @@ class RecipeFacts:
         nested_engines = tuple(block for path in nested_paths if (block := _read_block_path(cfg, path)) is not None)
         sync_section = _get(cfg, "sync")
         raw_layout = _get(cfg, "layout")
-        offload = _get(cfg, "enable_fsdp_offload")
         raw_anchor = _get(cfg, "rollout_anchor_device")
         raw_backend = _get_path(cfg, "rollout.config.backend")
         return cls(
@@ -256,7 +254,6 @@ class RecipeFacts:
             has_layout=_has(cfg, "layout"),
             layout_is_dynamic=_is_interpolation(raw_layout),
             layout=None if raw_layout is None or _is_interpolation(raw_layout) else str(raw_layout),
-            offload=None if offload is None or _is_interpolation(offload) else bool(offload),
             rollout_anchor_device=raw_anchor,
             freeze_llm=bool(_get(cfg, "freeze_llm")),
             samplings=tuple(_read_sampling_blocks(_get(cfg, "sampling"))),
@@ -293,6 +290,45 @@ def _get(cfg: Any, key: str) -> Any:
 
 def _is_interpolation(value: Any) -> bool:
     return isinstance(value, str) and value.strip().startswith("${") and value.strip().endswith("}")
+
+
+def validate_checkpoint_engine_ipc_options(
+    *,
+    backend: Any,
+    dp_size: Any,
+    engine_kwargs: Any,
+    allow_interpolation: bool = False,
+) -> None:
+    """Validate config-dependent checkpoint-engine IPC requirements."""
+
+    def dynamic(value: Any) -> bool:
+        return allow_interpolation and _is_interpolation(value)
+
+    normalized_backend = None if backend is None or dynamic(backend) else str(backend).strip().lower()
+    require(
+        normalized_backend in (None, "http"),
+        f"CkptEngineIPCWeightSync requires SGLang backend='http'; got {normalized_backend!r}.",
+    )
+
+    server_dp = dp_size if dp_size is not None else _get(engine_kwargs, "dp_size")
+    require(
+        server_dp is None or dynamic(server_dp) or (type(server_dp) is int and server_dp == 1),
+        f"CkptEngineIPCWeightSync requires integer SGLang server dp_size=1; got {server_dp!r}.",
+    )
+
+    keys = engine_kwargs.keys() if hasattr(engine_kwargs, "keys") else ()
+    speculative = [
+        str(key)
+        for key in keys
+        if str(key).startswith("speculative")
+        and (value := _get(engine_kwargs, key))
+        and not dynamic(value)
+        and (not isinstance(value, str) or value.strip().lower() != "none")
+    ]
+    require(
+        not speculative,
+        f"CkptEngineIPCWeightSync does not support speculative decoding options {sorted(speculative)}.",
+    )
 
 
 def _has(cfg: Any, key: str) -> bool:
@@ -498,9 +534,8 @@ def _sampling_domain(target: str) -> Optional[str]:
     return None
 
 
-def validate_sampling_contract(cfg: Any, *, entrypoint: str) -> None:
+def validate_sampling_contract(facts: RecipeFacts, *, entrypoint: str) -> None:
     """Require the sampling-parameter type consumed by an entrypoint."""
-    facts = RecipeFacts.from_cfg(cfg)
     if entrypoint == ENTRYPOINT_SFT:
         return
     require(bool(facts.samplings), f"{entrypoint} requires a targeted cfg.sampling section.")
@@ -511,7 +546,7 @@ def validate_sampling_contract(cfg: Any, *, entrypoint: str) -> None:
         require(expected is not None, f"{entrypoint} requires modality-keyed cfg.sampling tracks.")
         actual = _sampling_domain(top_level[0].target)
         require(
-            actual == expected,
+            actual in (None, expected),
             f"{entrypoint} requires {expected} sampling parameters; got cfg.sampling._target_={top_level[0].target!r}.",
         )
         return
@@ -535,14 +570,13 @@ def validate_sampling_contract(cfg: Any, *, entrypoint: str) -> None:
     for block in facts.samplings:
         actual = _sampling_domain(block.target)
         require(
-            actual == block.track,
+            actual in (None, block.track),
             f"cfg.{block.path} must use {block.track} sampling parameters; got {block.target!r}.",
         )
 
 
-def validate_weight_sync_contract(cfg: Any, *, entrypoint: str) -> None:
+def validate_weight_sync_contract(facts: RecipeFacts, *, entrypoint: str) -> None:
     """Validate sampling mode, handler shape, topology, and receiver capabilities."""
-    facts = RecipeFacts.from_cfg(cfg)
     _validate_engine_shape(facts, entrypoint=entrypoint)
     anchor = facts.rollout_anchor_device
     if entrypoint != ENTRYPOINT_AR:
@@ -610,31 +644,11 @@ def validate_weight_sync_contract(cfg: Any, *, entrypoint: str) -> None:
         if handler is None:
             continue
         if sync.class_name == "CkptEngineIPCWeightSync":
-            require(
-                facts.rollout_backend in (None, "http"),
-                f"cfg.rollout.config.backend must be 'http' for CkptEngineIPCWeightSync; "
-                f"got {facts.rollout_backend!r}.",
-            )
-            server_dp = facts.rollout_dp_size
-            if server_dp is None:
-                server_dp = _get(facts.rollout_engine_kwargs, "dp_size")
-            require(
-                server_dp is None or _is_interpolation(server_dp) or (type(server_dp) is int and server_dp == 1),
-                f"CkptEngineIPCWeightSync requires integer SGLang server dp_size=1; got {server_dp!r}.",
-            )
-            engine_kwargs = facts.rollout_engine_kwargs
-            keys = engine_kwargs.keys() if hasattr(engine_kwargs, "keys") else ()
-            speculative = [
-                str(key)
-                for key in keys
-                if str(key).startswith("speculative")
-                and (value := _get(engine_kwargs, key))
-                and not _is_interpolation(value)
-                and (not isinstance(value, str) or value.strip().lower() != "none")
-            ]
-            require(
-                not speculative,
-                f"CkptEngineIPCWeightSync does not support speculative decoding options {sorted(speculative)}.",
+            validate_checkpoint_engine_ipc_options(
+                backend=facts.rollout_backend,
+                dp_size=facts.rollout_dp_size,
+                engine_kwargs=facts.rollout_engine_kwargs,
+                allow_interpolation=True,
             )
         needed = handler.required_methods
         if sync.class_name == "RemoteLoraWeightSync" and sync.copy is True:
@@ -649,9 +663,8 @@ def validate_weight_sync_contract(cfg: Any, *, entrypoint: str) -> None:
             )
 
 
-def validate_rollout_layout(cfg: Any, *, entrypoint: str) -> None:
+def validate_rollout_layout(facts: RecipeFacts, *, entrypoint: str) -> None:
     """Validate rollout layout values only where the selected entrypoint consumes them."""
-    facts = RecipeFacts.from_cfg(cfg)
     if entrypoint not in LAYOUT_ENTRYPOINTS:
         require(not facts.has_layout, f"{entrypoint} does not consume cfg.layout; remove it.")
     if facts.has_layout:
@@ -675,36 +688,22 @@ def validate_rollout_layout(cfg: Any, *, entrypoint: str) -> None:
         )
 
 
-def validate_offload_contract(cfg: Any, *, entrypoint: str) -> None:
-    """Reject an explicit FSDP-offload request with direct sampling."""
-    del entrypoint
-    facts = RecipeFacts.from_cfg(cfg)
-    if facts.offload is not True:
-        return
-    for block, family in facts.families():
-        require(
-            not family.direct_sampling,
-            f"cfg.enable_fsdp_offload=true is incompatible with direct-sampling "
-            f"cfg.{block.path}._target_={block.target!r}.",
-        )
-
-
 CONTRACTS = (
     validate_sampling_contract,
     validate_weight_sync_contract,
     validate_rollout_layout,
-    validate_offload_contract,
 )
 
 
 def validate_recipe(cfg: Any, *, entrypoint: str) -> None:
     """Run every cross-component contract before trainer construction."""
     require(entrypoint in KNOWN_ENTRYPOINTS, f"unknown training entrypoint {entrypoint!r}")
-    for contract in CONTRACTS:
-        try:
-            contract(cfg, entrypoint=entrypoint)
-        except ValueError as exc:
-            raise ValueError(f"{entrypoint}: invalid recipe. {exc}") from exc
+    try:
+        facts = RecipeFacts.from_cfg(cfg)
+        for contract in CONTRACTS:
+            contract(facts, entrypoint=entrypoint)
+    except ValueError as exc:
+        raise ValueError(f"{entrypoint}: invalid recipe. {exc}") from exc
 
 
 def _describe(blocks: tuple[Block, ...]) -> str:
@@ -718,5 +717,6 @@ __all__ = [
     "SYNC_HANDLERS",
     "SYNC_LOCAL",
     "SYNC_REMOTE",
+    "validate_checkpoint_engine_ipc_options",
     "validate_recipe",
 ]

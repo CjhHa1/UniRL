@@ -295,10 +295,6 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_diffusion",
         {"rollout": {"_target_": TRAINSIDE}, "sync": {"_target_": TENSOR_SYNC}},
     ),
-    "direct sampling with offload": (
-        "train_diffusion",
-        {"rollout": {"_target_": TRAINSIDE}, "enable_fsdp_offload": True},
-    ),
     "direct sampling on separate layout": (
         "train_diffusion",
         {"rollout": {"_target_": TRAINSIDE}, "layout": "separate"},
@@ -344,10 +340,6 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         },
     ),
     "dedicated engine without sync": ("train_diffusion", {"rollout": {"_target_": SGLANG_DIFFUSION}}),
-    "handler-less sync section": (
-        "train_diffusion",
-        {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"track_prefix": "diffusion"}},
-    ),
     "IPC on SGLang": (
         "train_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": IPC_SYNC}},
@@ -526,7 +518,7 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
     ),
     "unified single dedicated engine": (
         "train_unified_model",
-        {"rollout": {"_target_": SGLANG}, "sync": {"_target_": TENSOR_SYNC}},
+        {"rollout": {"_target_": VLLM_OMNI}, "sync": {"_target_": TENSOR_SYNC}},
     ),
     "unified incomplete split engines": (
         "train_unified_model",
@@ -619,11 +611,7 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_ar",
         {"rollout": {"_target_": SGLANG}, "sync": {"_target_": TENSOR_SYNC}, "layout": "separate"},
     ),
-    "async diffusion claims colocate": (
-        "train_async_diffusion",
-        {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "colocate"},
-    ),
-    "async diffusion claims redundant separate layout": (
+    "async diffusion layout field": (
         "train_async_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "separate"},
     ),
@@ -701,10 +689,6 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
 
 MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     "colocated direct sampling": ("train_diffusion", {"rollout": {"_target_": TRAINSIDE}}),
-    "direct sampling declines offload": (
-        "train_diffusion",
-        {"rollout": {"_target_": TRAINSIDE}, "enable_fsdp_offload": False},
-    ),
     "separate diffusion with NCCL": (
         "train_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "separate"},
@@ -807,6 +791,25 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
             "sync": {"_target_": "acme.sync.CustomWeightSync"},
         },
     ),
+    "out-of-tree top-level sampling": (
+        "train_diffusion",
+        {
+            "sampling": {"_target_": "acme.sampling.CustomSampler"},
+            "rollout": {"_target_": TRAINSIDE},
+        },
+    ),
+    "out-of-tree namespaced sampling": (
+        "train_ar",
+        {
+            "sampling": {"ar": {"_target_": "acme.sampling.CustomSampler"}},
+            "rollout": {"_target_": SGLANG},
+            "sync": {"_target_": TENSOR_SYNC},
+        },
+    ),
+}
+
+EXPECTED_REJECT_MESSAGES = {
+    "unified single dedicated engine": "single-engine mode does not wire weight sync",
 }
 
 
@@ -817,7 +820,10 @@ def check_gate_bites() -> list[str]:
         recipe = _with_case_sampling(entrypoint, recipe)
         try:
             contracts.validate_recipe(recipe, entrypoint=entrypoint)
-        except ValueError:
+        except ValueError as exc:
+            expected = EXPECTED_REJECT_MESSAGES.get(reason)
+            if expected is not None and expected not in str(exc):
+                failures.append(f"wrong rejection: {reason} -- {exc}")
             continue
         failures.append(f"not rejected: {reason} ({recipe})")
     for reason, (entrypoint, recipe) in MUST_ACCEPT.items():

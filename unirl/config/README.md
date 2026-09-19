@@ -59,7 +59,7 @@ validate_recipe(cfg, entrypoint="train_diffusion")
 It runs on the driver before the trainer is constructed — before Ray, before the
 engine's `_target_` is imported — so a contradictory recipe dies on the launching
 process in about a second instead of somewhere inside a half-built cluster. Today
-it enforces four contracts across the entrypoint, sampling, engine, sync, and
+it enforces three contracts across the entrypoint, sampling, engine, sync, and
 placement choices:
 
 | Contract | Rejects |
@@ -67,7 +67,6 @@ placement choices:
 | `validate_sampling_contract` | AR/diffusion sampling-parameter types routed to the wrong entrypoint |
 | `validate_weight_sync_contract` | wrong engine family for an entrypoint; missing or extra sync/anchor fields; invalid anchor values; local/remote handler topology mismatches; unsupported receive/verification methods; incomplete or misrouted PE track maps; unsupported entrypoint-specific sync modes |
 | `validate_rollout_layout` | invalid layout values; separate direct sampling; layout fields on entrypoints that do not consume them |
-| `validate_offload_contract` | an explicit `enable_fsdp_offload: true` with a direct-sampling engine |
 
 **Recipe shapes live in exactly one place.** Contracts never read a hard-coded
 dotpath; they read `RecipeFacts.from_cfg(cfg)`, which absorbs the per-entrypoint
@@ -118,9 +117,9 @@ and `require.py` stay stdlib-only.
 - **Out-of-tree engines are not gated.** A `rollout._target_` outside
   `unirl.rollout.engine.*` has no known family, so the engine-dependent contracts
   log and skip rather than guess a mode for it.
-- **Only an explicit `enable_fsdp_offload: true` is rejected.** When a recipe is
-  silent the value comes from the entrypoint's runtime default, which is not a
-  statement by the recipe author.
+- **Out-of-tree sampling classes are not guessed.** Recognized AR/diffusion
+  sampling class names must match their entrypoint or track; an unrecognized
+  target is left to runtime type validation.
 - **Static lint defers unresolved `${...}` values.** The runtime gate sees the
   Hydra-resolved value and validates it normally; interpolations must therefore
   resolve to the same type the owning component expects.

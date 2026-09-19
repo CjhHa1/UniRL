@@ -86,7 +86,7 @@ repos:
         always_run: true
 
       # Static guard that every recipe satisfies the cross-component contracts
-      # (entrypoint, sampling, engine <-> sync, offload, layout) and that the
+      # (entrypoint, sampling, engine <-> sync, layout) and that the
       # engine-family table those contracts read still matches the engine classes.
       - id: check-recipe-contracts
         name: recipe cross-component contracts hold
