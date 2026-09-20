@@ -404,13 +404,15 @@ class BagelDiffusionStage(DiffusionStage[BagelDiffusionConditions]):
         """Run Bagel sampling over the pinned schedule."""
         batch_size = conditions.batch_size
         require(batch_size > 0, "BagelDiffusionStage.diffuse: conditions must be non-empty.")
-        if batch_size > 1 and not self._can_pack_conditions(conditions):
-            return self._diffuse_serial_batch(
-                conditions,
-                schedule=schedule,
-                params=params,
-                initial_latents=initial_latents,
-            )
+        if batch_size > 1:
+            self._require_stackable_image_shapes(conditions)
+            if self._global_cfg_needs_serial(params) or not self._can_pack_conditions(conditions):
+                return self._diffuse_serial_batch(
+                    conditions,
+                    schedule=schedule,
+                    params=params,
+                    initial_latents=initial_latents,
+                )
 
         bagel = self.model.model
         device = torch.device(self.model.device)
@@ -513,6 +515,26 @@ class BagelDiffusionStage(DiffusionStage[BagelDiffusionConditions]):
         shapes = [tuple(shape) for shape in conditions.image_shapes]
         return len(shapes) == batch_size and len(set(shapes)) == 1
 
+    @staticmethod
+    def _global_cfg_needs_serial(params: BagelDiffusionParams) -> bool:
+        """Keep vendor global CFG renorm on its required one-sample path."""
+        return params.cfg_renorm_type == "global" and float(params.guidance_scale) > 1.0
+
+    def _require_stackable_image_shapes(self, conditions: BagelDiffusionConditions) -> None:
+        """Reject image batches whose latent rows cannot share one tensor."""
+        shapes = [tuple(int(value) for value in shape) for shape in conditions.image_shapes]
+        require(
+            len(shapes) == conditions.batch_size,
+            f"BagelDiffusionStage.diffuse: image shape count {len(shapes)} != batch size {conditions.batch_size}.",
+        )
+        downsample = int(self.model.latent_downsample)
+        lengths = [(height // downsample) * (width // downsample) for height, width in shapes]
+        require(
+            len(set(lengths)) == 1,
+            "BagelDiffusionStage.diffuse: mixed image shapes produce variable latent lengths "
+            f"{lengths}; split them into separate calls.",
+        )
+
     def _resolve_rollout_batch(
         self,
         conditions: BagelDiffusionConditions,
@@ -551,7 +573,7 @@ class BagelDiffusionStage(DiffusionStage[BagelDiffusionConditions]):
         params: BagelDiffusionParams,
         initial_latents: Optional[torch.Tensor],
     ) -> LatentSegment:
-        """Fallback for deferred contexts or mixed image shapes."""
+        """Fallback for deferred contexts, global CFG renorm, or unpackable inputs."""
         segments: List[LatentSegment] = []
         for index in range(conditions.batch_size):
             if conditions.has_contexts():
