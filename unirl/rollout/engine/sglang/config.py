@@ -11,7 +11,7 @@ from unirl.config.require import require
 from unirl.rollout.engine.base import BaseEngineConfig
 from unirl.rollout.engine.ports import ReservedPorts
 
-_SGLANG_GRPC_PORT_OFFSET = 30000
+_SGLANG_GRPC_PORT_OFFSET = 10000
 _SGLANG_MAX_DERIVED_GRPC_BASE_PORT = 65535 - _SGLANG_GRPC_PORT_OFFSET
 _SGLANG_SAFE_SERVER_PORT_MIN = 1024
 _REQUIRED_SERVER_ARGS_METADATA_KEY = "_unirl_required_server_args"
