@@ -35,7 +35,7 @@ def _resolve_dtype(name: str) -> torch.dtype:
 
 
 class NcclBroadcastReceiveMixin:
-    """Adds ``init_weights_update_group`` + ``update_weights_from_distributed`` to a worker by inheritance."""
+    """Adds NCCL weight receive to a worker; requires ``BucketedIPCReceiveMixin`` for ``_unirl_load_weights``."""
 
     _unirl_weight_groups: Dict[str, "dist.ProcessGroup"] = {}
 

@@ -632,7 +632,7 @@ class VLLMOmniBackend:
             self._collective_rpc(
                 sid,
                 "remove_lora",
-                args=(int(adapter_id),),
+                args=(adapter_id,),
                 allow_false=True,
             )
 
