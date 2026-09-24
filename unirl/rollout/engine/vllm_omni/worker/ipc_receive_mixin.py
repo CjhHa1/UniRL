@@ -226,8 +226,16 @@ class BucketedIPCReceiveMixin:
         )
         return self.add_lora(request)
 
-    def _unirl_find_parameter_module(self):
-        """Find the non-empty parameter module behind AR or diffusion wrappers."""
+    def _unirl_loaded_param_checksums(
+        self,
+        names: Optional[list] = None,
+    ) -> dict:
+        """Full-byte SHA-256 of the worker's loaded parameters."""
+        from unirl.distributed.weight_sync.transfer.checksum import (
+            fingerprint_tensor,
+        )
+
+        parameter_module = None
         queue = [self]
         seen: set[int] = set()
         while queue:
@@ -236,13 +244,9 @@ class BucketedIPCReceiveMixin:
                 continue
             seen.add(id(obj))
             named_parameters = getattr(obj, "named_parameters", None)
-            if callable(named_parameters):
-                try:
-                    next(iter(named_parameters()))
-                except StopIteration:
-                    pass
-                else:
-                    return obj
+            if callable(named_parameters) and next(iter(named_parameters()), None) is not None:
+                parameter_module = obj
+                break
             queue.extend(
                 getattr(obj, attr, None)
                 for attr in (
@@ -255,18 +259,6 @@ class BucketedIPCReceiveMixin:
                     "bagel",
                 )
             )
-        return None
-
-    def _unirl_loaded_param_checksums(
-        self,
-        names: Optional[list] = None,
-    ) -> dict:
-        """Full-byte SHA-256 of the worker's loaded parameters."""
-        from unirl.distributed.weight_sync.transfer.checksum import (
-            fingerprint_tensor,
-        )
-
-        parameter_module = self._unirl_find_parameter_module()
         if parameter_module is None:
             return {}
 
