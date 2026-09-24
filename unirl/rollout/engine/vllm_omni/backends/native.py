@@ -547,7 +547,6 @@ class VLLMOmniBackend:
     def set_lora_handle(
         self,
         *,
-        adapter_name: str,
         lora_tensors: Dict[str, Any],
         peft_config: Optional[dict],
     ) -> None:
@@ -556,6 +555,7 @@ class VLLMOmniBackend:
 
         from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
             UNIRL_LORA_INT_ID,
+            UNIRL_LORA_NAME,
             UNIRL_LORA_PATH,
         )
         from unirl.utils.peft_merge import adapt_lora_for_vllm
@@ -576,7 +576,7 @@ class VLLMOmniBackend:
                 sid,
                 "set_lora_from_tensor_dict",
                 args=(
-                    adapter_name,
+                    UNIRL_LORA_NAME,
                     UNIRL_LORA_INT_ID,
                     UNIRL_LORA_PATH,
                     dict(peft_config or {}),
@@ -587,7 +587,6 @@ class VLLMOmniBackend:
     def set_lora_copy(
         self,
         *,
-        adapter_name: str,
         lora_tensors: Dict[str, Any],
         peft_config: Optional[dict],
     ) -> None:
@@ -599,6 +598,7 @@ class VLLMOmniBackend:
 
         from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
             UNIRL_LORA_INT_ID,
+            UNIRL_LORA_NAME,
             UNIRL_LORA_PATH,
         )
         from unirl.utils.peft_merge import adapt_lora_for_vllm
@@ -618,7 +618,7 @@ class VLLMOmniBackend:
                 sid,
                 "set_lora_from_tensor_dict_copy",
                 args=(
-                    adapter_name,
+                    UNIRL_LORA_NAME,
                     UNIRL_LORA_INT_ID,
                     UNIRL_LORA_PATH,
                     dict(peft_config or {}),
