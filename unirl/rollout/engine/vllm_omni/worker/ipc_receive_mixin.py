@@ -257,23 +257,6 @@ class BucketedIPCReceiveMixin:
             )
         return None
 
-    def _unirl_describe_params(
-        self,
-        names: Optional[list] = None,
-    ) -> dict:
-        """Return ``{name: (shape_tuple, dtype_str)}`` for the worker's loaded model."""
-        parameter_module = self._unirl_find_parameter_module()
-        if parameter_module is None:
-            return {}
-
-        target = set(names) if names else None
-        out: dict = {}
-        for name, p in parameter_module.named_parameters():
-            if target is not None and name not in target:
-                continue
-            out[name] = (tuple(p.shape), str(p.dtype))
-        return out
-
     def _unirl_param_checksums(
         self,
         names: Optional[list] = None,
