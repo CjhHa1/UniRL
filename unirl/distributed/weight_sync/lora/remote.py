@@ -110,7 +110,7 @@ class RemoteLoraWeightSync(LoraWeightSyncBase):
             (
                 role,
                 worker.call.remote(role, "tp_per_stage", (), {}),
-                worker.call.remote(role, "loaded_lora_checksums", (), {"adapter_id": int(UNIRL_LORA_INT_ID)}),
+                worker.call.remote(role, "loaded_lora_checksums", (), {"adapter_id": UNIRL_LORA_INT_ID}),
             )
             for role, workers in self._targets
             for worker in workers

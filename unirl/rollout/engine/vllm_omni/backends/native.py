@@ -244,7 +244,7 @@ class VLLMOmniBackend:
 
         return self._rt["OmniLoRARequest"](
             lora_name=UNIRL_LORA_NAME,
-            lora_int_id=int(UNIRL_LORA_INT_ID),
+            lora_int_id=UNIRL_LORA_INT_ID,
             lora_path=UNIRL_LORA_PATH,
         )
 
@@ -556,13 +556,12 @@ class VLLMOmniBackend:
 
         from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
             UNIRL_LORA_INT_ID,
-            UNIRL_LORA_NAME,
             UNIRL_LORA_PATH,
         )
         from unirl.utils.peft_merge import adapt_lora_for_vllm
 
         lora_tensors = adapt_lora_for_vllm(lora_tensors)
-        self._remove_existing_lora(int(UNIRL_LORA_INT_ID))
+        self._remove_existing_lora(UNIRL_LORA_INT_ID)
 
         from unirl.distributed.weight_sync.transfer.sgl_compat import (
             MultiprocessingSerializer,
@@ -577,8 +576,8 @@ class VLLMOmniBackend:
                 sid,
                 "set_lora_from_tensor_dict",
                 args=(
-                    str(adapter_name) or UNIRL_LORA_NAME,
-                    int(UNIRL_LORA_INT_ID),
+                    adapter_name,
+                    UNIRL_LORA_INT_ID,
                     UNIRL_LORA_PATH,
                     dict(peft_config or {}),
                     serialized,
@@ -600,13 +599,12 @@ class VLLMOmniBackend:
 
         from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
             UNIRL_LORA_INT_ID,
-            UNIRL_LORA_NAME,
             UNIRL_LORA_PATH,
         )
         from unirl.utils.peft_merge import adapt_lora_for_vllm
 
         lora_tensors = adapt_lora_for_vllm(lora_tensors)
-        self._remove_existing_lora(int(UNIRL_LORA_INT_ID))
+        self._remove_existing_lora(UNIRL_LORA_INT_ID)
 
         cpu_tensors = {
             name: t.detach().to("cpu") if isinstance(t, torch.Tensor) else t for name, t in lora_tensors.items()
@@ -620,8 +618,8 @@ class VLLMOmniBackend:
                 sid,
                 "set_lora_from_tensor_dict_copy",
                 args=(
-                    str(adapter_name) or UNIRL_LORA_NAME,
-                    int(UNIRL_LORA_INT_ID),
+                    adapter_name,
+                    UNIRL_LORA_INT_ID,
                     UNIRL_LORA_PATH,
                     dict(peft_config or {}),
                     serialized,

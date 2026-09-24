@@ -257,36 +257,6 @@ class BucketedIPCReceiveMixin:
             )
         return None
 
-    def _unirl_param_checksums(
-        self,
-        names: Optional[list] = None,
-    ) -> dict:
-        """Return ``{name: short_sha256_hex}`` for the worker's loaded model."""
-        import hashlib
-
-        parameter_module = self._unirl_find_parameter_module()
-        if parameter_module is None:
-            return {}
-
-        target = set(names) if names else None
-        out: dict = {}
-        for name, p in parameter_module.named_parameters():
-            if target is not None and name not in target:
-                continue
-            data = p.detach().contiguous()
-            hasher = hashlib.sha256()
-            hasher.update(str(data.dtype).encode())
-            hasher.update(str(tuple(data.shape)).encode())
-            flat = data.view(torch.uint8).flatten()
-            n = flat.numel()
-            head = flat[: min(256, n)].cpu().numpy().tobytes()
-            tail = flat[max(0, n - 256) :].cpu().numpy().tobytes()
-            hasher.update(head)
-            hasher.update(tail)
-            hasher.update(str(n).encode())
-            out[name] = hasher.hexdigest()[:16]
-        return out
-
     def _unirl_loaded_param_checksums(
         self,
         names: Optional[list] = None,

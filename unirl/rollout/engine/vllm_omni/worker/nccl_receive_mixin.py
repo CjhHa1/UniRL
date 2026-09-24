@@ -50,13 +50,11 @@ class NcclBroadcastReceiveMixin:
         backend: str = "nccl",
     ) -> None:
         """Join the trainer-coordinated process group as the receiver."""
-        from unirl.utils.distributed_utils import (
-            init_process_group as _unirl_init_pg,
-        )
+        from unirl.utils.distributed_utils import init_process_group
 
         local_rank = int(getattr(self, "local_rank", 0))
         global_rank = int(rank_offset) + local_rank
-        new_group = _unirl_init_pg(
+        new_group = init_process_group(
             backend=backend,
             init_method=f"tcp://{master_address}:{int(master_port)}",
             world_size=int(world_size),
@@ -89,7 +87,7 @@ class NcclBroadcastReceiveMixin:
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
     ) -> None:
-        """Receive a bucket of named tensors by ``dist.broadcast`` from rank 0, then call ``self.load_weights``."""
+        """Receive a bucket of named tensors by ``dist.broadcast`` from rank 0, then load them into the worker."""
         del target_modules, flush_cache  # accepted for SGLang-shape parity
         group = type(self)._unirl_weight_groups.get(group_name)
         if group is None:
@@ -112,11 +110,7 @@ class NcclBroadcastReceiveMixin:
             dist.broadcast(tensor, src=0, group=group)
             bucket.append((str(name), tensor))
 
-        loader = getattr(self, "_unirl_load_weights", None)
-        if loader is None:
-            self.load_weights(bucket)
-        else:
-            loader(bucket)
+        self._unirl_load_weights(bucket)
         logger.debug(
             "%s.update_weights_from_distributed: received %d tensors via group %r",
             type(self).__name__,
