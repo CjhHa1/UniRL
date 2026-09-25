@@ -345,19 +345,9 @@ def _is_interpolation(value: Any) -> bool:
     return isinstance(value, str) and value.strip().startswith("${") and value.strip().endswith("}")
 
 
-def validate_checkpoint_engine_ipc_options(
-    *,
-    backend: Any,
-    dp_size: Any,
-    engine_kwargs: Any,
-    allow_interpolation: bool = False,
-) -> None:
-    """Validate config-dependent checkpoint-engine IPC requirements."""
-
-    def dynamic(value: Any) -> bool:
-        return allow_interpolation and _is_interpolation(value)
-
-    normalized_backend = None if backend is None or dynamic(backend) else str(backend).strip().lower()
+def _validate_checkpoint_engine_ipc_options(*, backend: Any, dp_size: Any, engine_kwargs: Any) -> None:
+    """Validate config-dependent checkpoint-engine IPC requirements; unresolved interpolations are skipped."""
+    normalized_backend = None if backend is None or _is_interpolation(backend) else str(backend).strip().lower()
     require(
         normalized_backend in (None, "http"),
         f"CkptEngineIPCWeightSync requires SGLang backend='http'; got {normalized_backend!r}.",
@@ -365,7 +355,7 @@ def validate_checkpoint_engine_ipc_options(
 
     server_dp = dp_size if dp_size is not None else _get(engine_kwargs, "dp_size")
     require(
-        server_dp is None or dynamic(server_dp) or (type(server_dp) is int and server_dp == 1),
+        server_dp is None or _is_interpolation(server_dp) or (type(server_dp) is int and server_dp == 1),
         f"CkptEngineIPCWeightSync requires integer SGLang server dp_size=1; got {server_dp!r}.",
     )
 
@@ -375,7 +365,7 @@ def validate_checkpoint_engine_ipc_options(
         for key in keys
         if str(key).startswith("speculative")
         and (value := _get(engine_kwargs, key))
-        and not dynamic(value)
+        and not _is_interpolation(value)
         and (not isinstance(value, str) or value.strip().lower() != "none")
     ]
     require(
@@ -711,11 +701,10 @@ def validate_weight_sync_contract(facts: RecipeFacts, *, entrypoint: str) -> Non
         if handler is None:
             continue
         if sync.class_name == "CkptEngineIPCWeightSync":
-            validate_checkpoint_engine_ipc_options(
+            _validate_checkpoint_engine_ipc_options(
                 backend=facts.rollout_backend,
                 dp_size=facts.rollout_dp_size,
                 engine_kwargs=facts.rollout_engine_kwargs,
-                allow_interpolation=True,
             )
         method_sets = handler.method_sets()
         if sync.class_name == "RemoteLoraWeightSync" and sync.copy is True:
@@ -806,6 +795,5 @@ __all__ = [
     "SYNC_HANDLERS",
     "SYNC_LOCAL",
     "SYNC_REMOTE",
-    "validate_checkpoint_engine_ipc_options",
     "validate_recipe",
 ]

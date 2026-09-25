@@ -35,9 +35,7 @@ class AsyncDiffusionTrainer(AsyncRolloutTrainerMixin, DiffusionTrainer):
         weight_sync_interval: int = 1,
         **diffusion_kwargs: Any,
     ) -> None:
-        layout = diffusion_kwargs.setdefault("layout", "separate")
-        if layout != "separate":
-            raise ValueError(f"AsyncDiffusionTrainer requires layout='separate', got {layout!r}.")
+        diffusion_kwargs["layout"] = "separate"
         max_inflight = int(max_inflight)
         if max_inflight != 1:
             raise ValueError(
