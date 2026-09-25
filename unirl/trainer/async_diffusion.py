@@ -76,11 +76,6 @@ class AsyncDiffusionTrainer(AsyncRolloutTrainerMixin, DiffusionTrainer):
             **diffusion_kwargs,
         )
 
-        if self.weight_sync is None:
-            raise ValueError(
-                "AsyncDiffusionTrainer requires a cross-slab weight sync; add a `sync:` block to the recipe."
-            )
-
         self._max_inflight = max_inflight
         self._require_single_generation = True
         self._per_worker_inflight = per_worker_inflight

@@ -201,12 +201,6 @@ class ARTrainer(BaseTrainer):
                         pass
                     raise
             else:
-                if sync_cfg is not None and self._rollout_anchor_device == 0:
-                    raise ValueError(
-                        "rollout_anchor_device=0 would colocate the TP engine with "
-                        "the rank-0 RemoteLoraWeightSync sender and self-deadlock; "
-                        "use a nonzero anchor device."
-                    )
                 if self._enable_fsdp_offload:
                     self._anchored_backend_offloaded = None
                     self.backend.offload()

@@ -59,14 +59,22 @@ validate_recipe(cfg, entrypoint="train_diffusion")
 It runs on the driver before the trainer is constructed — before Ray, before the
 engine's `_target_` is imported — so a contradictory recipe dies on the launching
 process in about a second instead of somewhere inside a half-built cluster. Today
-it enforces three contracts across the entrypoint, sampling, engine, sync, and
-placement choices:
+it enforces four contracts across the entrypoint, sampling, engine, sync,
+placement, and algorithm choices:
 
 | Contract | Rejects |
 | --- | --- |
 | `validate_sampling_contract` | AR/diffusion sampling-parameter types routed to the wrong entrypoint |
-| `validate_weight_sync_contract` | wrong engine family for an entrypoint; missing or extra sync/anchor fields; invalid anchor values; local/remote handler topology mismatches; unsupported receive/verification methods; incomplete or misrouted PE track maps; unsupported entrypoint-specific sync modes |
+| `validate_weight_sync_contract` | wrong engine family for an entrypoint; missing or extra sync/anchor fields; invalid anchor values; local/remote handler topology mismatches; unsupported receive/verification methods; incomplete or misrouted PE track maps; unsupported entrypoint-specific sync modes; vLLM native IPC without FSDP offload |
 | `validate_rollout_layout` | invalid layout values; separate direct sampling; layout fields on entrypoints that do not consume them |
+| `validate_algorithm_contract` | a `loss_agg_mode` the targeted algorithm does not implement (`ALGORITHM_LOSS_AGG_MODES`) |
+
+**The gate is the only check.** A condition a contract enforces is not re-checked
+in a trainer, engine, weight-sync handler, or algorithm `__init__`: runtime code
+assumes it (e.g. calls the capability method directly, indexes the PE child by
+`track_prefix`). Constructing those classes without `validate_recipe` is
+unsupported. Checks that depend on the run rather than the recipe (device counts,
+rank topology, tensor contents) stay where the fact is known.
 
 **Recipe shapes live in exactly one place.** Contracts never read a hard-coded
 dotpath; they read `RecipeFacts.from_cfg(cfg)`, which absorbs the per-entrypoint
@@ -89,7 +97,7 @@ reaching into `cfg` from the contract.
 ## Verification
 
 `lint/check_recipe_contracts.py` (pre-commit hook `check-recipe-contracts`,
-so it rides the lint-only CI alongside `check-recipe-targets`) asserts five
+so it rides the lint-only CI alongside `check-recipe-targets`) asserts six
 things on every run:
 
 1. Every runnable recipe under `examples/` satisfies every contract. Two
@@ -106,8 +114,10 @@ things on every run:
    a local `rollout` sibling.
 5. Every `unirl/train_*.py` calls `validate_recipe` first, with its own entrypoint
    name, so adding an entrypoint cannot silently bypass the gate.
+6. `ALGORITHM_LOSS_AGG_MODES` lists exactly the algorithm classes whose `__init__`
+   takes `loss_agg_mode`, and each constructor default is a listed mode.
 
-All five run with `ast` + `yaml` only, no torch — which is why `contracts.py`
+All six run with `ast` + `yaml` only, no torch — which is why `contracts.py`
 and `require.py` stay stdlib-only.
 
 ## Gotchas
