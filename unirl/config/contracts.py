@@ -206,6 +206,22 @@ SYNC_HANDLERS: Mapping[str, SyncHandler] = {
 ENGINE_SECTIONS = ("rollout", "ar_rollout", "dit_rollout")
 LAYOUTS = ("colocate", "separate")
 
+LOSS_AGG_TOKEN_MEAN = "token-mean"
+LOSS_AGG_SEQ_MEAN_TOKEN_MEAN = "seq-mean-token-mean"
+LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM = "seq-mean-token-sum-norm"
+_TOKEN_LOSS_AGG_MODES = frozenset({LOSS_AGG_TOKEN_MEAN, LOSS_AGG_SEQ_MEAN_TOKEN_MEAN, LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM})
+_TOKEN_OR_SUM_NORM_LOSS_AGG_MODES = frozenset({LOSS_AGG_TOKEN_MEAN, LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM})
+
+ALGORITHM_LOSS_AGG_MODES: Mapping[str, frozenset[str]] = {
+    "unirl.algorithms.grpo.GRPO": _TOKEN_LOSS_AGG_MODES,
+    "unirl.algorithms.ppo.PPO": _TOKEN_LOSS_AGG_MODES,
+    "unirl.algorithms.sft.SFT": _TOKEN_LOSS_AGG_MODES,
+    "unirl.algorithms.drpo.DRPO": _TOKEN_OR_SUM_NORM_LOSS_AGG_MODES,
+    "unirl.algorithms.cppo.CPPO": _TOKEN_OR_SUM_NORM_LOSS_AGG_MODES,
+    "unirl.algorithms.dppo.DPPO": _TOKEN_OR_SUM_NORM_LOSS_AGG_MODES,
+    "unirl.algorithms.gspo.GSPO": frozenset({"seq-mean"}),
+}
+
 
 def engine_family_name(target: str) -> Optional[str]:
     """Return the declared package family for an engine or engine-config target."""
@@ -238,6 +254,15 @@ class Block:
 
 
 @dataclass(frozen=True)
+class AlgorithmBlock:
+    """A targeted algorithm block with the recipe-set ``loss_agg_mode`` (None when the constructor default applies)."""
+
+    path: str
+    target: str
+    loss_agg_mode: Any = None
+
+
+@dataclass(frozen=True)
 class RecipeFacts:
     """Normalized facts consumed by every cross-component contract."""
 
@@ -251,6 +276,7 @@ class RecipeFacts:
     rollout_anchor_device: Any
     freeze_llm: bool
     enable_fsdp_offload: Optional[bool]
+    algorithms: tuple[AlgorithmBlock, ...]
     samplings: tuple[Block, ...]
     rollout_backend: Optional[str]
     rollout_dp_size: Any
@@ -282,6 +308,7 @@ class RecipeFacts:
             rollout_anchor_device=raw_anchor,
             freeze_llm=bool(_get(cfg, "freeze_llm")),
             enable_fsdp_offload=None if raw_offload is None or _is_interpolation(raw_offload) else bool(raw_offload),
+            algorithms=tuple(_read_algorithm_blocks(_get(cfg, "algorithm"))),
             samplings=tuple(_read_sampling_blocks(_get(cfg, "sampling"))),
             rollout_backend=(
                 None if raw_backend is None or _is_interpolation(raw_backend) else str(raw_backend).strip().lower()
@@ -401,6 +428,20 @@ def _read_sampling_blocks(sampling_section: Any) -> list[Block]:
         Block(path=f"sampling.{track}", target=target, track=str(track))
         for track in tracks
         if (target := _target(_get(sampling_section, track))) is not None
+    ]
+
+
+def _read_algorithm_blocks(algorithm_section: Any) -> list[AlgorithmBlock]:
+    """Normalize a single algorithm or a track-keyed algorithm map (``algorithm.ar`` / ``algorithm.image``)."""
+    if algorithm_section is None:
+        return []
+    if (target := _target(algorithm_section)) is not None:
+        return [AlgorithmBlock("algorithm", target, _get(algorithm_section, "loss_agg_mode"))]
+    tracks = algorithm_section.keys() if hasattr(algorithm_section, "keys") else ()
+    return [
+        AlgorithmBlock(f"algorithm.{track}", target, _get(block, "loss_agg_mode"))
+        for track in tracks
+        if (target := _target(block := _get(algorithm_section, track))) is not None
     ]
 
 
@@ -720,10 +761,25 @@ def validate_rollout_layout(facts: RecipeFacts, *, entrypoint: str) -> None:
         )
 
 
+def validate_algorithm_contract(facts: RecipeFacts, *, entrypoint: str) -> None:
+    """Require every recipe-set ``loss_agg_mode`` to be one the targeted algorithm implements."""
+    for algorithm in facts.algorithms:
+        modes = ALGORITHM_LOSS_AGG_MODES.get(algorithm.target)
+        mode = algorithm.loss_agg_mode
+        if modes is None or mode is None or _is_interpolation(mode):
+            continue
+        require(
+            mode in modes,
+            f"cfg.{algorithm.path}.loss_agg_mode={mode!r} is not implemented by "
+            f"{algorithm.target.rsplit('.', 1)[-1]}; expected one of {sorted(modes)}.",
+        )
+
+
 CONTRACTS = (
     validate_sampling_contract,
     validate_weight_sync_contract,
     validate_rollout_layout,
+    validate_algorithm_contract,
 )
 
 
@@ -743,6 +799,7 @@ def _describe(blocks: tuple[Block, ...]) -> str:
 
 
 __all__ = [
+    "ALGORITHM_LOSS_AGG_MODES",
     "ENGINE_CAPABILITY_METHODS",
     "ENGINE_FAMILIES",
     "KNOWN_ENTRYPOINTS",

@@ -218,6 +218,40 @@ def check_sync_handlers() -> list[str]:
     return failures
 
 
+def check_algorithm_loss_agg_modes() -> list[str]:
+    """Require ALGORITHM_LOSS_AGG_MODES to list exactly the algorithms whose constructor takes loss_agg_mode."""
+    failures: list[str] = []
+    declared = dict(contracts.ALGORITHM_LOSS_AGG_MODES)
+    for path in sorted((ROOT / "unirl" / "algorithms").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for cls in (node for node in tree.body if isinstance(node, ast.ClassDef)):
+            init = next(
+                (node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "__init__"),
+                None,
+            )
+            if init is None:
+                continue
+            args = init.args
+            named = [*args.args, *args.kwonlyargs]
+            if "loss_agg_mode" not in {arg.arg for arg in named}:
+                continue
+            target = f"unirl.algorithms.{path.stem}.{cls.name}"
+            modes = declared.pop(target, None)
+            if modes is None:
+                failures.append(f"{target}.__init__ takes loss_agg_mode, but ALGORITHM_LOSS_AGG_MODES omits it")
+                continue
+            positional_defaults = dict(zip([arg.arg for arg in args.args][-len(args.defaults) :], args.defaults))
+            keyword_defaults = {arg.arg: default for arg, default in zip(args.kwonlyargs, args.kw_defaults)}
+            default = {**positional_defaults, **keyword_defaults}.get("loss_agg_mode")
+            if isinstance(default, ast.Constant) and default.value not in modes:
+                failures.append(
+                    f"{target}.__init__ defaults loss_agg_mode={default.value!r}, "
+                    f"outside ALGORITHM_LOSS_AGG_MODES {sorted(modes)}"
+                )
+    failures.extend(f"ALGORITHM_LOSS_AGG_MODES declares stale algorithm {target!r}" for target in sorted(declared))
+    return failures
+
+
 def check_entrypoint_gates() -> list[str]:
     """Require validate_recipe to be the first statement in every train main."""
     failures: list[str] = []
@@ -265,6 +299,8 @@ LOCAL_LORA_SYNC = "unirl.distributed.weight_sync.lora.LocalLoraWeightSync"
 REMOTE_LORA_SYNC = "unirl.distributed.weight_sync.lora.RemoteLoraWeightSync"
 CHECKPOINT_SYNC = "unirl.distributed.weight_sync.full.checkpoint.CheckpointWeightSync"
 CKPT_ENGINE_IPC_SYNC = "unirl.distributed.weight_sync.full.ckpt_engine_ipc.CkptEngineIPCWeightSync"
+GRPO = "unirl.algorithms.grpo.GRPO"
+DRPO = "unirl.algorithms.drpo.DRPO"
 AR_SAMPLING = "unirl.types.sampling.ARSamplingParams"
 DIFFUSION_SAMPLING = "unirl.types.sampling.DiffusionSamplingParams"
 
@@ -702,11 +738,33 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_ar",
         {"rollout": {"_target_": VLLM}, "sync": {"_target_": IPC_SYNC}, "rollout_anchor_device": 1},
     ),
+    "GSPO-style loss_agg_mode on GRPO": (
+        "train_ar",
+        {"rollout": {"_target_": TRAINSIDE}, "algorithm": {"_target_": GRPO, "loss_agg_mode": "seq-mean"}},
+    ),
+    "seq-mean-token-mean on DRPO": (
+        "train_ar",
+        {"rollout": {"_target_": TRAINSIDE}, "algorithm": {"_target_": DRPO, "loss_agg_mode": "seq-mean-token-mean"}},
+    ),
+    "unknown loss_agg_mode on a unified AR track": (
+        "train_unified_model",
+        {
+            "rollout": {"_target_": TRAINSIDE},
+            "algorithm": {
+                "ar": {"_target_": GRPO, "loss_agg_mode": "token-sum"},
+                "image": {"_target_": "unirl.algorithms.flowgrpo.FlowGRPO"},
+            },
+        },
+    ),
 }
 
 MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     "colocated direct sampling": ("train_diffusion", {"rollout": {"_target_": TRAINSIDE}}),
     "vLLM native IPC": ("train_ar", {"rollout": {"_target_": VLLM}, "sync": {"_target_": IPC_SYNC}}),
+    "interpolated loss_agg_mode": (
+        "train_ar",
+        {"rollout": {"_target_": TRAINSIDE}, "algorithm": {"_target_": GRPO, "loss_agg_mode": "${oc.env:AGG,x}"}},
+    ),
     "separate diffusion with NCCL": (
         "train_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "separate"},
@@ -828,6 +886,13 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
 
 EXPECTED_REJECT_MESSAGES = {
     "unified single dedicated engine": "single-engine mode does not wire weight sync",
+    "vLLM native IPC without FSDP offload": "requires cfg.enable_fsdp_offload=true",
+    "vLLM with tensor sync": "TensorWeightSync needs one of",
+    "vLLM under async AR": "does not support train_async_ar",
+    "anchored vLLM native IPC": "anchored train_ar rollout supports only RemoteLoraWeightSync",
+    "GSPO-style loss_agg_mode on GRPO": "cfg.algorithm.loss_agg_mode='seq-mean' is not implemented by GRPO",
+    "seq-mean-token-mean on DRPO": "cfg.algorithm.loss_agg_mode='seq-mean-token-mean' is not implemented by DRPO",
+    "unknown loss_agg_mode on a unified AR track": "cfg.algorithm.ar.loss_agg_mode='token-sum'",
 }
 
 
@@ -874,12 +939,14 @@ def main() -> int:
     recipe_failures, checked = check_recipes()
     table_failures = check_engine_families()
     handler_failures = check_sync_handlers()
+    algorithm_failures = check_algorithm_loss_agg_modes()
     entrypoint_failures = check_entrypoint_gates()
     sections = (
         ("Contract mutation cases failed", gate_failures),
         ("Recipes violate contracts", recipe_failures),
         ("Engine metadata drifted", table_failures),
         ("Sync-handler metadata drifted", handler_failures),
+        ("Algorithm loss_agg_mode metadata drifted", algorithm_failures),
         ("Training entrypoints bypass the gate", entrypoint_failures),
     )
     for title, failures in sections:

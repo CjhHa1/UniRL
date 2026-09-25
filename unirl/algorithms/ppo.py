@@ -22,8 +22,6 @@ from .base import (
     typed_conditions,
 )
 
-_LOSS_AGG_MODES = frozenset({"token-mean", "seq-mean-token-sum-norm", "seq-mean-token-mean"})
-
 
 @dataclass
 class PPOConfig(BaseAlgorithmConfig):
@@ -117,8 +115,6 @@ class PPO(StageAlgorithm):
             raise ValueError("PPO: vf_coef must be non-negative")
         if not (0.0 <= float(gae_gamma) <= 1.0 and 0.0 <= float(gae_lambda) <= 1.0):
             raise ValueError("PPO: gae_gamma and gae_lambda must be in [0, 1]")
-        if str(loss_agg_mode) not in _LOSS_AGG_MODES:
-            raise ValueError(f"PPO: unsupported loss_agg_mode={loss_agg_mode!r}")
         if int(horizon) <= 0:
             raise ValueError("PPO: horizon must be positive")
 

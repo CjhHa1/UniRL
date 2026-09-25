@@ -14,8 +14,6 @@ from unirl.types.segments.text import TextSegment
 
 from .base import AlgorithmStepResult, StageAlgorithm, typed_conditions
 
-_LOSS_AGG_MODES = ("token-mean", "seq-mean-token-mean", "seq-mean-token-sum-norm")
-
 
 class SFT(StageAlgorithm):
     """Masked next-token cross-entropy over an AR ``TextSegment``."""
@@ -38,8 +36,6 @@ class SFT(StageAlgorithm):
             raise ValueError("SFT: either `stage` or `pipeline` must be provided")
         if stage is None:
             stage = getattr(pipeline, stage_attr)
-        if loss_agg_mode not in _LOSS_AGG_MODES:
-            raise ValueError(f"SFT: loss_agg_mode must be one of {_LOSS_AGG_MODES}; got {loss_agg_mode!r}.")
         self.stage = stage
         self.loss_agg_mode = loss_agg_mode
         self.horizon = horizon
