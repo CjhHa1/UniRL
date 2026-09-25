@@ -250,6 +250,7 @@ SGLANG = "unirl.rollout.engine.sglang.engine.SGLangRolloutEngine"
 SGLANG_DIFFUSION = "unirl.rollout.engine.sglang_diffusion.engine.SGLangDiffusionRolloutEngine"
 VLLM_OMNI = "unirl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine"
 FASTVIDEO = "unirl.rollout.engine.fastvideo.engine.FastVideoRolloutEngine"
+VLLM = "unirl.rollout.engine.vllm.engine.VLLMRolloutEngine"
 COMPOSED = "unirl.rollout.engine.composed.engine.ComposedRolloutEngine"
 AGENTIC = "unirl.rollout.engine.agentic.engine.AgenticRolloutEngine"
 SGLANG_CONFIG = "unirl.rollout.engine.sglang.config.SGLangEngineConfig"
@@ -685,10 +686,27 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
             "layout": "${oc.env:LAYOUT,colocate}",
         },
     ),
+    "vLLM native IPC without FSDP offload": (
+        "train_ar",
+        {"rollout": {"_target_": VLLM}, "sync": {"_target_": IPC_SYNC}, "enable_fsdp_offload": False},
+    ),
+    "vLLM with tensor sync": (
+        "train_ar",
+        {"rollout": {"_target_": VLLM}, "sync": {"_target_": TENSOR_SYNC}},
+    ),
+    "vLLM under async AR": (
+        "train_async_ar",
+        {"rollout": {"_target_": VLLM}, "sync": {"_target_": NCCL_SYNC}},
+    ),
+    "anchored vLLM native IPC": (
+        "train_ar",
+        {"rollout": {"_target_": VLLM}, "sync": {"_target_": IPC_SYNC}, "rollout_anchor_device": 1},
+    ),
 }
 
 MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     "colocated direct sampling": ("train_diffusion", {"rollout": {"_target_": TRAINSIDE}}),
+    "vLLM native IPC": ("train_ar", {"rollout": {"_target_": VLLM}, "sync": {"_target_": IPC_SYNC}}),
     "separate diffusion with NCCL": (
         "train_diffusion",
         {"rollout": {"_target_": SGLANG_DIFFUSION}, "sync": {"_target_": NCCL_SYNC}, "layout": "separate"},

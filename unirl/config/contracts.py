@@ -24,8 +24,22 @@ SYNC_MARK_CHECKPOINT_ENGINE_FAILURE = "mark_checkpoint_engine_sync_failed"
 SYNC_VERIFY_TOPOLOGY = "tp_per_stage"
 SYNC_VERIFY_LORA = "loaded_lora_checksums"
 ENGINE_SHUTDOWN = "shutdown"
+VLLM_NATIVE_IPC_METHODS = frozenset(
+    {
+        "ipc_worker_device_uuids",
+        "set_weight_sync_sleep_level",
+        "preserve_weights_for_next_sleep",
+        "init_native_weight_transfer",
+        "start_native_weight_update",
+        "update_native_weights",
+        "finish_native_weight_update",
+        "release_native_ipc",
+        "poison",
+    }
+)
 
 ENGINE_CAPABILITY_METHODS = (
+    *sorted(VLLM_NATIVE_IPC_METHODS),
     SYNC_VIA_IPC,
     SYNC_VIA_TENSOR,
     SYNC_VIA_NCCL,
@@ -156,19 +170,28 @@ ENGINE_FAMILIES: Mapping[str, EngineFamily] = {
         entrypoints=frozenset({ENTRYPOINT_DIFFUSION}),
         capabilities=frozenset({*_BASE_ENGINE_CAPABILITIES, SYNC_VIA_CHECKPOINT}),
     ),
+    "vllm": EngineFamily(
+        direct_sampling=False,
+        entrypoints=frozenset({ENTRYPOINT_AR}),
+        capabilities=frozenset({*_BASE_ENGINE_CAPABILITIES, *VLLM_NATIVE_IPC_METHODS}),
+    ),
 }
 
 
 @dataclass(frozen=True)
 class SyncHandler:
-    """Required engine methods and placement boundary owned by a sync handler."""
+    """Engine methods (any one alternative set suffices) and placement boundary owned by a sync handler."""
 
     required_methods: frozenset[str]
     topology: str
+    alternative_methods: tuple[frozenset[str], ...] = ()
+
+    def method_sets(self) -> tuple[frozenset[str], ...]:
+        return (self.required_methods, *self.alternative_methods)
 
 
 SYNC_HANDLERS: Mapping[str, SyncHandler] = {
-    "IPCWeightSync": SyncHandler(frozenset({SYNC_VIA_IPC}), SYNC_LOCAL),
+    "IPCWeightSync": SyncHandler(frozenset({SYNC_VIA_IPC}), SYNC_LOCAL, (VLLM_NATIVE_IPC_METHODS,)),
     "TensorWeightSync": SyncHandler(frozenset({SYNC_VIA_TENSOR}), SYNC_LOCAL),
     "NCCLWeightSync": SyncHandler(frozenset({SYNC_VIA_NCCL, SYNC_VIA_NCCL_UPDATE}), SYNC_REMOTE),
     "LocalLoraWeightSync": SyncHandler(frozenset({SYNC_VIA_LORA}), SYNC_LOCAL),
@@ -227,6 +250,7 @@ class RecipeFacts:
     layout: Optional[str]
     rollout_anchor_device: Any
     freeze_llm: bool
+    enable_fsdp_offload: Optional[bool]
     samplings: tuple[Block, ...]
     rollout_backend: Optional[str]
     rollout_dp_size: Any
@@ -246,6 +270,7 @@ class RecipeFacts:
         raw_layout = _get(cfg, "layout")
         raw_anchor = _get(cfg, "rollout_anchor_device")
         raw_backend = _get_path(cfg, "rollout.config.backend")
+        raw_offload = _get(cfg, "enable_fsdp_offload")
         return cls(
             engines=engines,
             nested_engines=nested_engines,
@@ -256,6 +281,7 @@ class RecipeFacts:
             layout=None if raw_layout is None or _is_interpolation(raw_layout) else str(raw_layout),
             rollout_anchor_device=raw_anchor,
             freeze_llm=bool(_get(cfg, "freeze_llm")),
+            enable_fsdp_offload=None if raw_offload is None or _is_interpolation(raw_offload) else bool(raw_offload),
             samplings=tuple(_read_sampling_blocks(_get(cfg, "sampling"))),
             rollout_backend=(
                 None if raw_backend is None or _is_interpolation(raw_backend) else str(raw_backend).strip().lower()
@@ -650,17 +676,23 @@ def validate_weight_sync_contract(facts: RecipeFacts, *, entrypoint: str) -> Non
                 engine_kwargs=facts.rollout_engine_kwargs,
                 allow_interpolation=True,
             )
-        needed = handler.required_methods
+        method_sets = handler.method_sets()
         if sync.class_name == "RemoteLoraWeightSync" and sync.copy is True:
-            needed = frozenset({SYNC_VIA_LORA_COPY})
+            method_sets = (frozenset({SYNC_VIA_LORA_COPY}),)
         if sync.verify is True:
-            needed = frozenset({*needed, SYNC_VERIFY_TOPOLOGY, SYNC_VERIFY_LORA})
+            method_sets = tuple(frozenset({*needed, SYNC_VERIFY_TOPOLOGY, SYNC_VERIFY_LORA}) for needed in method_sets)
         for block, family in facts.families(_sync_engine_blocks(facts, sync)):
             require(
-                needed <= family.capabilities,
-                f"cfg.{sync.path}={sync.class_name} needs {sorted(needed)}, but "
+                any(needed <= family.capabilities for needed in method_sets),
+                f"cfg.{sync.path}={sync.class_name} needs one of {[sorted(needed) for needed in method_sets]}, but "
                 f"cfg.{block.path}._target_={block.target!r} supports {sorted(family.capabilities)}.",
             )
+            if sync.class_name == "IPCWeightSync" and engine_family_name(block.target) == "vllm":
+                require(
+                    facts.enable_fsdp_offload is not False,
+                    f"cfg.{sync.path}=IPCWeightSync streams through vLLM native IPC, which requires "
+                    "cfg.enable_fsdp_offload=true to release optimizer/model state around rollout.",
+                )
 
 
 def validate_rollout_layout(facts: RecipeFacts, *, entrypoint: str) -> None:
