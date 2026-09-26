@@ -15,7 +15,6 @@ from unirl.distributed.group.dispatch import (
     DISTRIBUTED_CONFIG_ATTR,
     Dispatch,
     Execute,
-    has_partial_localization,
     remap_required_store_keys,
     required_store_keys,
     resolve_backward_dispatch_mode,
@@ -609,13 +608,7 @@ class Handle:
                 execute_fn = self._execute_rank_zero
 
             self._method_configs[name] = (dispatch_fn, collect_fn, execute_fn, config)
-            bound = self._make_handle_fn(
-                name,
-                dispatch_fn,
-                collect_fn,
-                execute_fn,
-                config,
-            )
+            bound = self._make_handle_fn(name, dispatch_fn, collect_fn, execute_fn, config)
             setattr(self, name, bound)
 
     def _make_handle_fn(
@@ -626,11 +619,8 @@ class Handle:
         execute_fn: Callable,
         config: Dict[str, Any],
     ) -> Callable:
-        """Create a handle method that dispatches, localizes, executes, collects, and rebinds."""
+        """Create handle method: dispatch → localize → execute → collect → rebind."""
         dispatch_mode = config["dispatch_mode"]
-        partial_localize = issubclass(self.pool.transport_cls, WorkerLocalTransport) and has_partial_localization(
-            config
-        )
 
         def handle_fn(*args, **kwargs):
             ray_get_timeout = kwargs.pop("_ray_get_timeout", None)
@@ -640,20 +630,12 @@ class Handle:
             input_metas = []
             bwd_dispatch_mode = None
             if ctx is not None:
-                if partial_localize:
-                    raise ValueError(
-                        f"Method '{method_name}' declares reads=/skips=... (partial localization), "
-                        f"which does not support auto-backward: the refs it does not read are never "
-                        f"resolved on the worker, so they have no grad leaf to chain back to. "
-                        f"Do not call this method inside enable_grad()."
-                    )
                 bwd_dispatch_mode = resolve_backward_dispatch_mode(method_name, dispatch_mode, self.rank_infos)
                 call_id = f"{method_name}_{next(self._grad_call_counter)}"
                 input_metas = collect_leaves(args, TensorRef) + collect_leaves(tuple(kwargs.values()), TensorRef)
 
             refs, worker_local, leases, passthrough = self._launch_call(
                 method_name,
-                dispatch_mode,
                 dispatch_fn,
                 execute_fn,
                 args,
@@ -695,7 +677,6 @@ class Handle:
     def _launch_call(
         self,
         method_name: str,
-        dispatch_mode: Dispatch,
         dispatch_fn: Callable,
         execute_fn: Callable,
         args: tuple,
@@ -709,7 +690,7 @@ class Handle:
         self.pool.assert_usable()
         batch_size = infer_batch_size(args, kwargs)
         if (
-            dispatch_mode in (Dispatch.DP_SCATTER, Dispatch.DP_SCATTER_HEAD)
+            config["dispatch_mode"] in (Dispatch.DP_SCATTER, Dispatch.DP_SCATTER_HEAD)
             and batch_size is not None
             and batch_size % self.dp_size != 0
         ):
@@ -718,45 +699,39 @@ class Handle:
         shards = dispatch_fn(self, args, kwargs, batch_size)
         transport_cls = self.pool.transport_cls
         worker_local = issubclass(transport_cls, WorkerLocalTransport)
-        partial_localize = worker_local and has_partial_localization(config)
-
-        def required_masks(current_shards):
-            cache = {}
-            masks = []
-            for s_args, s_kwargs in current_shards:
-                shard_id = (id(s_args), id(s_kwargs))
-                if shard_id not in cache:
-                    cache[shard_id] = required_store_keys(config, s_args, s_kwargs)
-                masks.append(cache[shard_id])
-            return masks
-
-        required_before = required_masks(shards) if partial_localize else None
-        before_localize = shards
-        if partial_localize:
-            shards = transport_cls.localize(
-                shards,
-                self.pool,
-                self.device_ids,
-                self.worker_ids,
-                required_before,
-            )
-        else:
+        if not worker_local or (config["reads"] is None and config["skips"] is None):
             shards = transport_cls.localize(shards, self.pool, self.device_ids, self.worker_ids)
+            refs = execute_fn(method_name, shards, grad_mode=grad_mode, call_id=call_id)
+            return refs, worker_local, shards, None
 
-        if partial_localize:
-            required = [
-                remap_required_store_keys(mask, *before, *after)
-                for before, after, mask in zip(before_localize, shards, required_before)
-            ]
-            # Keep every post-localization handle alive through result collection.
-            # A dehydrated ref that round-trips is restored to this exact object,
-            # avoiding a duplicate decref finalizer on its deserialized copy.
-            passthrough = self._handles_by_store_key(shards)
-        else:
-            required = None
-            passthrough = None
-        refs = execute_fn(method_name, shards, grad_mode=grad_mode, call_id=call_id, required=required)
-        return refs, worker_local, shards, passthrough
+        if grad_mode:
+            raise ValueError(
+                f"Method '{method_name}' declares reads=/skips=... (partial localization), "
+                f"which does not support auto-backward: the refs it does not read are never "
+                f"resolved on the worker, so they have no grad leaf to chain back to. "
+                f"Do not call this method inside enable_grad()."
+            )
+
+        # Broadcast dispatch repeats one shard object per worker; evaluate its selector once.
+        mask_cache: Dict[Tuple[int, int], Set[Any]] = {}
+        required_before = []
+        for s_args, s_kwargs in shards:
+            shard_id = (id(s_args), id(s_kwargs))
+            if shard_id not in mask_cache:
+                mask_cache[shard_id] = required_store_keys(config, s_args, s_kwargs)
+            required_before.append(mask_cache[shard_id])
+
+        localized = transport_cls.localize(shards, self.pool, self.device_ids, self.worker_ids, required_before)
+        required = [
+            remap_required_store_keys(mask, *before, *after)
+            for before, after, mask in zip(shards, localized, required_before)
+        ]
+        # Keep every post-localization handle alive through result collection.
+        # A dehydrated ref that round-trips is restored to this exact object,
+        # avoiding a duplicate decref finalizer on its deserialized copy.
+        passthrough = self._handles_by_store_key(localized)
+        refs = execute_fn(method_name, localized, grad_mode=grad_mode, call_id=call_id, required=required)
+        return refs, worker_local, localized, passthrough
 
     def _resolve_call(
         self,
@@ -778,14 +753,9 @@ class Handle:
             timeout=ray_get_timeout,
         )
         workers = self.workers if targets is None else targets
-        worker_ids = self.worker_ids if targets is None else [None] * len(targets)
-        for result, worker_id in zip(results, worker_ids):
-            self._validate_rebind_tree(
-                result,
-                worker_local=worker_local,
-                passthrough=passthrough,
-                worker_id=worker_id,
-            )
+        if passthrough is not None:
+            for result, worker_id in zip(results, self.worker_ids):
+                self._validate_rebind_tree(result, passthrough=passthrough, worker_id=worker_id)
         results = [
             self._rebind_tree(
                 result,
@@ -798,7 +768,7 @@ class Handle:
         return collect_fn(self, results)
 
     def launch_nowait(self, method_name: str, *args, **kwargs) -> PendingHandleCall:
-        """Launch a distributed method without blocking."""
+        """Launch a @distributed method without blocking: the launch phase of"""
         if current_grad_context() is not None:
             raise RuntimeError(f"launch_nowait({method_name!r}) is not valid inside a GradContext")
         try:
@@ -810,7 +780,6 @@ class Handle:
 
         refs, worker_local, leases, passthrough = self._launch_call(
             method_name,
-            config["dispatch_mode"],
             dispatch_fn,
             execute_fn,
             args,
@@ -865,21 +834,17 @@ class Handle:
         for s_args, s_kwargs in shards:
             for ref in collect_leaves(s_args, TensorRef) + collect_leaves(s_kwargs, TensorRef):
                 for span in ref.spans:
-                    key = getattr(span.handle, "store_key", None)
-                    if key is not None:
-                        handles.setdefault(key, span.handle)
+                    if span.handle.store_key is not None:
+                        handles.setdefault(span.handle.store_key, span.handle)
         return handles
 
-    def _validate_rebind_tree(self, obj, *, worker_local: bool, passthrough, worker_id) -> None:
+    def _validate_rebind_tree(self, obj, *, passthrough, worker_id) -> None:
         """Validate result-handle ownership before any result is rebound."""
-        if not worker_local or passthrough is None or worker_id is None:
-            return
         transport_cls = self.pool.transport_cls
         device_id = self.pool.device_id_of(worker_id)
 
         def validate(handle) -> None:
-            key = getattr(handle, "store_key", None)
-            if key in passthrough or getattr(handle, "object_ref", None) is not None:
+            if handle.store_key in passthrough or handle.object_ref is not None:
                 return
             if not transport_cls._is_local(handle, worker_id, device_id, self.pool):
                 raise RuntimeError(
@@ -902,7 +867,7 @@ class Handle:
         """Rebind every ref leaf onto ``worker_handle`` and wrap bare handles in TensorRef."""
 
         def restore(handle):
-            return passthrough.get(getattr(handle, "store_key", None)) if passthrough else None
+            return passthrough.get(handle.store_key) if passthrough else None
 
         def claim(handle) -> None:
             """Bind a handle the callee produced after the ownership pre-pass."""

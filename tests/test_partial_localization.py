@@ -136,7 +136,6 @@ def test_launch_call_sends_post_localization_store_keys() -> None:
 
     refs, worker_local, leases, passthrough = handle._launch_call(
         "method",
-        Dispatch.BROADCAST,
         lambda *_: [((source,), {})],
         execute,
         (source,),

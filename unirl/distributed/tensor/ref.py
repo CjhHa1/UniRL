@@ -81,14 +81,10 @@ def ref_store_keys(ref: "TensorRef") -> set:
     keys = set()
     for span in ref.spans:
         handle = span.handle
-        store_key = getattr(handle, "store_key", None)
-        if store_key is not None:
-            keys.add(store_key)
-            continue
-        object_ref = getattr(handle, "object_ref", None)
-        if object_ref is not None:
-            binary = getattr(object_ref, "binary", None)
-            keys.add(("object_ref", binary() if callable(binary) else object_ref))
+        if handle.store_key is not None:
+            keys.add(handle.store_key)
+        elif handle.object_ref is not None:
+            keys.add(("object_ref", handle.object_ref.binary()))
     return keys
 
 

@@ -12,12 +12,7 @@ import torch
 from torch import Tensor
 
 from unirl.distributed.group.remote import RankInfo, Remote
-from unirl.distributed.tensor import (
-    TensorRef,
-    TensorTransport,
-    TensorTransportRuntime,
-    map_tree,
-)
+from unirl.distributed.tensor import TensorRef, TensorTransport, TensorTransportRuntime, map_tree
 from unirl.distributed.tensor.factory import build_transport
 from unirl.distributed.tensor.ref import ref_is_required
 from unirl.distributed.utils import collect_leaves
@@ -191,9 +186,6 @@ class Worker:
         """Resolve selected tensor inputs, invoke one role method, and pack tensor outputs."""
         role = self._roles[role_name]
 
-        # Resolve: collect the TensorRef leaves this call needs (tree order),
-        # batch-fetch, substitute. Keys are positional indices so get_batch
-        # results align with the walk.
         in_metas = [
             m for m in self._collect(args, TensorRef) + self._collect(kwargs, TensorRef) if ref_is_required(m, required)
         ]

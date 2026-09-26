@@ -191,29 +191,16 @@ def resolve_backward_dispatch_mode(
 # ── Partial localization (``reads=`` / ``skips=``) ──
 
 
-def _subtree_store_keys(selector: Callable, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Set[Any]:
-    keys: Set[Any] = set()
-    for ref in collect_leaves(selector(*args, **kwargs), TensorRef):
-        keys |= ref_store_keys(ref)
-    return keys
-
-
-def has_partial_localization(config: Optional[Dict[str, Any]]) -> bool:
-    """Whether a ``@distributed`` config narrows localization at all."""
-    return bool(config) and (config.get("reads") is not None or config.get("skips") is not None)
-
-
-def required_store_keys(
-    config: Optional[Dict[str, Any]], args: Tuple[Any, ...], kwargs: Dict[str, Any]
-) -> Optional[Set[Any]]:
-    """Return the storage keys one shard must resolve, or ``None`` to resolve all."""
-    if not has_partial_localization(config):
-        return None
+def required_store_keys(config: Dict[str, Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Set[Any]:
+    """Return the storage keys one shard must resolve under ``config``'s ``reads=`` / ``skips=``."""
     if not args and not kwargs:
         return set()
-    reads_fn, skips_fn = config.get("reads"), config.get("skips")
+    reads_fn, skips_fn = config["reads"], config["skips"]
     if reads_fn is not None:
-        return _subtree_store_keys(reads_fn, args, kwargs)
+        keys: Set[Any] = set()
+        for ref in collect_leaves(reads_fn(*args, **kwargs), TensorRef):
+            keys |= ref_store_keys(ref)
+        return keys
 
     # Blacklist. Identity plus occurrence counts decides which refs are inside the
     # skipped subtrees. A selector that hands back a VIEW instead of the tree's own
