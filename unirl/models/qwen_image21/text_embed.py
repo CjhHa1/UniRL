@@ -35,11 +35,11 @@ class QwenImage21TextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
         )
         forward_kwargs = {k: inputs[k] for k in ("input_ids", "attention_mask", "mm_token_type_ids") if k in inputs}
 
-        norm = bundle.text_encoder.model.language_model.norm
-        handle = norm.register_forward_hook(lambda module, args, output: args[0])
+        encoder = bundle.text_encoder.model
+        handle = encoder.language_model.norm.register_forward_hook(lambda module, args, output: args[0])
         try:
             with torch.no_grad():
-                hidden = bundle.text_encoder(**forward_kwargs, output_hidden_states=True).hidden_states[-1]
+                hidden = encoder(**forward_kwargs).last_hidden_state
         finally:
             handle.remove()
 

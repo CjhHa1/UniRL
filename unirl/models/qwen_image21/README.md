@@ -34,9 +34,11 @@ KV cache, no sequence parallelism, no external rollout engine.
   the model dtype and then divides by 1000; `predict_noise` reproduces that rounding
   instead of casting `sigma` directly, which keeps a single-prompt rollout bit-identical
   to `QwenImage21Pipeline(use_kv_cache=False)` in diffusers.
-- **Text features are taken before Qwen3-VL's final RMSNorm.** transformers >= 5 ties
-  `hidden_states[-1]` to the normalized `last_hidden_state`; the text-embed stage
-  installs a forward hook that makes the norm return its input, as upstream does.
+- **Text features are taken before Qwen3-VL's final RMSNorm.** The text-embed stage
+  installs a forward hook that makes the norm return its input (as upstream does, since
+  transformers >= 5 ties `hidden_states[-1]` to the normalized output) and reads
+  `last_hidden_state` from the bare `Qwen3VLModel`, skipping the vocabulary-sized
+  `lm_head` that the full `Qwen3VLForConditionalGeneration` forward would compute.
   The prompt is a raw template string fed to the processor (not `apply_chat_template`,
   which tokenizes differently), left-padded, and the system-prefix tokens are dropped.
 - **The sigma policy is pinned in `build_schedule_policy`.**
