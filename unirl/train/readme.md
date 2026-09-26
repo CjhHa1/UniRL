@@ -142,6 +142,16 @@ in `backend/base.py`; a multi-update-capable algorithm sets
   `NCCL_CTA_POLICY` must stay unset or `2`. WORLD keeps the usual `cpu:gloo,cuda:nccl`
   pair, so in `hybrid` mode torch logs one `ProcessGroupGloo::split ... Falling back to
   default options` warning per process while splitting the gloo half; it is expected.
+- **`lora_cfg.frozen_adapters` (OPD teachers) have real weights only after
+  `apply_deferred_ops`** — the adapter is injected pre-wrap so meta-init bundles work, but
+  its weights load after materialization; reading a teacher earlier sees a null or
+  uninitialized adapter. Teachers must be plain LoRA deltas: unconverted base-rewriting
+  inits (pissa, olora, ...), `modules_to_save`, `layer_replication`,
+  `trainable_token_indices`, DoRA, and `bias != "none"` are rejected at startup.
+- **Adapter checkpoints exclude frozen teachers, and resume requires the same teachers** —
+  teachers reload from their paths and the checkpoint pins each by a content sha256, so a
+  different teacher set or different weights raises on `load`. A checkpoint trained without
+  teachers resumes into any teacher set.
 
 ## Profiling → Perfetto
 
