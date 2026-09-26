@@ -49,7 +49,10 @@ KV cache, no sequence parallelism, no external rollout engine.
   `FlowMatchSchedulePolicy.from_pretrained` derives `vae_scale_factor` from
   `block_out_channels`, which this VAE config lacks, so it would fall back to 8 and
   over-count the sequence length 4x (`mu` 1.31 instead of 0.69 at 1024x1024).
-- **`height` / `width` are floored to multiples of 32**: one encoder image slot covers a
-  2x2 group of latent tokens, so the latent grid must be even.
+- **`height` / `width` must be multiples of 32; `generate` rejects anything else.** One
+  encoder image slot covers a 2x2 group of latent tokens, so the latent grid must be
+  even. Upstream silently floors the size first. `FlowMatchSchedulePolicy` counts
+  `H/16 x W/16` tokens without that floor, so an unaligned size would get `mu` for a
+  grid one row or column larger than the one being denoised.
 - **The VAE decodes RGBA**; the decode stage composites alpha over white so rewards see
   RGB.

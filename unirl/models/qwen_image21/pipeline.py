@@ -75,6 +75,12 @@ class QwenImage21Pipeline(Pipeline):
                 "QwenImage21Pipeline.generate: gen part sampling_params.sigmas is None. The hosting "
                 "engine must pin sigma before invoking pipeline.generate; see unirl.models.types.pipeline."
             )
+        align = VAE_SCALE_FACTOR * 2
+        if params.height % align or params.width % align:
+            raise ValueError(
+                f"QwenImage21Pipeline.generate: height x width = {params.height} x {params.width} must be multiples "
+                f"of {align}; the sigma policy counts H/16 x W/16 tokens (see README)."
+            )
         conditioning = sample.conditioning()
         texts = conditioning[0] if conditioning else None
         if not isinstance(texts, Texts):
