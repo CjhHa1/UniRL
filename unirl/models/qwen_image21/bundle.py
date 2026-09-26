@@ -41,7 +41,7 @@ class QwenImage21Bundle(Bundle):
         from .vendor.transformer_qwenimage21 import QwenImage21Transformer2DModel
 
         path = config.pretrained_model_ckpt_path
-        device = torch.device(config.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         dtype = parse_torch_dtype(config.model_precision, field_name="model_precision")
 
         transformer = QwenImage21Transformer2DModel.from_pretrained(

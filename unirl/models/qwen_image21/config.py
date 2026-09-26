@@ -14,7 +14,6 @@ class QwenImage21PipelineConfig:
 
     pretrained_model_ckpt_path: str
     model_precision: Any = "bf16"
-    device: Any = None
 
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="QwenImage21PipelineConfig.model_precision")

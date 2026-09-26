@@ -47,7 +47,7 @@ class QwenImage21Pipeline(Pipeline):
         self.vae_decode = QwenImage21VAEDecodeStage(bundle)
 
     def build_schedule_policy(self) -> FlowMatchSchedulePolicy:
-        """Dynamic-shift sigma policy from the checkpoint scheduler config, on the 16x / patch-1 latent grid."""
+        """Dynamic-shift sigma policy with the checkpoint scheduler_config values, on the 16x / patch-1 latent grid."""
         return FlowMatchSchedulePolicy(
             use_dynamic_shifting=True,
             base_shift=0.5,
@@ -63,12 +63,8 @@ class QwenImage21Pipeline(Pipeline):
     @classmethod
     def latent_shape(cls, *, model_config: Any, sampling_spec: Any) -> tuple:
         """Per-sample latent shape ``(64, H/16, W/16)`` for driver-side noise, both sides floored to 32 px."""
-        step = VAE_SCALE_FACTOR * 2
-        return (LATENT_CHANNELS, 2 * (int(sampling_spec.height) // step), 2 * (int(sampling_spec.width) // step))
-
-    def build_conditions(self, texts: Texts) -> QwenImageConditions:
-        """Encode prompts into ``QwenImageConditions`` (no CFG negative: Qwen-Image-2.1 samples without guidance)."""
-        return QwenImageConditions(text=self.text_embed.embed(texts))
+        align = VAE_SCALE_FACTOR * 2
+        return (LATENT_CHANNELS, 2 * (int(sampling_spec.height) // align), 2 * (int(sampling_spec.width) // align))
 
     def generate(self, sample: Sample) -> Sample:
         """Run Qwen-Image-2.1 t2i end-to-end, filling the frontier (pre-forked) gen Part."""
@@ -87,7 +83,7 @@ class QwenImage21Pipeline(Pipeline):
                 f"got {type(texts).__name__}"
             )
 
-        conditions = self.build_conditions(texts)
+        conditions = QwenImageConditions(text=self.text_embed.embed(texts))
         segment = self.diffusion.diffuse(
             conditions,
             schedule=params.sigmas.to(self.bundle.device),

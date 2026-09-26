@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 
 from unirl.models.qwen_image.text_embed import extract_masked_hidden
 from unirl.models.types.embedding import EmbedStage
@@ -33,27 +34,18 @@ class QwenImage21TextEmbedStage(EmbedStage[Texts, TextEmbedCondition]):
         inputs = bundle.processor(text=prompts, padding=True, padding_side="left", return_tensors="pt").to(
             bundle.device
         )
-        forward_kwargs = {k: inputs[k] for k in ("input_ids", "attention_mask", "mm_token_type_ids") if k in inputs}
-
         encoder = bundle.text_encoder.model
         handle = encoder.language_model.norm.register_forward_hook(lambda module, args, output: args[0])
         try:
             with torch.no_grad():
-                hidden = encoder(**forward_kwargs).last_hidden_state
+                hidden = encoder(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask).last_hidden_state
         finally:
             handle.remove()
 
         split = [h[self.drop_idx :] for h in extract_masked_hidden(hidden, inputs.attention_mask)]
-        max_len = max(h.shape[0] for h in split)
-        embeds = torch.stack([torch.cat([h, h.new_zeros(max_len - h.shape[0], h.shape[1])]) for h in split])
-        attn_mask = torch.stack(
-            [
-                torch.cat(
-                    [h.new_ones(h.shape[0], dtype=torch.long), h.new_zeros(max_len - h.shape[0], dtype=torch.long)]
-                )
-                for h in split
-            ]
-        )
+        embeds = pad_sequence(split, batch_first=True)
+        lengths = torch.tensor([h.shape[0] for h in split], device=embeds.device)
+        attn_mask = (torch.arange(embeds.shape[1], device=embeds.device) < lengths[:, None]).long()
         return TextEmbedCondition(embeds=embeds, attn_mask=attn_mask, pooled=None)
 
 

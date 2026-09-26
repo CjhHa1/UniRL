@@ -56,18 +56,18 @@ class QwenImage21DiffusionStep(QwenImageDiffusionStep):
         result = sample.new_empty(sample.shape, dtype=dtype)
         for length in lengths.unique().tolist():
             idx = (lengths == length).nonzero(as_tuple=True)[0]
-            group = int(idx.shape[0])
+            group = len(idx)
             packed = sample.index_select(0, idx).to(dtype).flatten(2).transpose(1, 2)  # [G, h*w, 64]
             img_mask = torch.cat(
                 [
-                    torch.zeros(group, int(length), dtype=torch.bool, device=sample.device),
+                    torch.zeros(group, length, dtype=torch.bool, device=sample.device),
                     torch.ones(group, num_tokens // TOKENS_PER_IMAGE_SLOT, dtype=torch.bool, device=sample.device),
                 ],
                 dim=1,
             )
             out = model.transformer(
                 hidden_states=packed,
-                encoder_hidden_states=text.embeds.index_select(0, idx)[:, : int(length)],
+                encoder_hidden_states=text.embeds.index_select(0, idx)[:, :length],
                 timestep=timestep.index_select(0, idx),
                 img_shapes=[[(1, latent_h, latent_w)]] * group,
                 img_mask=img_mask,
@@ -89,10 +89,10 @@ class QwenImage21DiffusionStage(QwenImageDiffusionStage):
         model: QwenImage21Bundle,
         step: QwenImage21DiffusionStep,
         strategy: StepStrategy,
-        autocast_precision: str = "bf16",
-        trajectory_precision: str = "fp16",
-        logprob_precision: str = "fp32",
-        batch_replay_steps: bool = False,
+        autocast_precision: str,
+        trajectory_precision: str,
+        logprob_precision: str,
+        batch_replay_steps: bool,
     ) -> None:
         super().__init__(
             model=model,

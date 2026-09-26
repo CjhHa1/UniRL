@@ -32,8 +32,12 @@ KV cache, no sequence parallelism, no external rollout engine.
   `None`.
 - **The timestep is rounded like upstream.** diffusers passes `t = sigma * 1000` cast to
   the model dtype and then divides by 1000; `predict_noise` reproduces that rounding
-  instead of casting `sigma` directly, which keeps a single-prompt rollout bit-identical
-  to `QwenImage21Pipeline(use_kv_cache=False)` in diffusers.
+  instead of casting `sigma` directly, so the transformer sees exactly upstream's inputs.
+  Stock diffusers then computes the Euler `dt * v` product in bf16 (a 0-dim fp32 `dt`
+  does not promote a bf16 tensor) while UniRL's SDE kernels use fp32, so a bf16 ODE
+  rollout differs from `QwenImage21Pipeline(use_kv_cache=False)` by rounding only
+  (~40 dB PSNR at 1024x1024 / 40 steps, the same size as toggling upstream's KV cache);
+  with that product upcast in the upstream scheduler the two are bit-identical.
 - **Text features are taken before Qwen3-VL's final RMSNorm.** The text-embed stage
   installs a forward hook that makes the norm return its input (as upstream does, since
   transformers >= 5 ties `hidden_states[-1]` to the normalized output) and reads
