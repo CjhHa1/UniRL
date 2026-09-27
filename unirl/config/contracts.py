@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 from unirl.config.require import require
+from unirl.types.loss_agg import LossAggMode
 
 logger = logging.getLogger(__name__)
 
@@ -206,20 +207,15 @@ SYNC_HANDLERS: Mapping[str, SyncHandler] = {
 ENGINE_SECTIONS = ("rollout", "ar_rollout", "dit_rollout")
 LAYOUTS = ("colocate", "separate")
 
-LOSS_AGG_TOKEN_MEAN = "token-mean"
-LOSS_AGG_SEQ_MEAN_TOKEN_MEAN = "seq-mean-token-mean"
-LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM = "seq-mean-token-sum-norm"
-_TOKEN_LOSS_AGG_MODES = frozenset({LOSS_AGG_TOKEN_MEAN, LOSS_AGG_SEQ_MEAN_TOKEN_MEAN, LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM})
-_TOKEN_OR_SUM_NORM_LOSS_AGG_MODES = frozenset({LOSS_AGG_TOKEN_MEAN, LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM})
+_TOKEN_LOSS_AGG_MODES = frozenset(mode.value for mode in LossAggMode)
 
 ALGORITHM_LOSS_AGG_MODES: Mapping[str, frozenset[str]] = {
     "unirl.algorithms.grpo.GRPO": _TOKEN_LOSS_AGG_MODES,
     "unirl.algorithms.ppo.PPO": _TOKEN_LOSS_AGG_MODES,
     "unirl.algorithms.sft.SFT": _TOKEN_LOSS_AGG_MODES,
-    "unirl.algorithms.drpo.DRPO": _TOKEN_OR_SUM_NORM_LOSS_AGG_MODES,
-    "unirl.algorithms.cppo.CPPO": _TOKEN_OR_SUM_NORM_LOSS_AGG_MODES,
-    "unirl.algorithms.dppo.DPPO": _TOKEN_OR_SUM_NORM_LOSS_AGG_MODES,
-    "unirl.algorithms.gspo.GSPO": frozenset({"seq-mean"}),
+    "unirl.algorithms.drpo.DRPO": _TOKEN_LOSS_AGG_MODES,
+    "unirl.algorithms.cppo.CPPO": _TOKEN_LOSS_AGG_MODES,
+    "unirl.algorithms.dppo.DPPO": _TOKEN_LOSS_AGG_MODES,
 }
 
 

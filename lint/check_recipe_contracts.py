@@ -22,11 +22,14 @@ ENTRYPOINT_OVERRIDES = {
 def _load_contracts() -> types.ModuleType:
     """Load contracts without importing the torch-dependent package surface."""
     sys.modules.setdefault("unirl", types.ModuleType("unirl"))
-    parent = types.ModuleType("unirl.config")
-    parent.__path__ = [str(ROOT / "unirl" / "config")]
-    sys.modules["unirl.config"] = parent
-    for name in ("require", "contracts"):
-        spec = importlib.util.spec_from_file_location(f"unirl.config.{name}", ROOT / "unirl" / "config" / f"{name}.py")
+    for package in ("config", "types"):
+        parent = types.ModuleType(f"unirl.{package}")
+        parent.__path__ = [str(ROOT / "unirl" / package)]
+        sys.modules[f"unirl.{package}"] = parent
+    for package, name in (("types", "loss_agg"), ("config", "require"), ("config", "contracts")):
+        spec = importlib.util.spec_from_file_location(
+            f"unirl.{package}.{name}", ROOT / "unirl" / package / f"{name}.py"
+        )
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
@@ -742,10 +745,6 @@ MUST_REJECT: dict[str, tuple[str, dict]] = {
         "train_ar",
         {"rollout": {"_target_": TRAINSIDE}, "algorithm": {"_target_": GRPO, "loss_agg_mode": "seq-mean"}},
     ),
-    "seq-mean-token-mean on DRPO": (
-        "train_ar",
-        {"rollout": {"_target_": TRAINSIDE}, "algorithm": {"_target_": DRPO, "loss_agg_mode": "seq-mean-token-mean"}},
-    ),
     "unknown loss_agg_mode on a unified AR track": (
         "train_unified_model",
         {
@@ -764,6 +763,10 @@ MUST_ACCEPT: dict[str, tuple[str, dict]] = {
     "interpolated loss_agg_mode": (
         "train_ar",
         {"rollout": {"_target_": TRAINSIDE}, "algorithm": {"_target_": GRPO, "loss_agg_mode": "${oc.env:AGG,x}"}},
+    ),
+    "seq-mean-token-mean on DRPO": (
+        "train_ar",
+        {"rollout": {"_target_": TRAINSIDE}, "algorithm": {"_target_": DRPO, "loss_agg_mode": "seq-mean-token-mean"}},
     ),
     "separate diffusion with NCCL": (
         "train_diffusion",
@@ -891,7 +894,6 @@ EXPECTED_REJECT_MESSAGES = {
     "vLLM under async AR": "does not support train_async_ar",
     "anchored vLLM native IPC": "anchored train_ar rollout supports only RemoteLoraWeightSync",
     "GSPO-style loss_agg_mode on GRPO": "cfg.algorithm.loss_agg_mode='seq-mean' is not implemented by GRPO",
-    "seq-mean-token-mean on DRPO": "cfg.algorithm.loss_agg_mode='seq-mean-token-mean' is not implemented by DRPO",
     "unknown loss_agg_mode on a unified AR track": "cfg.algorithm.ar.loss_agg_mode='token-sum'",
 }
 
