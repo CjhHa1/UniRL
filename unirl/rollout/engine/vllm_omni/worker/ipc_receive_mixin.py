@@ -289,7 +289,7 @@ class BucketedIPCReceiveMixin:
         registered = getattr(manager, "_registered_adapters", None)
         if registered is None:
             return {}
-        lora_model = registered.get(int(adapter_id))
+        lora_model = registered.get(adapter_id)
         if lora_model is None:
             return {}
         target = set(names) if names else None

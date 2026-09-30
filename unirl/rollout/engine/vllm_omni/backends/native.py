@@ -655,7 +655,7 @@ class VLLMOmniBackend:
             results = self._collective_rpc(
                 sid,
                 "_unirl_loaded_lora_checksums",
-                args=(int(adapter_id), list(names) if names else None),
+                args=(adapter_id, list(names) if names else None),
             )
             out[int(sid)] = results[0] if isinstance(results, list) and results else results
         return out

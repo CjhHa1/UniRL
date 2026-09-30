@@ -156,7 +156,7 @@ class WeightSync:
         return self._backend.param_checksums(names=list(names))
 
     def loaded_lora_checksums(self, *, adapter_id: int, names: Optional[List[str]] = None) -> dict:
-        return self._backend.lora_checksums(adapter_id=int(adapter_id), names=names)
+        return self._backend.lora_checksums(adapter_id=adapter_id, names=names)
 
     def mark_weights_released(self) -> None:
         """The engine released the runtime memory — the worker-side LoRA pool"""
