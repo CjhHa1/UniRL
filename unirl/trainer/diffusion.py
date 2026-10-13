@@ -1155,9 +1155,7 @@ class DiffusionTrainer(BaseTrainer):
         finally:
             sleep_requested = not self._residency.policy.rollout_resident or not generation_succeeded
             if sleep_requested and not self._rollout_rpc_blocked:
-                _run_cleanup_steps(
-                    [("contrastive rollout sleep", lambda: self._residency.set(Role.ROLLOUT, False))]
-                )
+                _run_cleanup_steps([("contrastive rollout sleep", lambda: self._residency.set(Role.ROLLOUT, False))])
 
         sample = Sample.concat(chunks)
         part = sample.parts[-1]
@@ -1471,9 +1469,7 @@ class DiffusionTrainer(BaseTrainer):
             evaluation_succeeded = True
         finally:
             if not evaluation_succeeded and not self._rollout_rpc_blocked:
-                _run_cleanup_steps(
-                    [("evaluation rollout sleep", lambda: self._residency.set(Role.ROLLOUT, False))]
-                )
+                _run_cleanup_steps([("evaluation rollout sleep", lambda: self._residency.set(Role.ROLLOUT, False))])
         logger.info(
             "EVAL step %d  (%d samples/prompt, %d steps, %dx%d, cfg=%.1f eta=%.1f)  %s",
             step,
