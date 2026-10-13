@@ -257,7 +257,7 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
         group_name: str,
         track_prefix: str = "",
     ) -> None:
-        """Allocate, validate, and arm async receives before the sender broadcasts."""
+        """Allocate and validate a bucket before the sender enters NCCL broadcast."""
         del track_prefix
         if not (len(names) == len(dtypes) == len(shapes)):
             raise ValueError(f"names/dtypes/shapes length mismatch: {len(names)}/{len(dtypes)}/{len(shapes)}")
@@ -283,12 +283,7 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
                 received,
                 previously_received=self._publication_names,
             )
-            try:
-                works = [dist.broadcast(tensor, src=0, group=group, async_op=True) for _, tensor in resolved]
-            except Exception:
-                self._fail_weight_group(group_name)
-                raise
-            self._prepared_bucket = (signature, resolved, loaded_names, works)
+            self._prepared_bucket = (signature, resolved, loaded_names)
 
     def update_weights_from_distributed(
         self,
@@ -318,11 +313,12 @@ class NativeSD3RolloutEngine(BaseRolloutEngine):
                 prepared = self._prepared_bucket
                 if prepared is None or prepared[0] != signature:
                     raise RuntimeError("Native SD3 weight bucket was not prepared with matching metadata.")
-                _, resolved, loaded_names, works = prepared
+                _, resolved, loaded_names = prepared
+                works = [dist.broadcast(tensor, src=0, group=group, async_op=True) for _, tensor in resolved]
                 timeout = timedelta(seconds=self._weight_group_timeouts[group_name])
                 for work in works:
                     if not work.wait(timeout=timeout):
-                        raise TimeoutError("Native SD3 timed out waiting for an armed weight receive.")
+                        raise TimeoutError("Native SD3 timed out waiting for a weight receive.")
                 with torch.no_grad():
                     for target, tensor in resolved:
                         target.copy_(tensor.to(device=target.device, dtype=target.dtype))

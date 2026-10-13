@@ -152,6 +152,45 @@ def test_naive_sampling_inherits_main_generation_policy() -> None:
     assert effective.reward_image_size == 224
 
 
+def test_selected_sampling_uses_current_sde_schedule_api() -> None:
+    trainer = DiffusionTrainer.__new__(DiffusionTrainer)
+    trainer._contrastive = ContrastiveRolloutConfig(top_k=1, bottom_k=1)
+    trainer._noise_latent_shape = [16, 8, 8]
+    trainer.sampling_params = {
+        "diffusion": DiffusionSamplingParams(
+            num_inference_steps=4,
+            sde_indices=[1, 3],
+        )
+    }
+
+    selected = trainer._selected_sampling_params(20)
+
+    assert selected.sde_indices == [1, 3]
+    assert selected.scheduler is None
+    assert selected.sigmas is None
+
+
+def test_failed_contrastive_generation_uses_residency_cleanup() -> None:
+    parked = []
+    trainer = DiffusionTrainer.__new__(DiffusionTrainer)
+    trainer._contrastive = ContrastiveRolloutConfig(top_k=1, bottom_k=1, prompt_chunk_size=1)
+    trainer._scout_sampling_params = {"diffusion": DiffusionSamplingParams()}
+    trainer._scout_noise_latent_shape = None
+    trainer._rollout_rpc_blocked = False
+    trainer._residency = SimpleNamespace(
+        policy=SimpleNamespace(rollout_resident=True),
+        set=lambda role, resident: parked.append((role, resident)),
+    )
+    trainer._build_request_sample = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic"))
+    inputs = SimpleNamespace(batch_size=1, slice=lambda start, end: object())
+
+    with pytest.raises(RuntimeError, match="synthetic"):
+        trainer._contrastive_rollout_and_score(inputs, sync_weights=False, rollout_id=20)
+
+    assert len(parked) == 1
+    assert parked[0][1] is False
+
+
 def test_contrastive_scoring_rejects_non_finite_rewards() -> None:
     trainer = DiffusionTrainer.__new__(DiffusionTrainer)
     trainer.reward = type("_Reward", (), {"score_and_attach": lambda self, sample: sample})()

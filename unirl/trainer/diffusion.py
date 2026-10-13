@@ -948,7 +948,7 @@ class DiffusionTrainer(BaseTrainer):
             raise RuntimeError("_selected_sampling_params called without a diffusion contrastive config.")
         return dataclasses.replace(
             base,
-            sde_indices=base.resolve_sde_indices(rollout_id),
+            sde_indices=base.get_sde_indices(rollout_id),
             scheduler=None,
             sigmas=None,
             init_noise_latent_shape=self._noise_latent_shape,
@@ -1153,8 +1153,11 @@ class DiffusionTrainer(BaseTrainer):
                 chunks.append(final)
             generation_succeeded = True
         finally:
-            if (self._rollout_sleep_after_generate or not generation_succeeded) and not self._rollout_rpc_blocked:
-                _run_cleanup_steps([("contrastive rollout sleep", self.rollout.sleep)])
+            sleep_requested = not self._residency.policy.rollout_resident or not generation_succeeded
+            if sleep_requested and not self._rollout_rpc_blocked:
+                _run_cleanup_steps(
+                    [("contrastive rollout sleep", lambda: self._residency.set(Role.ROLLOUT, False))]
+                )
 
         sample = Sample.concat(chunks)
         part = sample.parts[-1]

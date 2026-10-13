@@ -12,7 +12,7 @@ num_rollouts: 100
 layout: separate
 train_fraction: 0.25       # 8 H20
 reward_fraction: 0.25      # 8 H20
-rollout_sleep_after_generate: false
+rollout_resident: true
 weight_sync_interval: 1
 
 adv_use_global_std: true

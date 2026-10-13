@@ -152,7 +152,7 @@ def test_incomplete_and_duplicate_weight_publications_are_rejected() -> None:
         )
 
 
-def test_weight_bucket_is_allocated_and_armed_before_sender_broadcast(monkeypatch) -> None:
+def test_weight_bucket_is_validated_before_receiver_joins_broadcast(monkeypatch) -> None:
     engine = NativeSD3RolloutEngine.__new__(NativeSD3RolloutEngine)
     engine.device = torch.device("cpu")
     engine._weight_groups = {"weights": object()}
@@ -194,13 +194,14 @@ def test_weight_bucket_is_allocated_and_armed_before_sender_broadcast(monkeypatc
         group_name="weights",
     )
     assert engine._prepared_bucket is not None
-    assert len(broadcasts) == 1
+    assert broadcasts == []
     engine.update_weights_from_distributed(
         names=["transformer.weight"],
         dtypes=["torch.float32"],
         shapes=[[2, 2]],
         group_name="weights",
     )
+    assert len(broadcasts) == 1
     assert torch.equal(engine._parameter_targets["weight"], torch.full((2, 2), 2.0))
 
 
@@ -223,7 +224,7 @@ def test_failed_armed_receive_permanently_rejects_group_reuse(monkeypatch) -> No
         shapes=[[1]],
         group_name="weights",
     )
-    with pytest.raises(TimeoutError, match="armed weight receive"):
+    with pytest.raises(TimeoutError, match="weight receive"):
         engine.update_weights_from_distributed(
             names=["transformer.weight"],
             dtypes=["torch.float32"],
