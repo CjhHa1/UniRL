@@ -207,11 +207,16 @@ def test_trace_writer_records_policy_and_schema_identity(tmp_path: Path) -> None
 def test_failed_weight_sync_skips_rollout_rpc_until_bounded_cleanup() -> None:
     sleeps = []
     trainer = DiffusionTrainer.__new__(DiffusionTrainer)
-    trainer._layout = "separate"
-    trainer._enable_fsdp_offload = False
     trainer._rollout_is_trainside = False
     trainer._uses_ema = False
+    trainer._staged_weight_sync = False
     trainer._rollout_rpc_blocked = False
+    trainer._residency = SimpleNamespace(
+        policy=SimpleNamespace(train_resident=True),
+        parkable=lambda role: False,
+        enter=lambda role: None,
+        set=lambda role, resident: sleeps.append(True),
+    )
     trainer.rollout = SimpleNamespace(
         wake_up=lambda: None,
         sleep=lambda: sleeps.append(True),
@@ -227,7 +232,12 @@ def test_failed_weight_sync_skips_rollout_rpc_until_bounded_cleanup() -> None:
 def test_empty_eval_sync_failure_skips_rollout_sleep() -> None:
     sleeps = []
     trainer = DiffusionTrainer.__new__(DiffusionTrainer)
+    trainer._staged_weight_sync = False
     trainer._rollout_rpc_blocked = False
+    trainer._residency = SimpleNamespace(
+        enter=lambda role: None,
+        set=lambda role, resident: sleeps.append(True),
+    )
     trainer.rollout = SimpleNamespace(
         wake_up=lambda: None,
         sleep=lambda: sleeps.append(True),

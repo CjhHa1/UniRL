@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from unirl.reward.local.hpsv2 import HPSv2RewardScorer, HPSv2Spec
+from unirl.types.primitives import Texts
 
 
 class _Model:
@@ -23,6 +24,7 @@ def test_hpsv2_batches_rows_and_accepts_string_device() -> None:
     scorer = HPSv2RewardScorer.__new__(HPSv2RewardScorer)
     scorer.device = "cpu"
     scorer.batch_size = 2
+    scorer.prompt_source = "generation"
     scorer.model = _Model()
     scorer._hpsv2_preprocess_val = lambda image: torch.tensor(np.asarray(image, dtype=np.float32) / 255.0).permute(
         2, 0, 1
@@ -35,12 +37,19 @@ def test_hpsv2_batches_rows_and_accepts_string_device() -> None:
             np.full((2, 2, 3), 255, dtype=np.uint8),
             np.full((2, 2, 3), 255, dtype=np.uint8),
         ],
-        prompts=["zero", "one", "three"],
+        original_prompt=None,
+        generation_prompt=Texts(["zero", "one", "three"]),
     )
     assert scorer._compute_model_rewards(request) == [1.0, 3.0, 4.0]
 
     with pytest.raises(ValueError, match="one prompt per image"):
-        scorer._compute_model_rewards(SimpleNamespace(images=request.images, prompts=["zero"]))
+        scorer._compute_model_rewards(
+            SimpleNamespace(
+                images=request.images,
+                original_prompt=None,
+                generation_prompt=Texts(["zero"]),
+            )
+        )
 
 
 def test_hpsv2_uses_matrix_diagonal_score_arithmetic() -> None:
@@ -49,6 +58,7 @@ def test_hpsv2_uses_matrix_diagonal_score_arithmetic() -> None:
     scorer = HPSv2RewardScorer.__new__(HPSv2RewardScorer)
     scorer.device = "cpu"
     scorer.batch_size = 2
+    scorer.prompt_source = "generation"
     scorer.model = lambda image_input, text_input: {
         "image_features": image_features,
         "text_features": text_features,
@@ -57,7 +67,8 @@ def test_hpsv2_uses_matrix_diagonal_score_arithmetic() -> None:
     scorer._hpsv2_tokenizer = lambda prompts: torch.zeros(len(prompts), 1)
     request = SimpleNamespace(
         images=[np.zeros((2, 2, 3), dtype=np.uint8)] * 2,
-        prompts=["first", "second"],
+        original_prompt=None,
+        generation_prompt=Texts(["first", "second"]),
     )
     expected = torch.diagonal(image_features @ text_features.T).float().tolist()
     assert scorer._compute_model_rewards(request) == expected
