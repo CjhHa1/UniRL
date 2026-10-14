@@ -87,7 +87,11 @@ def resolve_sampling(config: Any, sample: Sample) -> ResolvedSampling:
         )
     base_seed = configured_seed
     if base_seed is None and deterministic:
-        base_seed = _DEFAULT_SGLANG_SAMPLING_SEED  # SGLang's own deterministic default; see rollout/engine README
+        raw_random_seed = engine_kwargs.get("random_seed")
+        if raw_random_seed is not None:
+            base_seed = _validated_base_seed(raw_random_seed)
+        else:
+            base_seed = _DEFAULT_SGLANG_SAMPLING_SEED  # SGLang's own deterministic default; see rollout/engine README
     n = 1 if base_seed is not None else fanout
 
     raw_top_k = ar.top_k

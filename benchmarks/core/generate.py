@@ -129,6 +129,7 @@ def run_text(
     *,
     samples_per_prompt: int,
     gen: Dict,
+    seed: Optional[int] = None,
     concurrency: int = 8,
 ) -> None:
     """Sample ``samples_per_prompt`` completions per item from an OpenAI-compatible server into ``out_file``."""
@@ -137,6 +138,7 @@ def run_text(
     if not jobs:
         print("[text] all completions present — nothing to generate")
         return
+    import hashlib
 
     model = server_model(endpoint)
     url = f"{endpoint.rstrip('/')}/v1/chat/completions"
@@ -152,9 +154,17 @@ def run_text(
     lock = threading.Lock()
     progress = {"done": 0}
 
+    def _text_seed(item_id: object, sample_idx: int) -> int:
+        assert seed is not None
+        payload = f"{int(seed)}::{item_id}::{int(sample_idx)}".encode("utf-8")
+        digest = hashlib.blake2b(payload, digest_size=8).digest()
+        return int.from_bytes(digest, byteorder="big", signed=False) & ((1 << 63) - 1)
+
     def one(job: Tuple[Dict, int]) -> None:
         item, s = job
         payload = dict(base_payload, messages=[{"role": "user", "content": item["problem"] + suffix}])
+        if seed is not None:
+            payload["seed"] = _text_seed(item["id"], s)
         last_exc = None
         for attempt in range(3):
             try:

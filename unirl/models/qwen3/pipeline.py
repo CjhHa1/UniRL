@@ -125,10 +125,16 @@ class Qwen3Pipeline(Pipeline):
             temperature=float(params.temperature),
             top_p=float(params.top_p),
             top_k=int(params.top_k),
-            stop_token_id=None,
+            stop_token_id=ar.stop_token_id,
+            seed=ar.seed,
         )
 
-        segment = self.ar.autoregress(conds, sampling_params=sampling_params, params=params)
+        segment = self.ar.autoregress(
+            conds,
+            sampling_params=sampling_params,
+            params=params,
+            sample_ids=list(frontier.sample_ids),
+        )
         decoded = self._detokenize(segment)
 
         filled = frontier.fill(segment=segment, primitives={"text": decoded}, conditions=conds.to_dict())

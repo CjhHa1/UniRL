@@ -205,7 +205,12 @@ class Qwen3ARStep(ARStep):
         self.top_p = float(top_p)
         self.top_k = int(top_k)
 
-    def step(self, logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def step(
+        self,
+        logits: torch.Tensor,
+        *,
+        generators: Optional[List[torch.Generator]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if logits.dim() != 2:
             raise ValueError(f"Qwen3ARStep.step: expected logits shape [B, vocab], got {tuple(logits.shape)}")
 
@@ -234,7 +239,17 @@ class Qwen3ARStep(ARStep):
             scaled = torch.full_like(scaled, float("-inf")).scatter(-1, sorted_idx, sorted_vals)
 
         probs = F.softmax(scaled, dim=-1)
-        token_id = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        if generators is not None:
+            if len(generators) != int(probs.shape[0]):
+                raise ValueError(
+                    f"Qwen3ARStep.step: generators length {len(generators)} != batch size {int(probs.shape[0])}"
+                )
+            token_id = torch.stack(
+                [torch.multinomial(probs[b], num_samples=1, generator=generators[b]).squeeze(-1) for b in range(probs.shape[0])],
+                dim=0,
+            )
+        else:
+            token_id = torch.multinomial(probs, num_samples=1).squeeze(-1)
         log_prob = log_probs_full.gather(-1, token_id.unsqueeze(-1)).squeeze(-1)
         return token_id, log_prob
 
@@ -268,6 +283,7 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
         *,
         sampling_params: ARSamplingParams,
         params: Optional[Qwen3ARParams] = None,
+        sample_ids: Optional[List[str]] = None,
         **_kwargs: Any,
     ) -> TextSegment:
         """Run AR generation. Returns a varlen-packed ``TextSegment``."""
@@ -290,6 +306,21 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
         pad_id = self.model.tokenizer.pad_token_id or 0
         input_ids, attention_mask = left_pad_prompt(input_ids, attention_mask, pad_id)
         batch_size = int(input_ids.shape[0])
+
+        generators: Optional[List[torch.Generator]] = None
+        if sampling_params.seed is not None:
+            from unirl.rollout.engine.sglang.utils.sampling import derive_sampling_seed
+
+            if sample_ids is None or len(sample_ids) != batch_size:
+                raise ValueError(
+                    "Qwen3ARStage.autoregress: sampling_params.seed requires sample_ids aligned to batch_size "
+                    f"(got {len(sample_ids) if sample_ids is not None else None} for batch_size={batch_size})"
+                )
+            generators = []
+            for sid in sample_ids:
+                gen = torch.Generator(device=device)
+                gen.manual_seed(derive_sampling_seed(int(sampling_params.seed), sid))
+                generators.append(gen)
 
         stop_ids = self._resolve_stop_ids(params, sampling_params)
         step = Qwen3ARStep(
@@ -327,7 +358,7 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
             if next_logits.device != device:
                 next_logits = next_logits.to(device)
 
-            token_id, log_prob = step.step(next_logits)
+            token_id, log_prob = step.step(next_logits, generators=generators)
             for b in range(batch_size):
                 if finished[b]:
                     continue

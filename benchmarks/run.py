@@ -95,7 +95,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--samples-per-prompt", type=int, help="override the benchmark protocol k")
     parser.add_argument("--batch-size", type=int, default=4, help="t2i images per pipeline call")
-    parser.add_argument("--seed", type=int, default=42, help="t2i base seed (image seed = seed + 1000*prompt + sample)")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="evaluation base seed (t2i: seed + 1000*prompt + sample; text: blake2b-derived per-(id, sample) seed)",
+    )
     parser.add_argument("--steps", type=int, help="t2i: num_inference_steps (default: pipeline default)")
     parser.add_argument("--guidance", type=float, help="t2i: guidance_scale (default: pipeline default)")
     parser.add_argument("--height", type=int, help="t2i: image height (default: pipeline default)")
@@ -252,7 +257,13 @@ def _run_text_benchmark(spec: BenchmarkSpec, tag: str, args) -> None:
         if not args.endpoint:
             raise SystemExit(f"{spec.name}: --endpoint is required to generate completions")
         run_text(
-            items, completions_file, args.endpoint, samples_per_prompt=k, gen=spec.gen, concurrency=args.concurrency
+            items,
+            completions_file,
+            args.endpoint,
+            samples_per_prompt=k,
+            gen=spec.gen,
+            seed=args.seed,
+            concurrency=args.concurrency,
         )
     if args.stage in ("all", "score"):
         if not completions_file.exists():
