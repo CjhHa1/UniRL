@@ -79,6 +79,7 @@ class UnifiedModelTrainer(BaseTrainer):
         logging_cfg: Optional[DictConfig] = None,
         enable_fsdp_offload: bool = True,
         rollout_pipeline_chunks: int,
+        ar_num_replicas: Optional[int],
         eval_interval: int = 0,
         eval_num_prompts: int = 32,
         eval_cfg_text_scale: float = 4.0,
@@ -102,6 +103,11 @@ class UnifiedModelTrainer(BaseTrainer):
             raise ValueError(
                 "UnifiedModelTrainer.rollout_pipeline_chunks > 1 requires the two-engine "
                 "ar_rollout_cfg/dit_rollout_cfg rollout; the single-engine rollout_cfg path does not pipeline."
+            )
+        if ar_num_replicas is not None and rollout_cfg is not None:
+            raise ValueError(
+                "UnifiedModelTrainer.ar_num_replicas requires the two-engine "
+                "ar_rollout_cfg/dit_rollout_cfg rollout; the single-engine rollout_cfg path uses one engine."
             )
 
         self.eval_interval = int(eval_interval)
@@ -145,11 +151,8 @@ class UnifiedModelTrainer(BaseTrainer):
             self._shared_advantage = int(diffusion_params.samples_per_prompt) == 1
             self._rollout_is_trainside = False
             if self._single_engine:
-                self.dp = 1
                 self.ar_rollouts = []
                 self.dit_rollouts = []
-                self.ar_rollout = None
-                self.dit_rollout = None
                 rollout_parsed = parse_hydra_cfg(rollout_cfg)
                 self._rollout_is_trainside = "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters
                 if self._rollout_is_trainside:
@@ -178,20 +181,35 @@ class UnifiedModelTrainer(BaseTrainer):
                     "(AR 0-3, DiT 4-7) engine pair per node; got "
                     f"devices_per_node={per_node}."
                 )
-            self.dp = max(1, self.pool.num_devices // per_node)
+            num_nodes = max(1, self.pool.num_devices // per_node)
+            total_slots = 2 * num_nodes
+            ar_count = num_nodes if ar_num_replicas is None else ar_num_replicas
+            if ar_count < 1 or ar_count >= total_slots:
+                raise ValueError(
+                    f"UnifiedModelTrainer.ar_num_replicas must be in [1, {total_slots - 1}] for "
+                    f"{num_nodes} node(s) ({total_slots} 4-GPU engine slots); got {ar_num_replicas!r}."
+                )
             self.ar_rollouts = []
             self.dit_rollouts = []
-            for r in range(self.dp):
+            for r in range(num_nodes):
                 base = r * per_node
                 # Boot engines serially and off rank 0 to avoid warmup and LoRA-sync deadlocks.
-                ar = self._wire_engine(ar_rollout_cfg, anchor_device=base + 1)
-                ar.sleep()
-                self.ar_rollouts.append(ar)
-                dit = self._wire_engine(dit_rollout_cfg, anchor_device=base + 4)
-                dit.sleep()
-                self.dit_rollouts.append(dit)
-            self.ar_rollout = self.ar_rollouts[0]
-            self.dit_rollout = self.dit_rollouts[0]
+                if r < ar_count:
+                    ar = self._wire_engine(ar_rollout_cfg, anchor_device=base + 1)
+                    ar.sleep()
+                    self.ar_rollouts.append(ar)
+                else:
+                    dit_low = self._wire_engine(dit_rollout_cfg, anchor_device=base + 1, stage_devices="0,1,2,3")
+                    dit_low.sleep()
+                    self.dit_rollouts.append(dit_low)
+                if r < ar_count - num_nodes:
+                    ar_high = self._wire_engine(ar_rollout_cfg, anchor_device=base + 4, stage_devices="4,5,6,7")
+                    ar_high.sleep()
+                    self.ar_rollouts.append(ar_high)
+                else:
+                    dit = self._wire_engine(dit_rollout_cfg, anchor_device=base + 4)
+                    dit.sleep()
+                    self.dit_rollouts.append(dit)
 
             if sync_cfg is not None:
                 self.weight_sync = remote_hydra(sync_cfg, backend=self.backend)
@@ -199,10 +217,22 @@ class UnifiedModelTrainer(BaseTrainer):
                     [(eng.role_name, eng.workers) for eng in self.ar_rollouts + self.dit_rollouts]
                 )
 
-    def _wire_engine(self, cfg: DictConfig, *, anchor_device: int) -> Any:
+    def _wire_engine(
+        self,
+        cfg: DictConfig,
+        *,
+        anchor_device: int,
+        stage_devices: Optional[str] = None,
+    ) -> Any:
         """Build ONE multi-GPU vLLM-Omni engine actor anchored on one worker."""
         parsed = parse_hydra_cfg(cfg)
         role_cls = parsed.pop("role_cls")
+        if stage_devices is not None:
+            config = dict(parsed["config"])
+            omni_extra = dict(config.get("omni_extra") or {})
+            omni_extra["stage_overrides"] = {"0": {"devices": stage_devices}}
+            config["omni_extra"] = omni_extra
+            parsed["config"] = config
         return self.pool.create_remote(role_cls, device_ids=[anchor_device], init_kwargs=parsed)
 
     def _build_request_sample(
@@ -250,23 +280,6 @@ class UnifiedModelTrainer(BaseTrainer):
         if self._single_engine:
             return self.rollout.generate(sample)
 
-        n = sample.parts[0].batch_size
-        if self.dp <= 1 or n <= 1:
-            return self._run_rollout_one(self.ar_rollouts[0], self.dit_rollouts[0], sample)
-
-        groups = sample.split()
-        bounds = [(n * r) // self.dp for r in range(self.dp + 1)]
-        shards: list[Sample] = []
-        for r in range(self.dp):
-            lo, hi = bounds[r], bounds[r + 1]
-            if lo >= hi:
-                continue
-            sub = Sample.concat(groups[lo:hi])
-            shards.append(self._run_rollout_one(self.ar_rollouts[r], self.dit_rollouts[r], sub))
-        return Sample.concat(shards)
-
-    def _run_rollout_one(self, ar_engine: Any, dit_engine: Any, sample: Sample) -> Sample:
-        """One (AR, DiT) engine pair: fill the unified ``[input, ar, image]`` lineage."""
         root_part, ar_shell, image_shell = sample.parts
         if not isinstance(root_part.primitives.get("text"), Texts):
             raise TypeError("UnifiedModelTrainer.run_rollout: input Part must contain a 'text' Texts primitive.")
@@ -274,6 +287,8 @@ class UnifiedModelTrainer(BaseTrainer):
         n_img = image_shell.sampling_params.samples_per_prompt
         rid = self._dump_rollout_id
         n = root_part.batch_size
+        n_ar_engines = len(self.ar_rollouts)
+        n_dit_engines = len(self.dit_rollouts)
         n_chunks = min(self._rollout_pipeline_chunks, n)
         if n_chunks <= 1:
             chunks = [sample]
@@ -282,38 +297,63 @@ class UnifiedModelTrainer(BaseTrainer):
             bounds = [(n * i) // n_chunks for i in range(n_chunks + 1)]
             chunks = [Sample.concat(groups[lo:hi]) for lo, hi in zip(bounds, bounds[1:])]
 
-        ar_requests: List[Sample] = []
-        for chunk in chunks:
-            input_part = chunk.parts[0]
-            prompts = input_part.primitives["text"]
-            ar_texts = Texts(texts=[t for t in prompts.texts for _ in range(n_rec)])
-            ar_input = Part.input(
-                [f"r{rid}:a{k}" for k in range(len(ar_texts.texts))],
-                primitives={"text": ar_texts},
-                control=input_part.control,
-            )
-            ar_requests.append(
-                Sample.request(ar_input)
-                .fork(1, sampling_params=image_shell.sampling_params)
-                .fork(1, sampling_params=ar_shell.sampling_params)
-            )
-
-        pending_ar = None
-        pending_dit = None
+        pending_ar: List[Any] = []
+        pending_dit: List[Any] = []
         ar_parts: List[Part] = []
-        dit_outs: List[Sample] = []
+        dit_gens: List[Part] = []
+
+        def launch_ar_chunk(chunk_sample: Sample) -> None:
+            input_part = chunk_sample.parts[0]
+            prompts = input_part.primitives["text"].texts
+            n_ar_total = len(prompts) * n_rec
+            k_ar = min(n_ar_engines, n_ar_total)
+            ar_bounds = [(n_ar_total * r) // k_ar for r in range(k_ar + 1)]
+            for r in range(k_ar):
+                lo, hi = ar_bounds[r], ar_bounds[r + 1]
+                ar_texts = Texts(texts=[prompts[idx // n_rec] for idx in range(lo, hi)])
+                ar_input = Part.input(
+                    [f"r{rid}:a{idx}" for idx in range(lo, hi)],
+                    primitives={"text": ar_texts},
+                    control=input_part.control,
+                )
+                req = (
+                    Sample.request(ar_input)
+                    .fork(1, sampling_params=image_shell.sampling_params)
+                    .fork(1, sampling_params=ar_shell.sampling_params)
+                )
+                pending_ar.append(self.ar_rollouts[r].launch_nowait("generate", req))
+
+        def launch_dit_chunk(chunk_sample: Sample, recaptions: Texts) -> None:
+            input_part, _, chunk_image_shell = chunk_sample.parts
+            prompts = input_part.primitives["text"].texts
+            n_ar_total = len(prompts) * n_rec
+            n_dit_total = n_ar_total * n_img
+            all_dit_prompts = [prompts[j // n_rec] for j in range(n_ar_total) for _ in range(n_img)]
+            all_dit_cot = [recaptions.texts[j] for j in range(n_ar_total) for _ in range(n_img)]
+            all_dit_ids = [sid.replace("/", "_") for sid in chunk_image_shell.sample_ids]
+            k_dit = min(n_dit_engines, n_dit_total)
+            dit_bounds = [(n_dit_total * r) // k_dit for r in range(k_dit + 1)]
+            for r in range(k_dit):
+                lo, hi = dit_bounds[r], dit_bounds[r + 1]
+                dit_input = Part.input(
+                    all_dit_ids[lo:hi],
+                    primitives={"text": Texts(texts=all_dit_prompts[lo:hi])},
+                    control=input_part.control,
+                )
+                cot_input = dit_input.input_child(primitives={"text": Texts(texts=all_dit_cot[lo:hi])})
+                req = Sample.request(dit_input, cot_input).fork(1, sampling_params=chunk_image_shell.sampling_params)
+                pending_dit.append(self.dit_rollouts[r].launch_nowait("generate", req))
+
         try:
-            pending_ar = ar_engine.launch_nowait("generate", ar_requests[0])
+            launch_ar_chunk(chunks[0])
             for i, chunk in enumerate(chunks):
-                ar_out = pending_ar.result()
-                pending_ar = None
+                ar_gen = Part.concat([call.result().parts[-1] for call in pending_ar])
+                pending_ar.clear()
                 if i + 1 < len(chunks):
-                    pending_ar = ar_engine.launch_nowait("generate", ar_requests[i + 1])
+                    launch_ar_chunk(chunks[i + 1])
 
                 input_part, chunk_ar_shell, chunk_image_shell = chunk.parts
-                prompts = input_part.primitives["text"]
-                n_ar = len(prompts.texts) * n_rec
-                ar_gen = ar_out.parts[-1]
+                n_ar = len(input_part.primitives["text"].texts) * n_rec
                 recaptions = ar_gen.primitives.get("text")
                 if not isinstance(recaptions, Texts) or len(recaptions.texts) != n_ar:
                     got = len(recaptions.texts) if isinstance(recaptions, Texts) else type(recaptions).__name__
@@ -328,37 +368,24 @@ class UnifiedModelTrainer(BaseTrainer):
                         output_version=ar_gen.output_version,
                     )
                 )
-                dit_prompts = Texts(texts=[prompts.texts[j // n_rec] for j in range(n_ar) for _ in range(n_img)])
-                dit_cot = Texts(texts=[recaptions.texts[j] for j in range(n_ar) for _ in range(n_img)])
-                dit_input = Part.input(
-                    [sid.replace("/", "_") for sid in chunk_image_shell.sample_ids],
-                    primitives={"text": dit_prompts},
-                    control=input_part.control,
-                )
-                cot_input = dit_input.input_child(primitives={"text": dit_cot})
-                dit_request = Sample.request(dit_input, cot_input).fork(
-                    1, sampling_params=chunk_image_shell.sampling_params
-                )
-                if pending_dit is not None:
-                    dit_outs.append(pending_dit.result())
-                    pending_dit = None
-                pending_dit = dit_engine.launch_nowait("generate", dit_request)
+                if pending_dit:
+                    dit_gens.append(Part.concat([call.result().parts[-1] for call in pending_dit]))
+                    pending_dit.clear()
+                launch_dit_chunk(chunk, recaptions)
 
-            dit_outs.append(pending_dit.result())
-            pending_dit = None
+            dit_gens.append(Part.concat([call.result().parts[-1] for call in pending_dit]))
+            pending_dit.clear()
         except BaseException:
-            for pending in (pending_ar, pending_dit):
-                if pending is not None:
-                    try:
-                        pending.wait()
-                    except Exception:
-                        logger.debug("UnifiedModelTrainer: pending rollout call failed while draining", exc_info=True)
+            for pending in (*pending_ar, *pending_dit):
+                try:
+                    pending.wait()
+                except Exception:
+                    logger.debug("UnifiedModelTrainer: pending rollout call failed while draining", exc_info=True)
             raise
 
         filled: List[Sample] = []
-        for chunk, ar_part, dit_out in zip(chunks, ar_parts, dit_outs):
+        for chunk, ar_part, img_gen in zip(chunks, ar_parts, dit_gens):
             input_part, _, chunk_image_shell = chunk.parts
-            img_gen = dit_out.parts[-1]
             if len(img_gen.sample_ids) != len(chunk_image_shell.sample_ids):
                 raise RuntimeError(
                     f"UnifiedModelTrainer.run_rollout: DiT engine returned {len(img_gen.sample_ids)} image(s) "
