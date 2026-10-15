@@ -67,13 +67,13 @@ def set_payload(out: Any, value: Any) -> None:
 
 def read_captures(result: Any) -> Dict[str, Any]:
     """Driver-side inverse of :func:`stamp_capture` after the formatter flush."""
-    mm = getattr(result, "multimodal_output", None) or {}
+    mm = result.multimodal_output
     if not isinstance(mm, dict):
         return {}
-    metadata = mm.get("metadata") or {}
+    metadata = mm.get("metadata")
     if not isinstance(metadata, dict):
         return {}
-    captures = metadata.get(CAPTURE_GROUP) or {}
+    captures = metadata.get(CAPTURE_GROUP)
     return captures if isinstance(captures, dict) else {}
 
 
@@ -107,7 +107,7 @@ def _adopt_payload_trajectory(out: Any, traj: Any) -> None:
 
 def finalize_output(out: Any) -> None:
     """Keep captures and SDE trajectory; unwrap media so postprocess sees a tensor."""
-    envelope = getattr(out, "output", None)
+    envelope = out.output
     if not (isinstance(envelope, dict) and isinstance(envelope.get("payload"), dict)):
         return
     payload = envelope["payload"]
@@ -119,7 +119,7 @@ def finalize_output(out: Any) -> None:
                 bag[key] = value
             elif isinstance(bag[key], dict) and isinstance(value, dict):
                 bag[key] = {**value, **bag[key]}
-    has_sde_traj = getattr(out, "trajectory_latents", None) is not None
+    has_sde_traj = out.trajectory_latents is not None
     if has_sde_traj:
         payload.pop("trajectory", None)
     elif "image" in payload or "video" in payload:

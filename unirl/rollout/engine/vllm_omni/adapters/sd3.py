@@ -67,7 +67,7 @@ class Sd3OutputAdapter(DitOutputAdapter):
         pooled = torch.cat([c["pooled_prompt_embeds"] for c in captures], dim=0)
         segment_batch = 0
         for diff_out in diff_outputs:
-            traj = getattr(diff_out, "trajectory_latents", None)
+            traj = diff_out.trajectory_latents
             if traj is not None:
                 segment_batch += int(traj.shape[0])
         if segment_batch:

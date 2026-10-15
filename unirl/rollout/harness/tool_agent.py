@@ -51,12 +51,10 @@ class ToolAgentHarness:
             logger.warning("ToolAgentHarness: trajectory failed: %s", exc, exc_info=True)
             return HarnessOutcome(sample, "failed")
         finally:
-            close = getattr(self.env, "close", None)
-            if close is not None:
-                try:
-                    close(sample)
-                except Exception:  # noqa: BLE001 — teardown must not sink the drain
-                    logger.warning("ToolAgentHarness: env.close failed during teardown", exc_info=True)
+            try:
+                self.env.close(sample)
+            except Exception:  # noqa: BLE001 — teardown must not sink the drain
+                logger.warning("ToolAgentHarness: env.close failed during teardown", exc_info=True)
 
 
 __all__ = ["ToolAgentHarness"]

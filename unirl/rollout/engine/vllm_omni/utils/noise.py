@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from unirl.types.sample import Part
+from unirl.types.segments.latent import LatentSegment
 
 
 def pack_initial_noise_extra_args(
@@ -19,7 +20,7 @@ def pack_initial_noise_extra_args(
     if diff_params.disable_driver_xt:
         return
     seg = gen_part.segment
-    initial_latents = getattr(seg, "initial_latents", None) if seg is not None else None
+    initial_latents = seg.initial_latents if isinstance(seg, LatentSegment) else None
     if initial_latents is not None:
         if int(initial_latents.shape[0]) != n_samples:
             raise RuntimeError(

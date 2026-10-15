@@ -55,11 +55,11 @@ def pick_stage_output(
 ) -> Optional[Any]:
     """Find the result with the requested ``final_output_type``."""
     for out in outputs:
-        if getattr(out, "final_output_type", None) == final_output_type:
+        if out.final_output_type == final_output_type:
             return out
     if stage_id is not None:
         for out in outputs:
-            if getattr(out, "stage_id", None) == stage_id:
+            if out.stage_id == stage_id:
                 return out
     return None
 
@@ -102,7 +102,7 @@ def collect_dit_outputs(
                 f"(modality={modality}); did the DiT stage fail?"
             )
         diff_outputs.append(diff_out)
-        imgs = getattr(diff_out, "images", None) or []
+        imgs = diff_out.images
         if not imgs and final_output_type == "video":
             imgs = _video_frames_from_captures(diff_out)
         pil_frames_per_prompt.append(list(imgs))
@@ -125,19 +125,19 @@ def build_image_segment(
     per_latents: List[torch.Tensor] = []
     per_log_probs: List[torch.Tensor] = []
     for diff_out in diff_outputs:
-        traj_l = getattr(diff_out, "trajectory_latents", None)
+        traj_l = diff_out.trajectory_latents
         if traj_l is not None:
             if pad_tokens_to is not None and traj_l.shape[-2] < pad_tokens_to:
                 traj_l = torch.nn.functional.pad(traj_l, (0, 0, 0, pad_tokens_to - traj_l.shape[-2]))  # [n, K, seq, C]
             per_latents.append(traj_l)
-        traj_lp = getattr(diff_out, "trajectory_log_probs", None)
+        traj_lp = diff_out.trajectory_log_probs
         if traj_lp is not None:
             per_log_probs.append(traj_lp)
 
     traj_latents: Optional[torch.Tensor] = torch.cat(per_latents, dim=0) if per_latents else None
     traj_log_probs: Optional[torch.Tensor] = torch.cat(per_log_probs, dim=0) if per_log_probs else None
     head = diff_outputs[0]
-    seg_sigmas = getattr(head, "trajectory_timesteps", None)
+    seg_sigmas = head.trajectory_timesteps
     verify_engine_used_sigmas(
         seg_sigmas,
         expected=expected_sigmas,
@@ -191,10 +191,8 @@ def decoded_text_from_ar(per_request: Sequence[Sequence[Any]]) -> Texts:
     for outputs in per_request:
         ar = pick_stage_output(outputs, final_output_type="text", stage_id=0)
         text_str = ""
-        if ar is not None:
-            completions = getattr(ar, "outputs", None) or []
-            if completions:
-                text_str = getattr(completions[0], "text", "") or ""
+        if ar is not None and ar.outputs:
+            text_str = str(ar.outputs[0].text)
         texts.append(Text(text=text_str))
     return Texts.from_list(texts)
 
@@ -230,12 +228,12 @@ def _flatten_logprobs(logprobs: Any, fallback_len: int) -> Optional[torch.Tensor
 
 def _extract_completion(out: Any) -> Tuple[List[int], Optional[torch.Tensor]]:
     """Pull ``(token_ids, per_token_logp)`` out of a Stage-0 result."""
-    completions = getattr(out, "outputs", None) or []
+    completions = out.outputs
     if not completions:
         return [], None
     completion = completions[0]
-    tokens = list(getattr(completion, "token_ids", []) or [])
-    logp = _flatten_logprobs(getattr(completion, "logprobs", None), fallback_len=len(tokens))
+    tokens = list(completion.token_ids)
+    logp = _flatten_logprobs(completion.logprobs, fallback_len=len(tokens))
     return tokens, logp
 
 
@@ -250,7 +248,7 @@ def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
     for outputs in per_request:
         stage0 = None
         for out in outputs:
-            if getattr(out, "stage_id", None) == 0:
+            if out.stage_id == 0:
                 stage0 = out
                 break
         if stage0 is None:

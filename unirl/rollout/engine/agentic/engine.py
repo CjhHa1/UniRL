@@ -75,7 +75,7 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         get_schemas = getattr(env, "tool_schemas", None)
         if not callable(get_schemas) or not hasattr(inner_cfg, "chat_template_kwargs"):
             return
-        chat_template_kwargs = dict(inner_cfg.chat_template_kwargs or {})
+        chat_template_kwargs = dict(inner_cfg.chat_template_kwargs)
         chat_template_kwargs.setdefault("tools", get_schemas())
         inner_cfg.chat_template_kwargs = chat_template_kwargs
 

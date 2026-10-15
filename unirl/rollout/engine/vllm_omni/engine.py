@@ -213,30 +213,13 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def shutdown(self) -> None:
-        shutdown_lock = getattr(self, "_shutdown_lock", None)
-        if shutdown_lock is None:
-            backend = getattr(self, "_backend", None)
-            if backend is not None:
-                backend.shutdown()
-            return
-
-        with shutdown_lock:
-            if getattr(self, "_shutdown_complete", False):
+        with self._shutdown_lock:
+            if self._shutdown_complete:
                 return
-
-            generate_lock = getattr(self, "_generate_lock", None)
-            if generate_lock is None:
+            with self._generate_lock:
                 self._shutdown_requested = True
-                backend = getattr(self, "_backend", None)
-                if backend is not None:
-                    backend.shutdown()
-            else:
-                with generate_lock:
-                    self._shutdown_requested = True
-                backend = getattr(self, "_backend", None)
-                if backend is not None:
-                    with generate_lock:
-                        backend.shutdown()
+            with self._generate_lock:
+                self._backend.shutdown()
             self._shutdown_complete = True
 
     def tp_per_stage(self) -> Dict[int, int]:

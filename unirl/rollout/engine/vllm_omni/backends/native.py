@@ -130,7 +130,7 @@ class VLLMOmniBackend:
             pass
 
         deploy_config_path = _resolve_deploy_config(str(intent["deploy_config"]))
-        omni_kwargs = dict(intent.get("omni_kwargs") or {})
+        omni_kwargs = dict(intent["omni_kwargs"])
         if intent.get("enable_sleep_mode"):
             omni_kwargs["enable_sleep_mode"] = True
         ports = intent.get("ports")
@@ -579,7 +579,7 @@ class VLLMOmniBackend:
                     UNIRL_LORA_NAME,
                     UNIRL_LORA_INT_ID,
                     UNIRL_LORA_PATH,
-                    dict(peft_config or {}),
+                    {} if peft_config is None else dict(peft_config),
                     serialized,
                 ),
             )
@@ -621,7 +621,7 @@ class VLLMOmniBackend:
                     UNIRL_LORA_NAME,
                     UNIRL_LORA_INT_ID,
                     UNIRL_LORA_PATH,
-                    dict(peft_config or {}),
+                    {} if peft_config is None else dict(peft_config),
                     serialized,
                 ),
             )

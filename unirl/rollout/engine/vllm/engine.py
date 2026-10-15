@@ -146,7 +146,7 @@ class VLLMRolloutEngine(BaseRolloutEngine):
                     "enable_prefix_caching": config.enable_prefix_caching,
                     "enable_chunked_prefill": config.enable_chunked_prefill,
                     "logprobs_mode": config.logprobs_mode,
-                    "engine_kwargs": dict(config.engine_kwargs or {}),
+                    "engine_kwargs": dict(config.engine_kwargs),
                 },
                 "visible_devices": visible,
             },

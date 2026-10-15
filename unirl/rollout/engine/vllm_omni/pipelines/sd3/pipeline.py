@@ -86,7 +86,7 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
             batch_size = len(prompt_list)
 
             if pipeline_self.text_encoder_3 is None:
-                dtype_fallback = dtype or getattr(pipeline_self.transformer, "dtype", torch.float32)
+                dtype_fallback = dtype or pipeline_self.od_config.dtype
                 return torch.zeros(
                     (
                         batch_size,

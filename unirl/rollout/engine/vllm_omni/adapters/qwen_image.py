@@ -58,10 +58,8 @@ class QwenImageInputAdapter(DitInputAdapter):
         diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
         kwargs = sampling[0].kwargs
         kwargs["true_cfg_scale"] = float(diff_params.guidance_scale)
-        if "max_sequence_length" not in kwargs:
-            max_seq_len = getattr(self.model_config, "max_sequence_length", None)
-            if max_seq_len is not None:
-                kwargs["max_sequence_length"] = int(max_seq_len)
+        if "max_sequence_length" not in kwargs and self.model_config is not None:
+            kwargs["max_sequence_length"] = int(self.model_config.max_sequence_length)
         return sampling
 
 

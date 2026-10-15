@@ -97,7 +97,7 @@ class Qwen3OmniThinkerInputAdapter:
         self.use_audio_in_video = bool(use_audio_in_video)
         self.max_prompt_length = int(max_prompt_length)
         self.system_instruction = system_instruction
-        self.chat_template_kwargs = dict(chat_template_kwargs or {})
+        self.chat_template_kwargs = {} if chat_template_kwargs is None else dict(chat_template_kwargs)
 
         from transformers import AutoProcessor, AutoTokenizer
 
@@ -388,7 +388,8 @@ class Qwen3OmniThinkerOutputAdapter(Hi3TextOutputAdapter):
 
         pad_id = self._input_adapter._tokenizer.pad_token_id
         if pad_id is None:
-            pad_id = self._input_adapter._tokenizer.eos_token_id or 0
+            eos_id = self._input_adapter._tokenizer.eos_token_id
+            pad_id = 0 if eos_id is None else eos_id
 
         raw_ids = [e["input_ids"].squeeze(0) for e in encs]
         raw_masks = [e["attention_mask"].squeeze(0) for e in encs]
@@ -440,7 +441,7 @@ class Qwen3OmniThinkerOutputAdapter(Hi3TextOutputAdapter):
     @staticmethod
     def _stage0(group: List[OmniRawResult]) -> OmniRawResult:
         for output in group:
-            if getattr(output, "stage_id", None) == 0:
+            if output.stage_id == 0:
                 return output
         raise RuntimeError("Qwen3OmniThinkerOutputAdapter: backend result group has no stage-0 AR output.")
 
@@ -454,8 +455,8 @@ class Qwen3OmniThinkerOutputAdapter(Hi3TextOutputAdapter):
         values: List[int] = []
         for group in per_request:
             output = cls._stage0(group)
-            completions = getattr(output, "outputs", None) or []
-            finish_reason = getattr(completions[0], "finish_reason", None) if completions else None
+            completions = output.outputs
+            finish_reason = completions[0].finish_reason if completions else None
             values.append(int(mapping.get(str(finish_reason), SegmentStatus.PENDING)))
         return torch.tensor(values, dtype=torch.long)
 
@@ -511,29 +512,24 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
 
         mc = model_config
         model_path = str(config.model_path)
-        image_max_pixels = getattr(mc, "image_max_pixels", None) if mc is not None else None
-        video_fps = float(getattr(mc, "video_fps", 1.0)) if mc is not None else 1.0
-        video_max_frames = getattr(mc, "video_max_frames", None) if mc is not None else None
-        video_max_pixels = getattr(mc, "video_max_pixels", None) if mc is not None else None
-        use_audio_in_video = bool(getattr(mc, "use_audio_in_video", False)) if mc is not None else False
-        max_prompt_length = int(getattr(mc, "max_prompt_length", 12288)) if mc is not None else 12288
-        config_image_max_pixels = getattr(config, "image_max_pixels", None)
-        config_video_fps = getattr(config, "video_fps", None)
-        config_video_max_pixels = getattr(config, "video_max_pixels", None)
-        config_use_audio_in_video = getattr(config, "use_audio_in_video", None)
-        config_max_prompt_length = getattr(config, "max_prompt_length", None)
-        if config_image_max_pixels is not None:
-            image_max_pixels = int(config_image_max_pixels)
-        if config_video_fps is not None:
-            video_fps = float(config_video_fps)
-        if config_video_max_pixels is not None:
-            video_max_pixels = int(config_video_max_pixels)
-        if config_use_audio_in_video is not None:
-            use_audio_in_video = bool(config_use_audio_in_video)
-        if config_max_prompt_length is not None:
-            max_prompt_length = int(config_max_prompt_length)
-        system_instruction = getattr(mc, "system_instruction", None) if mc is not None else None
-        chat_template_kwargs = dict(getattr(config, "chat_template_kwargs", {}) or {})
+        image_max_pixels = mc.image_max_pixels if mc is not None else None
+        video_fps = float(mc.video_fps) if mc is not None else 1.0
+        video_max_frames = mc.video_max_frames if mc is not None else None
+        video_max_pixels = mc.video_max_pixels if mc is not None else None
+        use_audio_in_video = bool(mc.use_audio_in_video) if mc is not None else False
+        max_prompt_length = int(mc.max_prompt_length) if mc is not None else 12288
+        if config.image_max_pixels is not None:
+            image_max_pixels = int(config.image_max_pixels)
+        if config.video_fps is not None:
+            video_fps = float(config.video_fps)
+        if config.video_max_pixels is not None:
+            video_max_pixels = int(config.video_max_pixels)
+        if config.use_audio_in_video is not None:
+            use_audio_in_video = bool(config.use_audio_in_video)
+        if config.max_prompt_length is not None:
+            max_prompt_length = int(config.max_prompt_length)
+        system_instruction = mc.system_instruction if mc is not None else None
+        chat_template_kwargs = dict(config.chat_template_kwargs)
 
         logger.info(
             "Resolved Qwen3-Omni rollout adapter config: model_path=%s image_max_pixels=%s video_fps=%s "

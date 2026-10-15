@@ -188,7 +188,7 @@ class BucketedIPCReceiveMixin:
             lora_name=str(lora_name),
             lora_int_id=int(lora_int_id),
             lora_path=str(lora_path),
-            peft_config=dict(peft_config or {}),
+            peft_config={} if peft_config is None else dict(peft_config),
             lora_tensors=lora_tensors,
         )
         return self.add_lora(request)
@@ -221,7 +221,7 @@ class BucketedIPCReceiveMixin:
             lora_name=str(lora_name),
             lora_int_id=int(lora_int_id),
             lora_path=str(lora_path),
-            peft_config=dict(peft_config or {}),
+            peft_config={} if peft_config is None else dict(peft_config),
             lora_tensors=lora_tensors,
         )
         return self.add_lora(request)

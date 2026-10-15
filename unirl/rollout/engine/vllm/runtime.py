@@ -55,10 +55,7 @@ def _shutdown_llm(llm: Any) -> None:
     """Best-effort shutdown of the vLLM engine and all executor workers."""
     if llm is None:
         return
-    shutdown = getattr(getattr(llm, "llm_engine", None), "engine_core", None)
-    shutdown = getattr(shutdown, "shutdown", None)
-    if callable(shutdown):
-        shutdown(timeout=30.0)
+    llm.llm_engine.engine_core.shutdown(timeout=30.0)
 
 
 def _sampling_params(payload: Dict[str, Any], *, return_logprob: bool):
@@ -92,10 +89,10 @@ def _plain_outputs(outputs) -> List[Dict[str, Any]]:
                     logprobs.append(float(selected.logprob))
             flattened.append(
                 {
-                    "text": str(completion.text or ""),
+                    "text": str(completion.text),
                     "token_ids": token_ids,
                     "logprobs": logprobs,
-                    "finish_reason": str(completion.finish_reason or ""),
+                    "finish_reason": "" if completion.finish_reason is None else str(completion.finish_reason),
                 }
             )
     return flattened
@@ -129,12 +126,12 @@ def engine_process_main(
 
         if str(vllm_version) != _SUPPORTED_VLLM_VERSION:
             raise RuntimeError(f"vLLM rollout requires vllm=={_SUPPORTED_VLLM_VERSION}; got {vllm_version}")
-        engine_kwargs = dict(config.get("engine_kwargs") or {})
+        engine_kwargs = dict(config["engine_kwargs"])
         engine_kwargs["dtype"] = str(config["dtype"])
-        engine_kwargs["trust_remote_code"] = bool(config.get("trust_remote_code", False))
-        if config.get("model_revision"):
+        engine_kwargs["trust_remote_code"] = bool(config["trust_remote_code"])
+        if config["model_revision"]:
             engine_kwargs["revision"] = str(config["model_revision"])
-        if config.get("tokenizer_revision"):
+        if config["tokenizer_revision"]:
             engine_kwargs["tokenizer_revision"] = str(config["tokenizer_revision"])
         engine_kwargs["distributed_executor_backend"] = "mp"
         engine_kwargs["enable_sleep_mode"] = True
@@ -145,7 +142,7 @@ def engine_process_main(
         engine_kwargs["logprobs_mode"] = str(config["logprobs_mode"])
         engine_kwargs["worker_extension_cls"] = "unirl.rollout.engine.vllm.worker_extension.UniRLWeightSyncExtension"
         engine_kwargs["weight_transfer_config"] = WeightTransferConfig(backend="ipc")
-        if config.get("quantization") is not None:
+        if config["quantization"] is not None:
             engine_kwargs["quantization"] = str(config["quantization"])
         llm = LLM(
             model=str(config["pretrained_model_ckpt_path"]),
@@ -153,7 +150,7 @@ def engine_process_main(
             **engine_kwargs,
         )
         worker_capabilities = llm.collective_rpc("unirl_weight_sync_capabilities")
-        model_type = str(getattr(llm.model_config.hf_config, "model_type", ""))
+        model_type = str(llm.model_config.hf_config.model_type)
         _send_response(
             connection,
             startup_request,

@@ -150,7 +150,7 @@ class WeightSync:
             }
         else:
             self._last_lora_tensors = lora_tensors
-        self._last_peft_config = dict(peft_config or {})
+        self._last_peft_config = {} if peft_config is None else dict(peft_config)
 
     def loaded_param_checksums(self, *, names: List[str]) -> dict:
         return self._backend.param_checksums(names=list(names))

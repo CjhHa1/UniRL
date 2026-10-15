@@ -27,6 +27,7 @@ from unirl.rollout.engine.vllm_omni.utils.diff_kwargs import core_diff_kwargs, s
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
+from unirl.types.segments.latent import LatentSegment
 
 
 def _trailing_gen_parts(sample: Sample, *params_types: type, caller: str) -> Tuple[Part, ...]:
@@ -146,8 +147,8 @@ def hi3_ar_fused_conditions(per_request: List[List[OmniRawResult]]) -> Dict[str,
     for outputs in per_request:
         ids = None
         for out in outputs:
-            if getattr(out, "stage_id", None) == 0:
-                ids = getattr(out, "prompt_token_ids", None)
+            if out.stage_id == 0:
+                ids = out.prompt_token_ids
                 break
         rows.append([int(t) for t in ids] if ids else [])
 
@@ -330,7 +331,7 @@ class Hi3InputAdapter:
         extra_args = sde_extra_args(diff_params)
 
         seg = gen_part.segment
-        if getattr(seg, "initial_latents", None) is not None:
+        if isinstance(seg, LatentSegment) and seg.initial_latents is not None:
             raise NotImplementedError(
                 f"{type(self).__name__}: modality={self.modality!r} cannot consume a "
                 f"pre-materialized LatentSegment.initial_latents tensor "

@@ -98,7 +98,7 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         def injecting(batch_size, latent_channel, image_size, dtype, device, generator, latents=None):
             recipe = pipeline_self._pending_initial_noise_recipe
             if latents is None and recipe is not None:
-                lsf = getattr(inner, "latent_scale_factor", None)
+                lsf = inner.latent_scale_factor
                 if lsf is None:
                     factors = (1,) * len(image_size)
                 elif isinstance(lsf, int):

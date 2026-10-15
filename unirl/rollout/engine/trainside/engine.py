@@ -47,7 +47,7 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                 self.schedule_policy = pipeline.build_schedule_policy()
             else:
                 self.schedule_policy = FlowMatchSchedulePolicy.from_pretrained(
-                    getattr(pipeline.bundle, "pretrained_path", None),
+                    pipeline.bundle.pretrained_path,
                     shift=float(pipeline.shift),
                 )
         else:

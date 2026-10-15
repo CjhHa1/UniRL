@@ -43,7 +43,7 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
     chat_template_kwargs: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.modality = str(self.modality or "").strip().lower()
+        self.modality = str(self.modality).strip().lower()
         from unirl.rollout.engine.vllm_omni.adapters import registered_adapters
 
         valid = registered_adapters()
@@ -61,7 +61,7 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
     ) -> Dict[str, Any]:
         """Spell this config (+ adapter boot extras + reserved ports) as boot intent."""
         del model_config
-        extra = dict(extra or {})
+        extra = {} if extra is None else dict(extra)
         mode = extra.pop("mode", None)
 
         intent: Dict[str, Any] = {
@@ -80,7 +80,7 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
         )
         if mode is not None:
             omni_kwargs["mode"] = mode
-        omni_kwargs.update(self.omni_extra or {})
+        omni_kwargs.update(self.omni_extra)
         intent["omni_kwargs"] = omni_kwargs
         return intent
 

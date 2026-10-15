@@ -148,7 +148,7 @@ class ComposedRolloutEngine(BaseRolloutEngine):
     def get_memory_info(self) -> Dict[str, float]:
         out: Dict[str, float] = {"allocated_gb": 0.0, "cached_gb": 0.0}
         for child in self._child_by_name.values():
-            m = child.get_memory_info() or {}
+            m = child.get_memory_info()
             out["allocated_gb"] += float(m.get("allocated_gb", 0.0))
             out["cached_gb"] += float(m.get("cached_gb", 0.0))
         return out

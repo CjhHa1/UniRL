@@ -154,7 +154,7 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         with self._sigma_override(one):
             out = super().forward(req, **kwargs)
 
-        decoded = getattr(out, "output", None)
+        decoded = out.output
         if decoded is not None:
             stamp_capture(out, "rl_decoded_video", detach_cpu(decoded))
 

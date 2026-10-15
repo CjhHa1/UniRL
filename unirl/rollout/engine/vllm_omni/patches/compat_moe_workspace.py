@@ -102,14 +102,9 @@ def _patch_workspace_manager_class(
 
 def patch_moe_workspace_pool() -> None:
     """Enroll MoE workspace allocations in sleep-managed CuMem pools."""
-    try:
-        from vllm.device_allocator.cumem import CuMemAllocator
-        from vllm.v1.worker.ubatching import dbo_current_ubatch_id
-        from vllm.v1.worker.workspace import WorkspaceManager, _workspace_lane
-
-        WorkspaceManager._ensure_workspace_size
-    except (ImportError, AttributeError):
-        return
+    from vllm.device_allocator.cumem import CuMemAllocator
+    from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+    from vllm.v1.worker.workspace import WorkspaceManager, _workspace_lane
 
     def workspace_id_provider(manager: Any) -> int | None:
         # Delegate invalid lanes before indexing. A lane can otherwise flatten
