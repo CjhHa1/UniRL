@@ -8,9 +8,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from unirl.rollout.engine.vllm_omni.pipelines._shared.flow_match_sde_scheduler import (
-    FlowMatchSDEDiscreteScheduler,
-)
 from unirl.types.noise_recipe import NoiseRecipe
 
 
@@ -19,13 +16,6 @@ def detach_cpu(t: Any) -> Any:
     if isinstance(t, torch.Tensor):
         return t.detach().to("cpu")
     return t
-
-
-def detach_cpu_pair(p: Any) -> Any:
-    """``(cos, sin)`` rope-cache pair handler. Pass-through otherwise."""
-    if isinstance(p, tuple) and len(p) == 2:
-        return (detach_cpu(p[0]), detach_cpu(p[1]))
-    return p
 
 
 #: Metadata group for unirl captures; vllm-omni validates only its own groups, so this cannot collide.
@@ -87,22 +77,6 @@ def drain_trajectory_into(out: Any, scheduler: Any) -> None:
     stamp_capture(out, "sde_step_indices", scheduler.last_sde_step_indices)
 
 
-def _adopt_payload_trajectory(out: Any, traj: Any) -> None:
-    """Lift upstream payload trajectory onto ``trajectory_*`` so unwrap does not drop it."""
-    if isinstance(traj, Mapping):
-        if (latents := traj.get("latents")) is not None:
-            out.trajectory_latents = latents
-        if (timesteps := traj.get("timesteps")) is not None:
-            out.trajectory_timesteps = timesteps
-        if (log_probs := traj.get("log_probs")) is not None:
-            out.trajectory_log_probs = log_probs
-        if (decoded := traj.get("decoded")) is not None:
-            out.trajectory_decoded = decoded
-        return
-    if torch.is_tensor(traj):
-        out.trajectory_latents = traj
-
-
 def finalize_output(out: Any) -> None:
     """Keep captures and SDE trajectory; unwrap media so postprocess sees a tensor."""
     envelope = out.output
@@ -121,7 +95,18 @@ def finalize_output(out: Any) -> None:
     if has_sde_traj:
         payload.pop("trajectory", None)
     elif "image" in payload or "video" in payload:
-        _adopt_payload_trajectory(out, payload.get("trajectory"))
+        traj = payload.get("trajectory")
+        if isinstance(traj, Mapping):
+            if (latents := traj.get("latents")) is not None:
+                out.trajectory_latents = latents
+            if (timesteps := traj.get("timesteps")) is not None:
+                out.trajectory_timesteps = timesteps
+            if (log_probs := traj.get("log_probs")) is not None:
+                out.trajectory_log_probs = log_probs
+            if (decoded := traj.get("decoded")) is not None:
+                out.trajectory_decoded = decoded
+        elif torch.is_tensor(traj):
+            out.trajectory_latents = traj
     if "image" in payload:
         out.output = payload["image"]
     elif "video" in payload:
@@ -204,21 +189,14 @@ def flush_captures_into_postprocess(diffusion_output: Any, postprocess_output: A
     return replace(postprocess_output, metadata=metadata)
 
 
-def make_sde_scheduler(upstream_config: Any, *, eta: float = 0.0) -> FlowMatchSDEDiscreteScheduler:
-    """Build the trajectory-capturing scheduler from the upstream scheduler's config — the sd3/hv15 install path."""
-    return FlowMatchSDEDiscreteScheduler.from_config(upstream_config, eta=eta)
-
-
 __all__ = [
     "CAPTURE_ATTR",
     "CAPTURE_GROUP",
     "detach_cpu",
-    "detach_cpu_pair",
     "drain_trajectory_into",
     "finalize_output",
     "flush_captures_into_postprocess",
     "inject_latents",
-    "make_sde_scheduler",
     "read_captures",
     "resolve_request_noise",
     "set_payload",

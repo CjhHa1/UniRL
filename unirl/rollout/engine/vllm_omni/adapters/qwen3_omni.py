@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 
@@ -25,51 +25,6 @@ from unirl.types.segments import TextSegment
 from unirl.types.segments.base import SegmentStatus
 
 logger = logging.getLogger(__name__)
-
-
-def _compress_qwen3_omni_prompt_ids(
-    token_ids: List[int],
-    *,
-    audio_token_id: int,
-    image_token_id: int,
-    video_token_id: int,
-    vision_bos_token_id: int,
-    vision_eos_token_id: int,
-    audio_bos_token_id: int,
-    audio_eos_token_id: int,
-    use_audio_in_video: bool,
-) -> List[int]:
-    """Undo HF multimodal expansion before vLLM processes the raw media."""
-    result = list(token_ids)
-    if use_audio_in_video:
-        while True:
-            start = next(
-                (i for i in range(len(result) - 1) if result[i : i + 2] == [vision_bos_token_id, audio_bos_token_id]),
-                None,
-            )
-            if start is None:
-                break
-            end = next(
-                (
-                    i
-                    for i in range(start + 2, len(result) - 1)
-                    if result[i : i + 2] == [audio_eos_token_id, vision_eos_token_id]
-                ),
-                None,
-            )
-            if end is None:
-                raise ValueError(
-                    "Qwen3OmniThinkerAdapter: expanded audio-in-video span has no matching audio/vision end tokens."
-                )
-            result = result[:start] + [vision_bos_token_id, video_token_id, vision_eos_token_id] + result[end + 2 :]
-
-    for mm_token_id in (audio_token_id, image_token_id, video_token_id):
-        compressed: List[int] = []
-        for token_id in result:
-            if token_id != mm_token_id or not compressed or compressed[-1] != mm_token_id:
-                compressed.append(token_id)
-        result = compressed
-    return result
 
 
 @register_adapter("qwen3_omni_thinker")
@@ -156,70 +111,6 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
             token_id = encoded[0]
         return int(token_id)
 
-    def _encode_one(
-        self,
-        messages: List[Dict[str, Any]],
-        template_overrides: Dict[str, Any],
-    ) -> tuple[
-        Dict[str, Any],
-        Optional[Any],
-        Optional[Any],
-        float,
-        Optional[Any],
-        Optional[int],
-        bool,
-    ]:
-        media = prepare_omni_media(
-            messages,
-            sample_rate=self._processor.feature_extractor.sampling_rate,
-            video_fps=self.video_fps,
-            video_max_frames=self.video_max_frames,
-            use_audio_in_video=self.use_audio_in_video,
-        )
-        prepared = media.messages
-        image = media.image
-        video_frames = media.video_frames
-        effective_fps = media.effective_fps
-        audio_wave = media.audio_waveform
-        audio_sample_rate = media.audio_sample_rate
-        audio_in_video = media.audio_in_video
-        template_kwargs = dict(self.chat_template_kwargs)
-        template_kwargs.update(template_overrides)
-
-        if image is not None or video_frames is not None or audio_wave is not None:
-            template_kwargs.update(add_generation_prompt=True, tokenize=False)
-            prompt_text = self._processor.apply_chat_template(prepared, **template_kwargs)
-            processor_kwargs: Dict[str, Any] = {"text": [prompt_text], "truncation": True, "return_tensors": "pt"}
-            processor_kwargs.update(
-                omni_processor_media_kwargs(
-                    self._processor,
-                    has_image=image is not None,
-                    has_video=video_frames is not None,
-                    image_max_pixels=self.image_max_pixels,
-                    video_fps=effective_fps,
-                    video_max_pixels=self.video_max_pixels,
-                )
-            )
-            if image is not None:
-                processor_kwargs["images"] = [image]
-            if video_frames is not None:
-                processor_kwargs["videos"] = [video_frames]
-            if audio_wave is not None:
-                processor_kwargs["audio"] = [audio_wave]
-            if audio_in_video:
-                processor_kwargs["use_audio_in_video"] = True
-            encoding = self._processor(**processor_kwargs)
-            return encoding, image, video_frames, effective_fps, audio_wave, audio_sample_rate, audio_in_video
-
-        template_kwargs.update(
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
-        encoding = self._processor.apply_chat_template(prepared, **template_kwargs)
-        return encoding, image, video_frames, effective_fps, audio_wave, audio_sample_rate, audio_in_video
-
     def schedule_policy(self) -> Any:
         """Return no diffusion schedule for the AR-only stage."""
         return None
@@ -248,19 +139,60 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
         prompts: List[Dict[str, Any]] = []
         self._last_encodings = []
         for messages in conversations:
-            (
-                enc,
-                image,
-                video_frames,
-                effective_fps,
-                audio_wave,
-                audio_sample_rate,
-                audio_in_video,
-            ) = self._encode_one(messages, template_overrides)
+            media_bundle = prepare_omni_media(
+                messages,
+                sample_rate=self._processor.feature_extractor.sampling_rate,
+                video_fps=self.video_fps,
+                video_max_frames=self.video_max_frames,
+                use_audio_in_video=self.use_audio_in_video,
+            )
+            prepared = media_bundle.messages
+            image = media_bundle.image
+            video_frames = media_bundle.video_frames
+            effective_fps = media_bundle.effective_fps
+            audio_wave = media_bundle.audio_waveform
+            audio_sample_rate = media_bundle.audio_sample_rate
+            audio_in_video = media_bundle.audio_in_video
+            has_mm = image is not None or video_frames is not None or audio_wave is not None
+            template_kwargs = dict(self.chat_template_kwargs)
+            template_kwargs.update(template_overrides)
+
+            if has_mm:
+                template_kwargs.update(add_generation_prompt=True, tokenize=False)
+                prompt_text = self._processor.apply_chat_template(prepared, **template_kwargs)
+                processor_kwargs: Dict[str, Any] = {"text": [prompt_text], "truncation": True, "return_tensors": "pt"}
+                processor_kwargs.update(
+                    omni_processor_media_kwargs(
+                        self._processor,
+                        has_image=image is not None,
+                        has_video=video_frames is not None,
+                        image_max_pixels=self.image_max_pixels,
+                        video_fps=effective_fps,
+                        video_max_pixels=self.video_max_pixels,
+                    )
+                )
+                if image is not None:
+                    processor_kwargs["images"] = [image]
+                if video_frames is not None:
+                    processor_kwargs["videos"] = [video_frames]
+                if audio_wave is not None:
+                    processor_kwargs["audio"] = [audio_wave]
+                if audio_in_video:
+                    processor_kwargs["use_audio_in_video"] = True
+                enc = self._processor(**processor_kwargs)
+            else:
+                template_kwargs.update(
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                )
+                enc = self._processor.apply_chat_template(prepared, **template_kwargs)
+
             enc["_unirl_audio_in_video"] = audio_in_video
             expanded_ids = enc["input_ids"].squeeze(0).tolist()
             if len(expanded_ids) > self.max_prompt_length:
-                if image is not None or video_frames is not None or audio_wave is not None:
+                if has_mm:
                     raise ValueError(
                         f"Qwen3OmniThinkerAdapter: multimodal prompt produced {len(expanded_ids)} tokens, "
                         f"exceeding max_prompt_length={self.max_prompt_length}. Reduce image_max_pixels, "
@@ -270,21 +202,52 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                 enc["input_ids"] = enc["input_ids"][..., -self.max_prompt_length :]
                 enc["attention_mask"] = enc["attention_mask"][..., -self.max_prompt_length :]
                 expanded_ids = enc["input_ids"].squeeze(0).tolist()
-            rollout_ids = (
-                _compress_qwen3_omni_prompt_ids(
-                    expanded_ids,
-                    audio_token_id=self._token_id("<|audio_pad|>"),
-                    image_token_id=self._token_id("<|image_pad|>"),
-                    video_token_id=self._token_id("<|video_pad|>"),
-                    vision_bos_token_id=self._token_id("<|vision_start|>"),
-                    vision_eos_token_id=self._token_id("<|vision_end|>"),
-                    audio_bos_token_id=self._token_id("<|audio_start|>"),
-                    audio_eos_token_id=self._token_id("<|audio_end|>"),
-                    use_audio_in_video=audio_in_video,
-                )
-                if image is not None or video_frames is not None or audio_wave is not None
-                else expanded_ids
-            )
+            if has_mm:
+                audio_token_id = self._token_id("<|audio_pad|>")
+                image_token_id = self._token_id("<|image_pad|>")
+                video_token_id = self._token_id("<|video_pad|>")
+                vision_bos_token_id = self._token_id("<|vision_start|>")
+                vision_eos_token_id = self._token_id("<|vision_end|>")
+                audio_bos_token_id = self._token_id("<|audio_start|>")
+                audio_eos_token_id = self._token_id("<|audio_end|>")
+                rollout_ids = list(expanded_ids)
+                if audio_in_video:
+                    while True:
+                        start = next(
+                            (
+                                i
+                                for i in range(len(rollout_ids) - 1)
+                                if rollout_ids[i : i + 2] == [vision_bos_token_id, audio_bos_token_id]
+                            ),
+                            None,
+                        )
+                        if start is None:
+                            break
+                        end = next(
+                            (
+                                i
+                                for i in range(start + 2, len(rollout_ids) - 1)
+                                if rollout_ids[i : i + 2] == [audio_eos_token_id, vision_eos_token_id]
+                            ),
+                            None,
+                        )
+                        if end is None:
+                            raise ValueError(
+                                "Qwen3OmniThinkerAdapter: expanded audio-in-video span has no matching audio/vision end tokens."
+                            )
+                        rollout_ids = (
+                            rollout_ids[:start]
+                            + [vision_bos_token_id, video_token_id, vision_eos_token_id]
+                            + rollout_ids[end + 2 :]
+                        )
+                for mm_token_id in (audio_token_id, image_token_id, video_token_id):
+                    compressed: List[int] = []
+                    for token_id in rollout_ids:
+                        if token_id != mm_token_id or not compressed or compressed[-1] != mm_token_id:
+                            compressed.append(token_id)
+                    rollout_ids = compressed
+            else:
+                rollout_ids = expanded_ids
             entry: Dict[str, Any] = {"prompt_token_ids": rollout_ids}
             media: Dict[str, Any] = {}
             if image is not None:
@@ -297,7 +260,7 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                 media["audio"] = [(audio_wave, audio_sample_rate)]
             if media:
                 entry["multi_modal_data"] = media
-            if image is not None or video_frames is not None or audio_wave is not None:
+            if has_mm:
                 mm_processor_kwargs: Dict[str, Any] = {"truncation": True}
                 mm_processor_kwargs.update(
                     omni_processor_media_kwargs(

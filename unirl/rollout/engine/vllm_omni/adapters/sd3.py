@@ -7,12 +7,7 @@ from typing import Any, Dict, List
 import torch
 
 from unirl.rollout.engine.vllm_omni.adapters.base import ModelAdapter, register_adapter
-from unirl.rollout.engine.vllm_omni.adapters.dit import (
-    DitInputAdapter,
-    DitOutputAdapter,
-    _grouped_texts_from_sample,
-    _negative_prompt_from_params,
-)
+from unirl.rollout.engine.vllm_omni.adapters.dit import DitInputAdapter, DitOutputAdapter
 from unirl.rollout.engine.vllm_omni.backends import GenerateCall, OmniRawResult
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import read_captures
 from unirl.rollout.engine.vllm_omni.utils import collect_dit_outputs
@@ -78,6 +73,7 @@ class Sd3T2iAdapter(ModelAdapter):
 
     def __init__(self, config: Any, model_config: Any, *, strategy: Any = None, tokenize_fn: Any = None) -> None:
         super().__init__(config, model_config, strategy=strategy, tokenize_fn=tokenize_fn)
+        self.input_adapter = DitInputAdapter(self.modality)
         self.output_adapter = Sd3OutputAdapter(self.modality)
 
     def validate_request(self, sample: Sample) -> None:
@@ -87,11 +83,12 @@ class Sd3T2iAdapter(ModelAdapter):
             )
 
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
-        grouped_texts, spp = _grouped_texts_from_sample(sample, caller=f"{self.modality}.build_inputs")
+        grouped_texts, spp = self.input_adapter.build_grouped_texts(sample)
         diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
-        negative_prompt = _negative_prompt_from_params(diff_params, default="")
+        neg = diff_params.sampler_kwargs.get("negative_prompt")
+        negative_prompt = "" if neg is None else neg
         prompts = [{"prompt": text, "negative_prompt": negative_prompt} for text in grouped_texts]
-        sampling = DitInputAdapter(self.modality).build_sampling(sample)
+        sampling = self.input_adapter.build_sampling(sample)
         sampling[0].kwargs["num_outputs_per_prompt"] = spp
         return [GenerateCall(prompts=prompts, sampling=sampling)]
 

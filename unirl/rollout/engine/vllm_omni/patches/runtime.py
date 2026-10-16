@@ -29,18 +29,6 @@ _FATE_ANCHOR_ENV = "UNIRL_FATE_ANCHOR_PID"
 _FATE_POLL_SECONDS = 5.0
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True  # unknown failure — never take this as "dead"
-    return True
-
-
 def install_fate_sharing(anchor_pid: int, *, arm_pdeathsig: bool) -> None:
     """Bind this process's lifetime to the root of its spawn chain."""
     if arm_pdeathsig:
@@ -60,8 +48,12 @@ def install_fate_sharing(anchor_pid: int, *, arm_pdeathsig: bool) -> None:
     def _watch() -> None:
         while True:
             time.sleep(_FATE_POLL_SECONDS)
-            if not _pid_alive(root_pid):
+            try:
+                os.kill(root_pid, 0)
+            except ProcessLookupError:
                 os._exit(1)
+            except OSError:
+                pass
             if original_ppid != 1 and os.getppid() != original_ppid:
                 os._exit(1)
 
@@ -313,7 +305,14 @@ def patch_ar_merged_lora_fused_tensor() -> None:
     """Accept a single fused lora_b [q+k+v, rank] in MergedQKV set_lora."""
     from vllm.lora.layers import column_parallel_linear as _cpl
 
-    def _make(orig):
+    for cls in (
+        _cpl.MergedColumnParallelLinearWithLoRA,
+        _cpl.MergedQKVParallelLinearWithLoRA,
+    ):
+        orig = cls.set_lora
+        if getattr(orig, "_unirl_fused_merged_tolerant", False):
+            continue
+
         def _set_lora(self, index, lora_a, lora_b, *args, _orig=orig, **kwargs):
             if isinstance(lora_b, torch.Tensor):
                 output_sizes = list(self.base_layer.output_sizes)
@@ -325,16 +324,7 @@ def patch_ar_merged_lora_fused_tensor() -> None:
             return _orig(self, index, lora_a, lora_b, *args, **kwargs)
 
         _set_lora._unirl_fused_merged_tolerant = True  # type: ignore[attr-defined]
-        return _set_lora
-
-    for cls in (
-        _cpl.MergedColumnParallelLinearWithLoRA,
-        _cpl.MergedQKVParallelLinearWithLoRA,
-    ):
-        orig = cls.set_lora
-        if getattr(orig, "_unirl_fused_merged_tolerant", False):
-            continue
-        cls.set_lora = _make(orig)
+        cls.set_lora = _set_lora
 
 
 def patch_fp32_skip() -> None:
@@ -475,22 +465,22 @@ def patch_hv15_refiner_torch_linear_lora() -> None:
         target_modules = peft_helper.target_modules
         target_pattern = target_modules if isinstance(target_modules, str) and target_modules else None
         target_list = target_modules if isinstance(target_modules, list) and target_modules else None
-
-        def _matches_target(module_name: str) -> bool:
-            if target_pattern is not None:
-                import regex as re
-
-                return re.search(target_pattern, module_name) is not None
-            return target_list is None or _match_target_modules(module_name, target_list)
+        if target_pattern is not None:
+            import regex as re
 
         matched = []
         for block_index, block in enumerate(blocks):
             for target_path, module in block.named_modules(remove_duplicate=False):
                 module_name = f"{prefix}.{block_index}.{target_path}"
                 full_module_name = f"transformer.{module_name}"
+                matches_target = (
+                    re.search(target_pattern, full_module_name) is not None
+                    if target_pattern is not None
+                    else (target_list is None or _match_target_modules(full_module_name, target_list))
+                )
                 if (
                     target_path
-                    and _matches_target(full_module_name)
+                    and matches_target
                     and isinstance(
                         module,
                         (torch.nn.Linear, _HV15TorchLinearWithLoRA, BaseLayerWithLoRA),

@@ -189,29 +189,6 @@ def decoded_text_from_ar(per_request: Sequence[Sequence[Any]]) -> Texts:
     return Texts.from_list(texts)
 
 
-def _flatten_logprobs(logprobs: Any, fallback_len: int) -> Optional[torch.Tensor]:
-    """Best-effort vLLM-logprob → ``[T]`` float tensor."""
-    if logprobs is None:
-        return None
-    if not isinstance(logprobs, Sequence) or len(logprobs) == 0:
-        return None
-    values: List[float] = []
-    for step in logprobs:
-        if isinstance(step, dict) and step:
-            entry = next(iter(step.values()))
-            values.append(float(entry.logprob))
-        else:
-            values.append(0.0)
-    if not values:
-        return None
-    if len(values) != fallback_len and fallback_len > 0:
-        if len(values) > fallback_len:
-            values = values[:fallback_len]
-        else:
-            values.extend([0.0] * (fallback_len - len(values)))
-    return torch.tensor(values, dtype=torch.float32)
-
-
 def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
     """Build a ``TextSegment`` from the AR Stage-0 outputs of one batch."""
     from unirl.types.segments.text import TextSegment
@@ -232,7 +209,24 @@ def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
             continue
         completion = stage0.outputs[0]
         toks = list(completion.token_ids)
-        logp = _flatten_logprobs(completion.logprobs, fallback_len=len(toks))
+        fallback_len = len(toks)
+        raw_logprobs = completion.logprobs
+        logp: Optional[torch.Tensor] = None
+        if isinstance(raw_logprobs, Sequence) and len(raw_logprobs) > 0:
+            values: List[float] = []
+            for step in raw_logprobs:
+                if isinstance(step, dict) and step:
+                    entry = next(iter(step.values()))
+                    values.append(float(entry.logprob))
+                else:
+                    values.append(0.0)
+            if values:
+                if len(values) != fallback_len and fallback_len > 0:
+                    if len(values) > fallback_len:
+                        values = values[:fallback_len]
+                    else:
+                        values.extend([0.0] * (fallback_len - len(values)))
+                logp = torch.tensor(values, dtype=torch.float32)
         if toks:
             found_any_stage0 = True
         rows_tokens.append(toks)

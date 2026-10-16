@@ -2,38 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List
 
 import torch
 
 from unirl.rollout.engine.vllm_omni.adapters.base import ModelAdapter, register_adapter
-from unirl.rollout.engine.vllm_omni.adapters.dit import (
-    DitInputAdapter,
-    DitOutputAdapter,
-    _grouped_texts_from_sample,
-    _negative_prompt_from_params,
-)
+from unirl.rollout.engine.vllm_omni.adapters.dit import DitInputAdapter, DitOutputAdapter
 from unirl.rollout.engine.vllm_omni.backends import GenerateCall, OmniRawResult
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import read_captures
 from unirl.rollout.engine.vllm_omni.utils import collect_dit_outputs
 from unirl.types.conditions.text import TextEmbedCondition
 from unirl.types.sample import Sample
 from unirl.types.sampling import DiffusionSamplingParams
-
-
-def _ragged_pad_cat(pairs: Sequence[Tuple[torch.Tensor, torch.Tensor]]) -> TextEmbedCondition:
-    """Per-request ``(embeds, mask)`` pairs into one ``TextEmbedCondition`` right-padded to the batch-max ``L``."""
-    max_len = max(int(e.shape[1]) for e, _ in pairs)
-    embeds: List[torch.Tensor] = []
-    masks: List[torch.Tensor] = []
-    for e, m in pairs:
-        pad = max_len - int(e.shape[1])
-        if pad:
-            e = torch.cat([e, e.new_zeros(e.shape[0], pad, e.shape[2])], dim=1)
-            m = torch.cat([m, m.new_zeros(m.shape[0], pad)], dim=1)
-        embeds.append(e)
-        masks.append(m)
-    return TextEmbedCondition(embeds=torch.cat(embeds, dim=0), pooled=None, attn_mask=torch.cat(masks, dim=0))
 
 
 class QwenImageOutputAdapter(DitOutputAdapter):
@@ -57,27 +37,46 @@ class QwenImageOutputAdapter(DitOutputAdapter):
         if any(c is None for c in captures):
             raise RuntimeError(self._MISSING_CAPTURE_MSG)
 
-        cond_dict: Dict[str, Any] = {
-            "text": _ragged_pad_cat([(c["prompt_embeds"], c["prompt_embeds_mask"]) for c in captures])
-        }
         neg_present = [c.get("negative_prompt_embeds") is not None for c in captures]
-        if any(neg_present):
-            if not all(neg_present):
-                raise RuntimeError(
-                    "build_response: Qwen-Image negative text captured on some "
-                    "requests but not others — CFG arming must be uniform "
-                    "across a generate call."
-                )
-            cond_dict["negative_text"] = _ragged_pad_cat(
-                [(c["negative_prompt_embeds"], c["negative_prompt_embeds_mask"]) for c in captures]
+        if any(neg_present) and not all(neg_present):
+            raise RuntimeError(
+                "build_response: Qwen-Image negative text captured on some "
+                "requests but not others — CFG arming must be uniform "
+                "across a generate call."
             )
+
+        specs = [("text", "prompt_embeds", "prompt_embeds_mask")]
+        if all(neg_present):
+            specs.append(("negative_text", "negative_prompt_embeds", "negative_prompt_embeds_mask"))
+
         n_samples = len(sample.frontier_gen_part(DiffusionSamplingParams).sample_ids)
-        for name, condition in cond_dict.items():
+        cond_dict: Dict[str, Any] = {}
+        for name, emb_key, mask_key in specs:
+            pairs = [(c[emb_key], c[mask_key]) for c in captures]
+            max_len = max(int(e.shape[1]) for e, _ in pairs)
+            embeds = [
+                torch.cat([e, e.new_zeros(e.shape[0], max_len - int(e.shape[1]), e.shape[2])], dim=1)
+                if int(e.shape[1]) < max_len
+                else e
+                for e, _ in pairs
+            ]
+            masks = [
+                torch.cat([m, m.new_zeros(m.shape[0], max_len - int(m.shape[1]))], dim=1)
+                if int(m.shape[1]) < max_len
+                else m
+                for _, m in pairs
+            ]
+            condition = TextEmbedCondition(
+                embeds=torch.cat(embeds, dim=0),
+                pooled=None,
+                attn_mask=torch.cat(masks, dim=0),
+            )
             if int(condition.embeds.shape[0]) != n_samples:
                 raise RuntimeError(
                     f"build_response: Qwen-Image {name} condition batch "
                     f"{int(condition.embeds.shape[0])} != diffusion sample count {n_samples}."
                 )
+            cond_dict[name] = condition
         return cond_dict
 
 
@@ -92,6 +91,7 @@ class QwenImageT2iAdapter(ModelAdapter):
 
     def __init__(self, config: Any, model_config: Any, *, strategy: Any = None, tokenize_fn: Any = None) -> None:
         super().__init__(config, model_config, strategy=strategy, tokenize_fn=tokenize_fn)
+        self.input_adapter = DitInputAdapter(self.modality)
         self.output_adapter = QwenImageOutputAdapter(self.modality)
 
     def validate_request(self, sample: Sample) -> None:
@@ -101,14 +101,15 @@ class QwenImageT2iAdapter(ModelAdapter):
             )
 
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
-        grouped_texts, spp = _grouped_texts_from_sample(sample, caller=f"{self.modality}.build_inputs")
+        grouped_texts, spp = self.input_adapter.build_grouped_texts(sample)
         diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
         if diff_params.guidance_scale > 1.0:
-            negative_prompt = _negative_prompt_from_params(diff_params, default=" ")
+            neg = diff_params.sampler_kwargs.get("negative_prompt")
+            negative_prompt = " " if neg is None else neg
             prompts = [{"prompt": text, "negative_prompt": negative_prompt} for text in grouped_texts]
         else:
             prompts = [{"prompt": text} for text in grouped_texts]
-        sampling = DitInputAdapter(self.modality).build_sampling(sample)
+        sampling = self.input_adapter.build_sampling(sample)
         kwargs = sampling[0].kwargs
         kwargs["true_cfg_scale"] = diff_params.guidance_scale
         if "max_sequence_length" not in kwargs:

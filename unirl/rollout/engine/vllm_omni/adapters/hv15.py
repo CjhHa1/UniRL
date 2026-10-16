@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 
@@ -51,36 +51,21 @@ class Hv15VideoOutputAdapter(DitOutputAdapter):
         if any(c is None for c in captures):
             raise RuntimeError(self._MISSING_CAPTURE_MSG)
 
-        def _cat_field(field_name: str) -> Optional[torch.Tensor]:
-            tensors = [c[field_name] for c in captures if c.get(field_name) is not None]
-            if not tensors:
-                return None
-            return torch.cat(tensors, dim=0)
-
-        prompt_embeds = _cat_field("prompt_embeds")
-        prompt_embeds_mask = _cat_field("prompt_embeds_mask")
-        prompt_embeds_2 = _cat_field("prompt_embeds_2")
-        prompt_embeds_mask_2 = _cat_field("prompt_embeds_mask_2")
-        negative_prompt_embeds = _cat_field("negative_prompt_embeds")
-        negative_prompt_embeds_mask = _cat_field("negative_prompt_embeds_mask")
-        negative_prompt_embeds_2 = _cat_field("negative_prompt_embeds_2")
-        negative_prompt_embeds_mask_2 = _cat_field("negative_prompt_embeds_mask_2")
-
         cond_dict: Dict[str, Any] = {}
-        if prompt_embeds is not None:
-            cond_dict["text_mllm"] = TextEmbedCondition(embeds=prompt_embeds, pooled=None, attn_mask=prompt_embeds_mask)
-        if prompt_embeds_2 is not None:
-            cond_dict["text_glyph"] = TextEmbedCondition(
-                embeds=prompt_embeds_2, pooled=None, attn_mask=prompt_embeds_mask_2
-            )
-        if negative_prompt_embeds is not None:
-            cond_dict["negative_text_mllm"] = TextEmbedCondition(
-                embeds=negative_prompt_embeds, pooled=None, attn_mask=negative_prompt_embeds_mask
-            )
-        if negative_prompt_embeds_2 is not None:
-            cond_dict["negative_text_glyph"] = TextEmbedCondition(
-                embeds=negative_prompt_embeds_2, pooled=None, attn_mask=negative_prompt_embeds_mask_2
-            )
+        for cond_key, embeds_key, mask_key in (
+            ("text_mllm", "prompt_embeds", "prompt_embeds_mask"),
+            ("text_glyph", "prompt_embeds_2", "prompt_embeds_mask_2"),
+            ("negative_text_mllm", "negative_prompt_embeds", "negative_prompt_embeds_mask"),
+            ("negative_text_glyph", "negative_prompt_embeds_2", "negative_prompt_embeds_mask_2"),
+        ):
+            embeds = [c[embeds_key] for c in captures if c.get(embeds_key) is not None]
+            if embeds:
+                masks = [c[mask_key] for c in captures if c.get(mask_key) is not None]
+                cond_dict[cond_key] = TextEmbedCondition(
+                    embeds=torch.cat(embeds, dim=0),
+                    pooled=None,
+                    attn_mask=torch.cat(masks, dim=0) if masks else None,
+                )
 
         if "text_mllm" not in cond_dict or "text_glyph" not in cond_dict:
             raise RuntimeError(self._MISSING_CAPTURE_MSG)
@@ -96,6 +81,7 @@ class Hv15T2vAdapter(ModelAdapter):
 
     def __init__(self, config: Any, model_config: Any, *, strategy: Any = None, tokenize_fn: Any = None) -> None:
         super().__init__(config, model_config, strategy=strategy, tokenize_fn=tokenize_fn)
+        self.input_adapter = DitInputAdapter(self.modality)
         self.output_adapter = Hv15VideoOutputAdapter(self.modality)
 
     def validate_request(self, sample: Sample) -> None:
@@ -105,14 +91,13 @@ class Hv15T2vAdapter(ModelAdapter):
             )
 
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
-        base = DitInputAdapter(self.modality)
-        prompts = base.build_prompts(sample)
+        prompts = self.input_adapter.build_prompts(sample)
         frontier = sample.frontier_gen_part(DiffusionSamplingParams)
         diff_params = frontier.sampling_params
         num_frames = diff_params.num_frames
         for prompt in prompts:
             prompt["num_frames"] = num_frames
-        sampling = base.build_sampling(sample)
+        sampling = self.input_adapter.build_sampling(sample)
         sampling[0].kwargs["num_frames"] = num_frames
         extra_args = sampling[0].kwargs.setdefault("extra_args", {})
         extra_args["denoise_seed_keys"] = list(frontier.sample_ids)

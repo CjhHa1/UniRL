@@ -72,37 +72,29 @@ class BucketedIPCReceiveMixin:
             device=self.device,
             use_shm=use_shm,
         )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._unirl_load_bucket(
-                weights, peft_config=peft_config, base_sync_done=base_sync_done
-            )
-        )
 
-    def _unirl_load_bucket(
-        self,
-        weights: list[tuple[str, torch.Tensor]],
-        peft_config: Optional[dict],
-        base_sync_done: bool,
-    ) -> None:
-        if peft_config and base_sync_done:
-            tensors = dict(weights)
-            lora_request = OmniTensorLoRARequest(
-                lora_name=UNIRL_LORA_NAME,
-                lora_int_id=UNIRL_LORA_INT_ID,
-                lora_path=UNIRL_LORA_PATH,
-                peft_config=peft_config,
-                lora_tensors=tensors,
-            )
-            self.add_lora(lora_request)
-            logger.info(
-                "%s: LoRA bucket loaded (%d tensors, adapter id=%d)",
-                type(self).__name__,
-                len(tensors),
-                UNIRL_LORA_INT_ID,
-            )
-        else:
-            logger.debug("%s: bucket loaded (%d tensors)", type(self).__name__, len(weights))
-            self._unirl_load_weights(weights)
+        def _load_bucket(weights: list[tuple[str, torch.Tensor]]) -> None:
+            if peft_config and base_sync_done:
+                tensors = dict(weights)
+                lora_request = OmniTensorLoRARequest(
+                    lora_name=UNIRL_LORA_NAME,
+                    lora_int_id=UNIRL_LORA_INT_ID,
+                    lora_path=UNIRL_LORA_PATH,
+                    peft_config=peft_config,
+                    lora_tensors=tensors,
+                )
+                self.add_lora(lora_request)
+                logger.info(
+                    "%s: LoRA bucket loaded (%d tensors, adapter id=%d)",
+                    type(self).__name__,
+                    len(tensors),
+                    UNIRL_LORA_INT_ID,
+                )
+            else:
+                logger.debug("%s: bucket loaded (%d tensors)", type(self).__name__, len(weights))
+                self._unirl_target_module().load_weights(weights)
+
+        receiver.receive_weights(on_bucket_received=_load_bucket)
 
     def _unirl_target_module(self) -> torch.nn.Module:
         """Return the loaded model/pipeline module owned by ``self.model_runner``."""
@@ -111,10 +103,6 @@ class BucketedIPCReceiveMixin:
         if module is None:
             raise RuntimeError(f"{type(self).__name__}: model_runner has no loaded model/pipeline.")
         return module
-
-    def _unirl_load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
-        """Forward weights to the underlying worker's loaded module."""
-        self._unirl_target_module().load_weights(weights)
 
     def update_weights_from_tensor(
         self,
@@ -144,7 +132,7 @@ class BucketedIPCReceiveMixin:
             metadata=payload["metadata"],
         )
         named_tensors = bucket.reconstruct_tensors()
-        self._unirl_load_weights(named_tensors)
+        self._unirl_target_module().load_weights(named_tensors)
         logger.info(
             "%s: tensor-payload loaded (%d tensors, load_format=%r)",
             type(self).__name__,

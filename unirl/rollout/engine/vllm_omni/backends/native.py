@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import contextmanager
 from pprint import pformat
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence
 
@@ -15,73 +14,12 @@ from unirl.rollout.engine.vllm_omni.backends.base import (
     STAGE_KIND_AR,
     GenerateCall,
     OmniRawResult,
-    StageSampling,
 )
 from unirl.utils.graceful_shutdown import terminate_descendants
 
 logger = logging.getLogger(__name__)
 
 _ENGINE_PROC_PREFIX = "VLLM::"
-
-
-@contextmanager
-def _preserve_cudnn_sdp_state():
-    """Restore the process-wide cuDNN SDPA setting after vLLM imports."""
-    import torch
-
-    enabled = torch.backends.cuda.cudnn_sdp_enabled() if torch.cuda.is_available() else None
-    try:
-        yield
-    finally:
-        if enabled is not None:
-            torch.backends.cuda.enable_cudnn_sdp(enabled)
-
-
-def _import_omni_runtime() -> Dict[str, Any]:
-    """Lazy import of the vllm-omni runtime types. Imported once per process."""
-    from transformers import AutoTokenizer
-    from vllm import SamplingParams as VLLMSamplingParams
-    from vllm_omni.diffusion.data import OmniSleepTask, OmniWakeTask
-    from vllm_omni.entrypoints.omni import Omni
-    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
-    from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
-
-    return {
-        "AutoTokenizer": AutoTokenizer,
-        "Omni": Omni,
-        "OmniDiffusionSamplingParams": OmniDiffusionSamplingParams,
-        "OmniLoRARequest": OmniLoRARequest,
-        "OmniSleepTask": OmniSleepTask,
-        "OmniWakeTask": OmniWakeTask,
-        "VLLMSamplingParams": VLLMSamplingParams,
-    }
-
-
-def _resolve_deploy_config(name: str) -> str:
-    """Return the absolute path of the local deploy-config YAML asset."""
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(here, "deploy_configs", name)
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"_resolve_deploy_config: YAML not found at {path}")
-    return path
-
-
-@contextmanager
-def _master_port_env(port: Optional[int]):
-    """Pin ``MASTER_PORT`` to the reserved engine port for the duration of ``Omni()``."""
-    if port is None:
-        yield
-        return
-    saved = os.environ.get("MASTER_PORT")
-    os.environ["MASTER_PORT"] = str(port)
-    logger.info("VLLM-Omni boot: MASTER_PORT=%s (was %s) for engine construction", port, saved)
-    try:
-        yield
-    finally:
-        if saved is None:
-            os.environ.pop("MASTER_PORT", None)
-        else:
-            os.environ["MASTER_PORT"] = saved
 
 
 class VLLMOmniBackend:
@@ -103,6 +41,8 @@ class VLLMOmniBackend:
         """Spell the intent into ``Omni`` ctor kwargs and spawn."""
         import multiprocessing as mp
 
+        import torch
+
         try:
             mp.set_start_method("spawn", force=True)
         except RuntimeError:
@@ -110,13 +50,32 @@ class VLLMOmniBackend:
 
         # vLLM disables cuDNN SDPA process-wide at import. Preserve the
         # colocated train actor's state; spawned workers initialize their own.
-        with _preserve_cudnn_sdp_state():
+        cudnn_sdp_enabled = torch.backends.cuda.cudnn_sdp_enabled() if torch.cuda.is_available() else None
+        try:
             from unirl.rollout.engine.vllm_omni.patches import install as install_patches
             from unirl.rollout.engine.vllm_omni.plugin import register_unirl_runtime
 
             install_patches()
-            rt = _import_omni_runtime()
+            from transformers import AutoTokenizer
+            from vllm import SamplingParams as VLLMSamplingParams
+            from vllm_omni.diffusion.data import OmniSleepTask, OmniWakeTask
+            from vllm_omni.entrypoints.omni import Omni
+            from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+            from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
+
+            rt = {
+                "AutoTokenizer": AutoTokenizer,
+                "Omni": Omni,
+                "OmniDiffusionSamplingParams": OmniDiffusionSamplingParams,
+                "OmniLoRARequest": OmniLoRARequest,
+                "OmniSleepTask": OmniSleepTask,
+                "OmniWakeTask": OmniWakeTask,
+                "VLLMSamplingParams": VLLMSamplingParams,
+            }
             register_unirl_runtime()
+        finally:
+            if cudnn_sdp_enabled is not None:
+                torch.backends.cuda.enable_cudnn_sdp(cudnn_sdp_enabled)
 
         if intent.get("clear_cuda_visible"):
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -125,14 +84,16 @@ class VLLMOmniBackend:
 
         # Release the trainer CUDA cache before spawning the engine process.
         try:
-            import torch
-
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:  # noqa: BLE001 - belt and braces; never block a boot
             pass
 
-        deploy_config_path = _resolve_deploy_config(intent["deploy_config"])
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        deploy_config_path = os.path.join(here, "deploy_configs", intent["deploy_config"])
+        if not os.path.exists(deploy_config_path):
+            raise FileNotFoundError(f"VLLMOmniBackend.boot: YAML not found at {deploy_config_path}")
+
         omni_kwargs = dict(intent["omni_kwargs"])
         if intent.get("enable_sleep_mode"):
             omni_kwargs["enable_sleep_mode"] = True
@@ -157,12 +118,26 @@ class VLLMOmniBackend:
             try:
                 if lock_file is not None:
                     fcntl.flock(lock_file, fcntl.LOCK_EX)
-                with _master_port_env(boot_master_port):
+                saved_master_port = os.environ.get("MASTER_PORT")
+                if boot_master_port is not None:
+                    os.environ["MASTER_PORT"] = str(boot_master_port)
+                    logger.info(
+                        "VLLM-Omni boot: MASTER_PORT=%s (was %s) for engine construction",
+                        boot_master_port,
+                        saved_master_port,
+                    )
+                try:
                     omni = rt["Omni"](
                         model=intent["model_path"],
                         deploy_config=deploy_config_path,
                         **omni_kwargs,
                     )
+                finally:
+                    if boot_master_port is not None:
+                        if saved_master_port is None:
+                            os.environ.pop("MASTER_PORT", None)
+                        else:
+                            os.environ["MASTER_PORT"] = saved_master_port
             finally:
                 if lock_file is not None:
                     fcntl.flock(lock_file, fcntl.LOCK_UN)
@@ -216,40 +191,55 @@ class VLLMOmniBackend:
     ) -> List[List[OmniRawResult]]:
         """Run each call through ``Omni.generate`` and group per request."""
         omni = self._require_omni()
+        lora_req = None
+        if attach_lora:
+            from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
+                UNIRL_LORA_INT_ID,
+                UNIRL_LORA_NAME,
+                UNIRL_LORA_PATH,
+            )
+
+            lora_req = self._rt["OmniLoRARequest"](
+                lora_name=UNIRL_LORA_NAME,
+                lora_int_id=UNIRL_LORA_INT_ID,
+                lora_path=UNIRL_LORA_PATH,
+            )
+
         groups: List[List[OmniRawResult]] = []
         for call in calls:
-            sp_list = [self._build_sampling_params(s, attach_lora=attach_lora) for s in call.sampling]
+            sp_list = []
+            for sampling in call.sampling:
+                if sampling.kind == STAGE_KIND_AR:
+                    sp_list.append(self._rt["VLLMSamplingParams"](**sampling.kwargs))
+                else:
+                    sp = self._rt["OmniDiffusionSamplingParams"](**sampling.kwargs)
+                    if lora_req is not None:
+                        sp.lora_request = lora_req
+                        sp.lora_scale = 1.0
+                    sp_list.append(sp)
             generate_kwargs: Dict[str, Any] = {"use_tqdm": False}
-            if attach_lora and ar_lora_passthrough:
-                generate_kwargs["lora_request"] = self._lora_request()
+            if lora_req is not None and ar_lora_passthrough:
+                generate_kwargs["lora_request"] = lora_req
             flat = list(omni.generate(call.prompts, sp_list, **generate_kwargs))
             if call.group_by_request_id:
-                groups.extend(_group_by_request(flat, len(call.prompts)))
+                n = len(call.prompts)
+                grouped: List[List[OmniRawResult]] = [[] for _ in range(n)]
+                for out in flat:
+                    rid = out.request_id
+                    try:
+                        idx_part, suffix = rid.split("_", 1)
+                        if not suffix:
+                            raise ValueError("empty request-id suffix")
+                        idx = int(idx_part)
+                    except (TypeError, ValueError) as exc:
+                        raise RuntimeError(f"vllm-omni returned an invalid request_id: {rid!r}") from exc
+                    if not 0 <= idx < n:
+                        raise RuntimeError(f"vllm-omni request_id index {idx} is outside the prompt batch of size {n}")
+                    grouped[idx].append(out)
+                groups.extend(grouped)
             else:
                 groups.append(flat)
         return groups
-
-    def _build_sampling_params(self, sampling: StageSampling, *, attach_lora: bool) -> Any:
-        if sampling.kind == STAGE_KIND_AR:
-            return self._rt["VLLMSamplingParams"](**sampling.kwargs)
-        sp = self._rt["OmniDiffusionSamplingParams"](**sampling.kwargs)
-        if attach_lora:
-            sp.lora_request = self._lora_request()
-            sp.lora_scale = 1.0
-        return sp
-
-    def _lora_request(self) -> Any:
-        from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
-            UNIRL_LORA_INT_ID,
-            UNIRL_LORA_NAME,
-            UNIRL_LORA_PATH,
-        )
-
-        return self._rt["OmniLoRARequest"](
-            lora_name=UNIRL_LORA_NAME,
-            lora_int_id=UNIRL_LORA_INT_ID,
-            lora_path=UNIRL_LORA_PATH,
-        )
 
     def tokenize_prompt(self, text: str, *, task: str, sys_type: str) -> List[int]:
         """HI3 prompt tokens via vllm-omni's ``build_prompt_tokens``."""
@@ -280,38 +270,6 @@ class VLLMOmniBackend:
             tp_map[int(entry.stage_id)] = int(tp) if tp is not None else 1
         return tp_map
 
-    @staticmethod
-    def _require_rpc_success(
-        action: str,
-        stage_id: int,
-        results: object,
-        *,
-        allow_false: bool = False,
-    ) -> None:
-        """Fail closed when a stage or replica reports an unsupported/failed RPC."""
-
-        def validate(result: object) -> None:
-            if result is None:
-                return
-            if isinstance(result, (list, tuple)):
-                for item in result:
-                    validate(item)
-                return
-            if isinstance(result, bool):
-                if not result and not allow_false:
-                    raise RuntimeError(f"vllm-omni {action} returned False on stage {stage_id}")
-                return
-            if not isinstance(result, Mapping):
-                raise RuntimeError(f"vllm-omni {action} returned an unexpected result on stage {stage_id}: {result!r}")
-
-            status = result.get("status")
-            error = result.get("error")
-            if result.get("supported") is False or error or (status is not None and status != "SUCCESS"):
-                reason = result.get("reason") or result.get("error_msg") or error or status
-                raise RuntimeError(f"vllm-omni {action} failed on stage {stage_id}: {reason!r}")
-
-        validate(results)
-
     def _collective_rpc(
         self,
         stage_id: int,
@@ -327,7 +285,28 @@ class VLLMOmniBackend:
             kwargs=kwargs,
             stage_ids=[stage_id],
         )
-        self._require_rpc_success(method, stage_id, results, allow_false=allow_false)
+
+        def validate(result: object) -> None:
+            if result is None:
+                return
+            if isinstance(result, (list, tuple)):
+                for item in result:
+                    validate(item)
+                return
+            if isinstance(result, bool):
+                if not result and not allow_false:
+                    raise RuntimeError(f"vllm-omni {method} returned False on stage {stage_id}")
+                return
+            if not isinstance(result, Mapping):
+                raise RuntimeError(f"vllm-omni {method} returned an unexpected result on stage {stage_id}: {result!r}")
+
+            status = result.get("status")
+            error = result.get("error")
+            if result.get("supported") is False or error or (status is not None and status != "SUCCESS"):
+                reason = result.get("reason") or result.get("error_msg") or error or status
+                raise RuntimeError(f"vllm-omni {method} failed on stage {stage_id}: {reason!r}")
+
+        validate(results)
         return results
 
     @staticmethod
@@ -575,10 +554,10 @@ class VLLMOmniBackend:
         from unirl.utils.peft_merge import adapt_lora_for_vllm
 
         lora_tensors = adapt_lora_for_vllm(lora_tensors)
-        self._remove_existing_lora(UNIRL_LORA_INT_ID)
         peft_dict = {} if peft_config is None else dict(peft_config)
 
         for sid in range(self.num_stages()):
+            self._collective_rpc(sid, "remove_lora", args=(UNIRL_LORA_INT_ID,), allow_false=True)
             cloned = {name: t.detach().clone() for name, t in lora_tensors.items()}
             serialized = MultiprocessingSerializer.serialize(cloned, output_str=True)
             self._collective_rpc(
@@ -613,7 +592,6 @@ class VLLMOmniBackend:
         from unirl.utils.peft_merge import adapt_lora_for_vllm
 
         lora_tensors = adapt_lora_for_vllm(lora_tensors)
-        self._remove_existing_lora(UNIRL_LORA_INT_ID)
         peft_dict = {} if peft_config is None else dict(peft_config)
 
         cpu_tensors = {name: t.detach().to("cpu") for name, t in lora_tensors.items()}
@@ -622,6 +600,7 @@ class VLLMOmniBackend:
         serialized = base64.b64encode(buf.getvalue()).decode("ascii")
 
         for sid in range(self.num_stages()):
+            self._collective_rpc(sid, "remove_lora", args=(UNIRL_LORA_INT_ID,), allow_false=True)
             self._collective_rpc(
                 sid,
                 "set_lora_from_tensor_dict_copy",
@@ -632,16 +611,6 @@ class VLLMOmniBackend:
                     peft_dict,
                     serialized,
                 ),
-            )
-
-    def _remove_existing_lora(self, adapter_id: int) -> None:
-        """Drop the existing adapter on every stage before re-adding."""
-        for sid in range(self.num_stages()):
-            self._collective_rpc(
-                sid,
-                "remove_lora",
-                args=(adapter_id,),
-                allow_false=True,
             )
 
     def param_checksums(self, *, names: List[str]) -> dict:
@@ -667,24 +636,6 @@ class VLLMOmniBackend:
             )
             out[sid] = results[0] if isinstance(results, list) and results else results
         return out
-
-
-def _group_by_request(flat_outputs: Sequence[Any], n: int) -> List[List[Any]]:
-    """Group ``Omni.generate``'s flat output list into per-request lists."""
-    grouped: List[List[Any]] = [[] for _ in range(n)]
-    for out in flat_outputs:
-        rid = out.request_id
-        try:
-            idx_part, suffix = rid.split("_", 1)
-            if not suffix:
-                raise ValueError("empty request-id suffix")
-            idx = int(idx_part)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"vllm-omni returned an invalid request_id: {rid!r}") from exc
-        if not 0 <= idx < n:
-            raise RuntimeError(f"vllm-omni request_id index {idx} is outside the prompt batch of size {n}")
-        grouped[idx].append(out)
-    return grouped
 
 
 __all__ = ["VLLMOmniBackend"]

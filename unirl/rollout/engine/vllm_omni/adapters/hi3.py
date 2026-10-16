@@ -65,42 +65,33 @@ def hi3_fused_conditions(diff_outputs: List[OmniRawResult], *, modality: str) ->
     sequence_lengths = [int(c["input_ids"].shape[-1]) for c in captures]
     max_L = max(sequence_lengths)
 
-    def _pad_to(t: Any, target_L: int, dim: int = -1, value: Any = 0) -> Any:
-        if t is None or not isinstance(t, torch.Tensor):
-            return t
-        cur_L = t.shape[dim]
-        if cur_L >= target_L:
-            return t
-        pad_size = target_L - cur_L
-        ndim = t.ndim
-        pad_spec = [0] * (2 * ndim)
-        actual_dim = dim if dim >= 0 else ndim + dim
-        pad_idx = (ndim - 1 - actual_dim) * 2
-        pad_spec[pad_idx + 1] = pad_size
-        return torch.nn.functional.pad(t, pad_spec, value=value)
-
-    def _pad_attn_mask(mask: Any, target_L: int) -> Any:
-        """Pad attention_mask [N, 1, L, L] → [N, 1, target_L, target_L]."""
-        if mask is None or not isinstance(mask, torch.Tensor):
-            return mask
-        if mask.shape[-1] >= target_L:
-            return mask
-        N, H, L, _ = mask.shape
-        padded = torch.zeros(N, H, target_L, target_L, dtype=mask.dtype, device=mask.device)
-        padded[:, :, :L, :L] = mask
-        return padded
-
     padded_captures = []
     for c, L_i in zip(captures, sequence_lengths):
         if L_i == max_L:
             padded_captures.append(c)
         else:
+            pad_size = max_L - L_i
+            mask = c.get("attention_mask")
+            pos_ids = c.get("position_ids")
+            img_mask = c.get("gen_image_mask")
             padded_captures.append(
                 {
-                    "input_ids": _pad_to(c["input_ids"], max_L, dim=-1, value=0),
-                    "attention_mask": _pad_attn_mask(c.get("attention_mask"), max_L),
-                    "position_ids": _pad_to(c.get("position_ids"), max_L, dim=-1, value=0),
-                    "gen_image_mask": _pad_to(c.get("gen_image_mask"), max_L, dim=-1, value=False),
+                    "input_ids": torch.nn.functional.pad(c["input_ids"], (0, pad_size), value=0),
+                    "attention_mask": (
+                        torch.nn.functional.pad(mask, (0, pad_size, 0, pad_size), value=0)
+                        if isinstance(mask, torch.Tensor)
+                        else mask
+                    ),
+                    "position_ids": (
+                        torch.nn.functional.pad(pos_ids, (0, pad_size), value=0)
+                        if isinstance(pos_ids, torch.Tensor)
+                        else pos_ids
+                    ),
+                    "gen_image_mask": (
+                        torch.nn.functional.pad(img_mask, (0, pad_size), value=False)
+                        if isinstance(img_mask, torch.Tensor)
+                        else img_mask
+                    ),
                     "gen_timestep_scatter_index": c.get("gen_timestep_scatter_index"),
                 }
             )
@@ -168,8 +159,7 @@ class Hi3InputAdapter:
         self.vanilla_task = vanilla_task
         self.sys_type = sys_type
 
-    def _stage_parts(self, sample: Sample) -> Tuple[Part, Optional[Part]]:
-        """Return this call's AR Part and optional diffusion Part from its suffix."""
+    def build(self, sample: Sample) -> List[GenerateCall]:
         caller = f"{type(self).__name__}({self.modality})"
         if "dit" in self.stages:
             ar_part, diff_part = _trailing_gen_parts(
@@ -178,19 +168,16 @@ class Hi3InputAdapter:
                 DiffusionSamplingParams,
                 caller=caller,
             )
-            return ar_part, diff_part
-        if self.carries_target_size:
+        elif self.carries_target_size:
             diff_part, ar_part = _trailing_gen_parts(
                 sample,
                 DiffusionSamplingParams,
                 ARSamplingParams,
                 caller=caller,
             )
-            return ar_part, diff_part
-        return sample.frontier_gen_part(ARSamplingParams), None
+        else:
+            ar_part, diff_part = sample.frontier_gen_part(ARSamplingParams), None
 
-    def build_prompts(self, sample: Sample) -> List[Dict[str, Any]]:
-        """The HI3 chat-templated per-prompt entries (+ the image gates)."""
         control = sample.parts[0].control
         sys_type = control.get("sys_type") or self.sys_type
         bot_task = control.get("bot_task")
@@ -209,11 +196,10 @@ class Hi3InputAdapter:
             texts = sample.text_conditioning()[0].content
             pil_images = []
 
-        _, diff_part = self._stage_parts(sample)
         diff_params = diff_part.sampling_params if diff_part is not None else None
         if self.tokenize_fn is None:
             raise RuntimeError(
-                "Hi3InputAdapter.build_prompts: tokenize_fn not provided (AR modalities need the driver tokenizer)"
+                "Hi3InputAdapter.build: tokenize_fn not provided (AR modalities need the driver tokenizer)"
             )
         prompts: List[Dict[str, Any]] = []
         for i, text in enumerate(texts.texts):
@@ -237,54 +223,9 @@ class Hi3InputAdapter:
                 entry["height"] = diff_params.height
                 entry["width"] = diff_params.width
             prompts.append(entry)
-        return prompts
 
-    def build_sampling(self, sample: Sample) -> List[StageSampling]:
-        """AR always; a DiT stage rides along iff ``"dit" in self.stages``."""
-        ar_part, diff_part = self._stage_parts(sample)
-        sampling = [self._ar_sampling(ar_part.sampling_params)]
-        if "dit" in self.stages:
-            sampling.append(self._dit_sampling(diff_part, diff_part.sampling_params))
-        return sampling
-
-    def build(self, sample: Sample) -> List[GenerateCall]:
-        prompts = self.build_prompts(sample)
-        ar_part, diff_part = self._stage_parts(sample)
-        if "dit" not in self.stages:
-            return [GenerateCall(prompts=prompts, sampling=self.build_sampling(sample))]
-
-        diff_params = diff_part.sampling_params
-        explicit_keys = list(diff_part.init_noise_group_ids)
-        recipe_keys = explicit_keys or (
-            diff_part.group_ids if diff_params.init_same_noise else list(diff_part.sample_ids)
-        )
-        if diff_params.disable_driver_xt:
-            recipe_keys = []
-        if not recipe_keys:
-            return [GenerateCall(prompts=prompts, sampling=self.build_sampling(sample))]
-        if len(recipe_keys) != len(prompts):
-            raise ValueError(
-                f"{self.modality}: x_T recipe key count {len(recipe_keys)} != prompt count {len(prompts)}."
-            )
-
-        # Slice the generation part so each B=1 request gets its own noise key.
-        calls: List[GenerateCall] = []
-        for index, prompt in enumerate(prompts):
-            one = diff_part.slice(index, index + 1)
-            calls.append(
-                GenerateCall(
-                    prompts=[prompt],
-                    sampling=[
-                        self._ar_sampling(ar_part.sampling_params),
-                        self._dit_sampling(one, one.sampling_params),
-                    ],
-                )
-            )
-        return calls
-
-    def _ar_sampling(self, ar_params: Any) -> StageSampling:
-        """AR sampling intent (Stage 0). ``logprobs=1`` makes vLLM emit"""
-        return StageSampling(
+        ar_params = ar_part.sampling_params
+        ar_sampling = StageSampling(
             kind=STAGE_KIND_AR,
             kwargs=dict(
                 temperature=ar_params.temperature,
@@ -294,16 +235,10 @@ class Hi3InputAdapter:
                 logprobs=1,
             ),
         )
+        if "dit" not in self.stages:
+            return [GenerateCall(prompts=prompts, sampling=[ar_sampling])]
 
-    def _dit_sampling(self, gen_part: Part, diff_params: Any) -> StageSampling:
-        diff_kwargs = core_diff_kwargs(diff_params)
-        seed = diff_params.seed
-        if seed is not None:
-            diff_kwargs["seed"] = seed
-
-        extra_args = sde_extra_args(diff_params)
-
-        seg = gen_part.segment
+        seg = diff_part.segment
         if isinstance(seg, LatentSegment) and seg.initial_latents is not None:
             raise NotImplementedError(
                 f"{type(self).__name__}: modality={self.modality!r} cannot consume a "
@@ -312,17 +247,49 @@ class Hi3InputAdapter:
                 f"gen Part's lineage instead."
             )
 
-        # Ship noise IDs and seed; the pipeline fills shape before regeneration.
-        explicit_keys = list(gen_part.init_noise_group_ids)
-        keys = explicit_keys or (gen_part.group_ids if diff_params.init_same_noise else list(gen_part.sample_ids))
-        if keys and not diff_params.disable_driver_xt:
-            extra_args["init_noise_group_ids"] = keys
-            extra_args["init_noise_seed"] = seed if seed is not None else 0
+        base_diff_kwargs = core_diff_kwargs(diff_params)
+        seed = diff_params.seed
+        if seed is not None:
+            base_diff_kwargs["seed"] = seed
+        base_extra = sde_extra_args(diff_params)
 
-        if extra_args:
-            diff_kwargs["extra_args"] = extra_args
+        explicit_keys = list(diff_part.init_noise_group_ids)
+        recipe_keys = (
+            []
+            if diff_params.disable_driver_xt
+            else (explicit_keys or (diff_part.group_ids if diff_params.init_same_noise else list(diff_part.sample_ids)))
+        )
+        if not recipe_keys:
+            diff_kwargs = dict(base_diff_kwargs)
+            if base_extra:
+                diff_kwargs["extra_args"] = dict(base_extra)
+            return [
+                GenerateCall(
+                    prompts=prompts,
+                    sampling=[ar_sampling, StageSampling(kind=STAGE_KIND_DIFFUSION, kwargs=diff_kwargs)],
+                )
+            ]
+        if len(recipe_keys) != len(prompts):
+            raise ValueError(
+                f"{self.modality}: x_T recipe key count {len(recipe_keys)} != prompt count {len(prompts)}."
+            )
 
-        return StageSampling(kind=STAGE_KIND_DIFFUSION, kwargs=diff_kwargs)
+        noise_seed = seed if seed is not None else 0
+        calls: List[GenerateCall] = []
+        for index, prompt in enumerate(prompts):
+            diff_kwargs = dict(base_diff_kwargs)
+            diff_kwargs["extra_args"] = {
+                **base_extra,
+                "init_noise_group_ids": [recipe_keys[index]],
+                "init_noise_seed": noise_seed,
+            }
+            calls.append(
+                GenerateCall(
+                    prompts=[prompt],
+                    sampling=[ar_sampling, StageSampling(kind=STAGE_KIND_DIFFUSION, kwargs=diff_kwargs)],
+                )
+            )
+        return calls
 
 
 class Hi3TextOutputAdapter:

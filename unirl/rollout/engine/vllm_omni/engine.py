@@ -105,11 +105,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             )
             return self._stamp_output_version(self.adapter.build_response(sample, per_request))
 
-    def _mark_consistently_offloaded(self) -> None:
-        """Record a successful all-stage sleep."""
-        self._is_offloaded = True
-        self._transition_failed = False
-
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(self) -> None:
         """Sleep every stage at level 1 (AR via EngineCore, diffusion via worker task)."""
@@ -124,7 +119,8 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             self._is_offloaded = False
             self._transition_failed = True
             raise
-        self._mark_consistently_offloaded()
+        self._is_offloaded = True
+        self._transition_failed = False
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def wake_up(self) -> None:
@@ -138,7 +134,8 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             except Exception:
                 logger.exception("vLLM-Omni failed to normalize a partial lifecycle transition")
                 raise
-            self._mark_consistently_offloaded()
+            self._is_offloaded = True
+            self._transition_failed = False
 
         if not self._is_offloaded:
             return
@@ -165,7 +162,8 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             except Exception:
                 logger.exception("vLLM-Omni rollback sleep failed after partial wake")
             else:
-                self._mark_consistently_offloaded()
+                self._is_offloaded = True
+                self._transition_failed = False
             raise
         self._is_offloaded = False  # physical state changed before LoRA restore
         try:
@@ -181,7 +179,8 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
                 self._transition_failed = True
                 logger.exception("vLLM-Omni rollback sleep failed after LoRA restore error")
             else:
-                self._mark_consistently_offloaded()
+                self._is_offloaded = True
+                self._transition_failed = False
             raise
 
     @property

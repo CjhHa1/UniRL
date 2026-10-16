@@ -24,18 +24,8 @@ _DTYPE_FROM_STR: Dict[str, torch.dtype] = {
 }
 
 
-def _resolve_dtype(name: str) -> torch.dtype:
-    if name in _DTYPE_FROM_STR:
-        return _DTYPE_FROM_STR[name]
-    short = name.replace("torch.", "")
-    full = f"torch.{short}"
-    if full in _DTYPE_FROM_STR:
-        return _DTYPE_FROM_STR[full]
-    raise KeyError(f"_resolve_dtype: unsupported dtype name {name!r}")
-
-
 class NcclBroadcastReceiveMixin:
-    """Adds NCCL weight receive to a worker; requires ``BucketedIPCReceiveMixin`` for ``_unirl_load_weights``."""
+    """Adds NCCL weight receive to a worker; requires ``BucketedIPCReceiveMixin`` for ``_unirl_target_module``."""
 
     _unirl_weight_groups: Dict[str, "dist.ProcessGroup"] = {}
 
@@ -104,12 +94,12 @@ class NcclBroadcastReceiveMixin:
 
         bucket: list[tuple[str, torch.Tensor]] = []
         for name, dtype_name, shape in zip(names, dtypes, shapes):
-            dt = _resolve_dtype(dtype_name)
+            dt = _DTYPE_FROM_STR.get(dtype_name) or _DTYPE_FROM_STR[f"torch.{dtype_name.removeprefix('torch.')}"]
             tensor = torch.empty(tuple(shape), dtype=dt, device=self.device)
             dist.broadcast(tensor, src=0, group=group)
             bucket.append((name, tensor))
 
-        self._unirl_load_weights(bucket)
+        self._unirl_target_module().load_weights(bucket)
         logger.debug(
             "%s.update_weights_from_distributed: received %d tensors via group %r",
             type(self).__name__,
