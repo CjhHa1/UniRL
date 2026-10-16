@@ -37,21 +37,17 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             f"AgenticRolloutEngine requires AgenticRolloutEngineConfig; got {type(config).__name__}",
         )
         self.cfg = config
-        self.rank = rank
 
         deps = dict(device=device, rank=rank, model_config=model_config)
         self._env = config.env
         require(self._env is not None, "AgenticRolloutEngine requires an env (config.env)")
-        self._maybe_inject_tool_schemas(config.inner, self._env)
-        inner = config.inner.make_engine(strategy=strategy, **deps)
-        if not isinstance(inner, BaseRolloutEngine):
-            shutdown = getattr(inner, "shutdown", None)
-            if callable(shutdown):
-                shutdown()
-            raise ValueError(
-                f"AgenticRolloutEngine inner must implement the single-turn engine contract; got {type(inner).__name__}"
-            )
-        self._inner: BaseRolloutEngine = inner
+        get_schemas = getattr(self._env, "tool_schemas", None)
+        if callable(get_schemas) and hasattr(config.inner, "chat_template_kwargs"):
+            raw_kwargs = config.inner.chat_template_kwargs
+            chat_template_kwargs = {} if raw_kwargs is None else dict(raw_kwargs)
+            chat_template_kwargs.setdefault("tools", get_schemas())
+            config.inner.chat_template_kwargs = chat_template_kwargs
+        self._inner: BaseRolloutEngine = config.inner.make_engine(strategy=strategy, **deps)
 
         self._max_turns = int(config.max_turns)
         env_max_turns = getattr(self._env, "max_turns", None)
@@ -69,16 +65,6 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             engines={"policy": self._inner.generate},
             suspend=lambda: self._stopping,
         )
-
-    @staticmethod
-    def _maybe_inject_tool_schemas(inner_cfg: Any, env: Any) -> None:
-        get_schemas = getattr(env, "tool_schemas", None)
-        if not callable(get_schemas) or not hasattr(inner_cfg, "chat_template_kwargs"):
-            return
-        raw_kwargs = inner_cfg.chat_template_kwargs
-        chat_template_kwargs = {} if raw_kwargs is None else dict(raw_kwargs)
-        chat_template_kwargs.setdefault("tools", get_schemas())
-        inner_cfg.chat_template_kwargs = chat_template_kwargs
 
     def generate(self, sample: Sample) -> Sample:
         try:

@@ -6,7 +6,10 @@ import logging
 import os
 from contextlib import contextmanager
 from pprint import pformat
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence
+
+if TYPE_CHECKING:
+    import torch
 
 from unirl.rollout.engine.vllm_omni.backends.base import (
     STAGE_KIND_AR,
@@ -129,12 +132,12 @@ class VLLMOmniBackend:
         except Exception:  # noqa: BLE001 - belt and braces; never block a boot
             pass
 
-        deploy_config_path = _resolve_deploy_config(str(intent["deploy_config"]))
+        deploy_config_path = _resolve_deploy_config(intent["deploy_config"])
         omni_kwargs = dict(intent["omni_kwargs"])
         if intent.get("enable_sleep_mode"):
             omni_kwargs["enable_sleep_mode"] = True
         ports = intent.get("ports")
-        boot_master_port = int(ports.master_port) if ports is not None else None
+        boot_master_port = ports.master_port if ports is not None else None
         logger.info(
             "VLLM-Omni boot intent (before engine startup):\n%s",
             pformat(
@@ -156,7 +159,7 @@ class VLLMOmniBackend:
                     fcntl.flock(lock_file, fcntl.LOCK_EX)
                 with _master_port_env(boot_master_port):
                     omni = rt["Omni"](
-                        model=str(intent["model_path"]),
+                        model=intent["model_path"],
                         deploy_config=deploy_config_path,
                         **omni_kwargs,
                     )
@@ -182,7 +185,7 @@ class VLLMOmniBackend:
 
             tokenizer = None
             if intent.get("needs_driver_tokenizer"):
-                tokenizer = rt["AutoTokenizer"].from_pretrained(str(intent["model_path"]), trust_remote_code=True)
+                tokenizer = rt["AutoTokenizer"].from_pretrained(intent["model_path"], trust_remote_code=True)
 
             return cls(
                 omni,
@@ -276,12 +279,6 @@ class VLLMOmniBackend:
                     tp = parallel_config.get("tensor_parallel_size")
             tp_map[int(entry.stage_id)] = int(tp) if tp is not None else 1
         return tp_map
-
-    def _stage_ids(self) -> List[int]:
-        return list(range(self.num_stages()))
-
-    def _stage_type(self, stage_id: int) -> str:
-        return self._require_omni().engine.get_stage_metadata(stage_id).stage_type
 
     @staticmethod
     def _require_rpc_success(
@@ -385,17 +382,17 @@ class VLLMOmniBackend:
         import uuid
 
         omni = self._require_omni()
-        for sid in self._stage_ids():
-            if self._stage_type(sid) != "diffusion":
+        for sid in range(self.num_stages()):
+            if omni.engine.get_stage_metadata(sid).stage_type != "diffusion":
                 self._collective_rpc(sid, "sleep", args=(1, "abort"))
                 continue
             task_id = str(uuid.uuid4())
             acks = omni.engine.collective_rpc(
                 method="handle_sleep_task",
                 args=(self._rt["OmniSleepTask"](level=1, task_id=task_id),),
-                stage_ids=[int(sid)],
+                stage_ids=[sid],
             )
-            self._require_ack_success("sleep", int(sid), task_id, acks)
+            self._require_ack_success("sleep", sid, task_id, acks)
 
     def wake_task(self) -> None:
         """Wake AR stages through EngineCore and diffusion stages through worker RPC."""
@@ -404,8 +401,8 @@ class VLLMOmniBackend:
         import torch
 
         omni = self._require_omni()
-        for sid in self._stage_ids():
-            if self._stage_type(sid) != "diffusion":
+        for sid in range(self.num_stages()):
+            if omni.engine.get_stage_metadata(sid).stage_type != "diffusion":
                 # ``None`` wakes every tag, including UniRL's MoE workspace tag.
                 self._collective_rpc(sid, "wake_up", kwargs={"tags": None})
                 continue
@@ -413,9 +410,9 @@ class VLLMOmniBackend:
             acks = omni.engine.collective_rpc(
                 method="handle_wake_task",
                 args=(self._rt["OmniWakeTask"](tags=None, task_id=task_id),),
-                stage_ids=[int(sid)],
+                stage_ids=[sid],
             )
-            self._require_ack_success("wake", int(sid), task_id, acks)
+            self._require_ack_success("wake", sid, task_id, acks)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
@@ -424,7 +421,7 @@ class VLLMOmniBackend:
         if omni is None:
             return False
         try:
-            return bool(omni.is_running)
+            return omni.is_running
         except Exception:
             logger.exception("vLLM-Omni health check failed")
             return False
@@ -455,11 +452,11 @@ class VLLMOmniBackend:
             "use_shm": use_shm,
             "replica_rank": replica_rank,
         }
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             self._collective_rpc(
                 sid,
                 "update_weights_from_ipc",
-                kwargs={**kwargs, "stage_id": int(sid)},
+                kwargs={**kwargs, "stage_id": sid},
             )
 
     def init_weights_group(
@@ -473,14 +470,14 @@ class VLLMOmniBackend:
         backend: str,
     ) -> None:
         kwargs = {
-            "master_address": str(master_address),
-            "master_port": int(master_port),
-            "rank_offset": int(rank_offset),
-            "world_size": int(world_size),
-            "group_name": str(group_name),
-            "backend": str(backend),
+            "master_address": master_address,
+            "master_port": master_port,
+            "rank_offset": rank_offset,
+            "world_size": world_size,
+            "group_name": group_name,
+            "backend": backend,
         }
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             self._collective_rpc(
                 sid,
                 "init_weights_update_group",
@@ -501,11 +498,11 @@ class VLLMOmniBackend:
             "names": list(names),
             "dtypes": list(dtypes),
             "shapes": [list(s) for s in shapes],
-            "group_name": str(group_name),
+            "group_name": group_name,
             "target_modules": list(target_modules) if target_modules else None,
-            "flush_cache": bool(flush_cache),
+            "flush_cache": flush_cache,
         }
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             self._collective_rpc(
                 sid,
                 "update_weights_from_distributed",
@@ -515,11 +512,11 @@ class VLLMOmniBackend:
     def destroy_weights_group(self, *, group_name: str) -> None:
         if self._omni is None:
             return
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             self._collective_rpc(
                 sid,
                 "destroy_weights_update_group",
-                kwargs={"group_name": str(group_name)},
+                kwargs={"group_name": group_name},
             )
 
     def update_from_tensor(
@@ -535,9 +532,9 @@ class VLLMOmniBackend:
             "serialized_named_tensors": list(serialized_named_tensors),
             "target_modules": list(target_modules) if target_modules else None,
             "load_format": load_format,
-            "flush_cache": bool(flush_cache),
+            "flush_cache": flush_cache,
         }
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             self._collective_rpc(
                 sid,
                 "update_weights_from_tensor",
@@ -547,30 +544,26 @@ class VLLMOmniBackend:
     def set_lora_handle(
         self,
         *,
-        lora_tensors: Dict[str, Any],
+        lora_tensors: Dict[str, torch.Tensor],
         peft_config: Optional[dict],
     ) -> None:
         """Zero-copy LoRA push via ``MultiprocessingSerializer`` shm handles."""
-        import torch
-
         from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
             UNIRL_LORA_INT_ID,
             UNIRL_LORA_NAME,
             UNIRL_LORA_PATH,
         )
+        from unirl.distributed.weight_sync.transfer.sgl_compat import (
+            MultiprocessingSerializer,
+        )
         from unirl.utils.peft_merge import adapt_lora_for_vllm
 
         lora_tensors = adapt_lora_for_vllm(lora_tensors)
         self._remove_existing_lora(UNIRL_LORA_INT_ID)
+        peft_dict = {} if peft_config is None else dict(peft_config)
 
-        from unirl.distributed.weight_sync.transfer.sgl_compat import (
-            MultiprocessingSerializer,
-        )
-
-        for sid in self._stage_ids():
-            cloned = {
-                name: t.detach().clone() if isinstance(t, torch.Tensor) else t for name, t in lora_tensors.items()
-            }
+        for sid in range(self.num_stages()):
+            cloned = {name: t.detach().clone() for name, t in lora_tensors.items()}
             serialized = MultiprocessingSerializer.serialize(cloned, output_str=True)
             self._collective_rpc(
                 sid,
@@ -579,7 +572,7 @@ class VLLMOmniBackend:
                     UNIRL_LORA_NAME,
                     UNIRL_LORA_INT_ID,
                     UNIRL_LORA_PATH,
-                    {} if peft_config is None else dict(peft_config),
+                    peft_dict,
                     serialized,
                 ),
             )
@@ -587,7 +580,7 @@ class VLLMOmniBackend:
     def set_lora_copy(
         self,
         *,
-        lora_tensors: Dict[str, Any],
+        lora_tensors: Dict[str, torch.Tensor],
         peft_config: Optional[dict],
     ) -> None:
         """Byte-copy LoRA push (``torch.save`` + base64) — TP>1-broadcast-safe."""
@@ -605,15 +598,14 @@ class VLLMOmniBackend:
 
         lora_tensors = adapt_lora_for_vllm(lora_tensors)
         self._remove_existing_lora(UNIRL_LORA_INT_ID)
+        peft_dict = {} if peft_config is None else dict(peft_config)
 
-        cpu_tensors = {
-            name: t.detach().to("cpu") if isinstance(t, torch.Tensor) else t for name, t in lora_tensors.items()
-        }
+        cpu_tensors = {name: t.detach().to("cpu") for name, t in lora_tensors.items()}
         buf = io.BytesIO()
         torch.save(cpu_tensors, buf)
         serialized = base64.b64encode(buf.getvalue()).decode("ascii")
 
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             self._collective_rpc(
                 sid,
                 "set_lora_from_tensor_dict_copy",
@@ -621,14 +613,14 @@ class VLLMOmniBackend:
                     UNIRL_LORA_NAME,
                     UNIRL_LORA_INT_ID,
                     UNIRL_LORA_PATH,
-                    {} if peft_config is None else dict(peft_config),
+                    peft_dict,
                     serialized,
                 ),
             )
 
     def _remove_existing_lora(self, adapter_id: int) -> None:
         """Drop the existing adapter on every stage before re-adding."""
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             self._collective_rpc(
                 sid,
                 "remove_lora",
@@ -639,25 +631,25 @@ class VLLMOmniBackend:
     def param_checksums(self, *, names: List[str]) -> dict:
         """Fan ``_unirl_loaded_param_checksums`` across stages and ranks."""
         out: dict = {}
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             results = self._collective_rpc(
                 sid,
                 "_unirl_loaded_param_checksums",
                 args=(list(names),),
             )
-            out[int(sid)] = results[0] if isinstance(results, list) and results else results
+            out[sid] = results[0] if isinstance(results, list) and results else results
         return out
 
     def lora_checksums(self, *, adapter_id: int, names: Optional[List[str]]) -> dict:
         """Fan ``_unirl_loaded_lora_checksums`` across stages and ranks."""
         out: dict = {}
-        for sid in self._stage_ids():
+        for sid in range(self.num_stages()):
             results = self._collective_rpc(
                 sid,
                 "_unirl_loaded_lora_checksums",
                 args=(adapter_id, list(names) if names else None),
             )
-            out[int(sid)] = results[0] if isinstance(results, list) and results else results
+            out[sid] = results[0] if isinstance(results, list) and results else results
         return out
 
 

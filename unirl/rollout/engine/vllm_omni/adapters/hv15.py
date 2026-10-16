@@ -1,4 +1,4 @@
-"""HunyuanVideo-1.5 family: input/output sub-adapters + the ``t2v`` modality class."""
+"""HunyuanVideo-1.5 family: output sub-adapter + the ``hv15_t2v`` modality class."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import torch
 
 from unirl.rollout.engine.vllm_omni.adapters.base import ModelAdapter, register_adapter
 from unirl.rollout.engine.vllm_omni.adapters.dit import DitInputAdapter, DitOutputAdapter
-from unirl.rollout.engine.vllm_omni.backends import GenerateCall, OmniRawResult, StageSampling
+from unirl.rollout.engine.vllm_omni.backends import GenerateCall, OmniRawResult
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import read_captures
 from unirl.rollout.engine.vllm_omni.utils import (
     collect_dit_outputs,
@@ -17,31 +17,6 @@ from unirl.rollout.engine.vllm_omni.utils import (
 from unirl.types.conditions.text import TextEmbedCondition
 from unirl.types.sample import Sample
 from unirl.types.sampling import DiffusionSamplingParams
-
-
-def _num_frames(sample: Sample) -> int:
-    return int(sample.frontier_gen_part(DiffusionSamplingParams).sampling_params.num_frames)
-
-
-class Hv15InputAdapter(DitInputAdapter):
-    """SD3-style request side + the video-only ``num_frames`` knob."""
-
-    def build_prompts(self, sample: Sample) -> List[Any]:
-        prompts = super().build_prompts(sample)
-        num_frames = _num_frames(sample)
-        for prompt in prompts:
-            prompt["num_frames"] = num_frames
-        return prompts
-
-    def build_sampling(self, sample: Sample) -> List[StageSampling]:
-        sampling = super().build_sampling(sample)
-        sampling[0].kwargs["num_frames"] = _num_frames(sample)
-        frontier = sample.frontier_gen_part(DiffusionSamplingParams)
-        diff_params = frontier.sampling_params
-        extra_args = sampling[0].kwargs.setdefault("extra_args", {})
-        extra_args["denoise_seed_keys"] = [str(sample_id) for sample_id in frontier.sample_ids]
-        extra_args["denoise_base_seed"] = int(diff_params.seed) if diff_params.seed is not None else 0
-        return sampling
 
 
 class Hv15VideoOutputAdapter(DitOutputAdapter):
@@ -121,7 +96,6 @@ class Hv15T2vAdapter(ModelAdapter):
 
     def __init__(self, config: Any, model_config: Any, *, strategy: Any = None, tokenize_fn: Any = None) -> None:
         super().__init__(config, model_config, strategy=strategy, tokenize_fn=tokenize_fn)
-        self.input_adapter = Hv15InputAdapter(self.modality)
         self.output_adapter = Hv15VideoOutputAdapter(self.modality)
 
     def validate_request(self, sample: Sample) -> None:
@@ -131,10 +105,22 @@ class Hv15T2vAdapter(ModelAdapter):
             )
 
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
-        return self.input_adapter.build(sample)
+        base = DitInputAdapter(self.modality)
+        prompts = base.build_prompts(sample)
+        frontier = sample.frontier_gen_part(DiffusionSamplingParams)
+        diff_params = frontier.sampling_params
+        num_frames = diff_params.num_frames
+        for prompt in prompts:
+            prompt["num_frames"] = num_frames
+        sampling = base.build_sampling(sample)
+        sampling[0].kwargs["num_frames"] = num_frames
+        extra_args = sampling[0].kwargs.setdefault("extra_args", {})
+        extra_args["denoise_seed_keys"] = list(frontier.sample_ids)
+        extra_args["denoise_base_seed"] = diff_params.seed if diff_params.seed is not None else 0
+        return [GenerateCall(prompts=prompts, sampling=sampling)]
 
     def build_response(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Sample:
         return self.output_adapter.build(sample, per_request)
 
 
-__all__ = ["Hv15InputAdapter", "Hv15T2vAdapter", "Hv15VideoOutputAdapter"]
+__all__ = ["Hv15T2vAdapter", "Hv15VideoOutputAdapter"]

@@ -32,7 +32,7 @@ def _grouped_texts_from_sample(sample: Sample, *, caller: str) -> tuple[List[str
     """Collapse a Sample's complete contiguous diffusion groups to engine prompts."""
     gen_part = sample.frontier_gen_part(DiffusionSamplingParams)
     diff_params = gen_part.sampling_params
-    spp = int(diff_params.samples_per_prompt)
+    spp = diff_params.samples_per_prompt
     if spp < 1:
         raise ValueError(f"{caller}: samples_per_prompt must be >= 1, got {spp}")
 
@@ -92,10 +92,10 @@ class DitInputAdapter:
         diff_kwargs = core_diff_kwargs(diff_params)
         max_seq_len = diff_params.max_sequence_length
         if max_seq_len is not None:
-            diff_kwargs["max_sequence_length"] = int(max_seq_len)
+            diff_kwargs["max_sequence_length"] = max_seq_len
         seed = diff_params.seed
         if seed is not None:
-            diff_kwargs["seed"] = int(seed)
+            diff_kwargs["seed"] = seed
 
         extra_args = sde_extra_args(diff_params)
         pack_initial_noise_extra_args(extra_args, gen_part, diff_params, caller=self.modality)
@@ -117,14 +117,6 @@ class DitOutputAdapter:
         self.modality = modality
         self.stage_id = stage_id
 
-    def build_segment(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Any:
-        """The diffusion trajectory segment, asserting the worker's σ echo."""
-        diff_outputs, _, _ = collect_dit_outputs(
-            per_request, final_output_type=self.final_output_type, stage_id=self.stage_id, modality=self.modality
-        )
-        expected_sigmas = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params.sigmas
-        return build_image_segment(diff_outputs, expected_sigmas=expected_sigmas)
-
     def build_decoded(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Any:
         """The decoded diffusion primitive."""
         del sample
@@ -140,7 +132,11 @@ class DitOutputAdapter:
     def build(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Sample:
         if not per_request or not any(per_request):
             raise ValueError("build_response: empty per-request outputs (Omni.generate returned nothing surfaceable).")
-        segment = self.build_segment(sample, per_request)
+        diff_outputs, _, _ = collect_dit_outputs(
+            per_request, final_output_type=self.final_output_type, stage_id=self.stage_id, modality=self.modality
+        )
+        expected_sigmas = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params.sigmas
+        segment = build_image_segment(diff_outputs, expected_sigmas=expected_sigmas)
         decoded = self.build_decoded(sample, per_request)
         conditions = self.build_conditions(sample, per_request)
         frontier = sample.frontier_gen_part(DiffusionSamplingParams)

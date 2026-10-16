@@ -57,20 +57,19 @@ class BucketedIPCReceiveMixin:
                     exc,
                 )
 
-        device = getattr(self, "device", None)
-        if device is None:
+        if self.device is None:
             raise RuntimeError(
                 f"{type(self).__name__}: worker has no `device` attribute — unexpected for a fully-initialized worker."
             )
 
         handle = zmq_handle(
-            replica_rank=int(replica_rank) if replica_rank is not None else replica_rank_from_env(),
-            stage_id=int(stage_id),
-            local_rank=int(getattr(self, "local_rank", 0)),
+            replica_rank=replica_rank if replica_rank is not None else replica_rank_from_env(),
+            stage_id=stage_id,
+            local_rank=self.local_rank,
         )
         receiver = BucketedWeightReceiver(
             zmq_handle=handle,
-            device=device,
+            device=self.device,
             use_shm=use_shm,
         )
         receiver.receive_weights(
@@ -107,23 +106,15 @@ class BucketedIPCReceiveMixin:
 
     def _unirl_load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
         """Forward weights to whichever loader the underlying worker exposes."""
-        loader = getattr(self, "load_weights", None)
-        if callable(loader):
-            loader(weights)
-            return
-        runner = getattr(self, "model_runner", None)
+        runner = self.model_runner
         if runner is None:
-            raise RuntimeError(f"{type(self).__name__}: no `load_weights` and no `model_runner`.")
+            raise RuntimeError(f"{type(self).__name__}: model_runner is None.")
         for attr in ("model", "pipeline"):
             obj = getattr(runner, attr, None)
-            obj_loader = getattr(obj, "load_weights", None) if obj is not None else None
-            if callable(obj_loader):
-                obj_loader(weights)
+            if obj is not None:
+                obj.load_weights(weights)
                 return
-        raise RuntimeError(
-            f"{type(self).__name__}: could not find a load_weights method on "
-            f"self, model_runner.model, or model_runner.pipeline."
-        )
+        raise RuntimeError(f"{type(self).__name__}: model_runner has neither `model` nor `pipeline`.")
 
     def update_weights_from_tensor(
         self,
@@ -139,7 +130,7 @@ class BucketedIPCReceiveMixin:
             MultiprocessingSerializer,
         )
 
-        local_rank = int(getattr(self, "local_rank", 0))
+        local_rank = self.local_rank
         if local_rank >= len(serialized_named_tensors):
             raise IndexError(
                 f"{type(self).__name__}.update_weights_from_tensor: "
@@ -173,9 +164,6 @@ class BucketedIPCReceiveMixin:
         from unirl.distributed.weight_sync.transfer.sgl_compat import (
             MultiprocessingSerializer,
         )
-        from unirl.rollout.engine.vllm_omni.patches.runtime import (
-            OmniTensorLoRARequest,
-        )
 
         lora_tensors = MultiprocessingSerializer.deserialize(lora_tensors_serialized)
         if not isinstance(lora_tensors, dict):
@@ -185,9 +173,9 @@ class BucketedIPCReceiveMixin:
                 f"{type(lora_tensors).__name__}"
             )
         request = OmniTensorLoRARequest(
-            lora_name=str(lora_name),
-            lora_int_id=int(lora_int_id),
-            lora_path=str(lora_path),
+            lora_name=lora_name,
+            lora_int_id=lora_int_id,
+            lora_path=lora_path,
             peft_config={} if peft_config is None else dict(peft_config),
             lora_tensors=lora_tensors,
         )
@@ -213,14 +201,10 @@ class BucketedIPCReceiveMixin:
                 f"deserialised lora_tensors expected dict, got "
                 f"{type(lora_tensors).__name__}"
             )
-        from unirl.rollout.engine.vllm_omni.patches.runtime import (
-            OmniTensorLoRARequest,
-        )
-
         request = OmniTensorLoRARequest(
-            lora_name=str(lora_name),
-            lora_int_id=int(lora_int_id),
-            lora_path=str(lora_path),
+            lora_name=lora_name,
+            lora_int_id=lora_int_id,
+            lora_path=lora_path,
             peft_config={} if peft_config is None else dict(peft_config),
             lora_tensors=lora_tensors,
         )
@@ -280,16 +264,11 @@ class BucketedIPCReceiveMixin:
             fingerprint_tensor,
         )
 
-        manager = getattr(self, "lora_manager", None) or getattr(
-            getattr(self, "model_runner", None), "lora_manager", None
-        )
+        manager = getattr(self, "lora_manager", None) or getattr(self.model_runner, "lora_manager", None)
         if manager is None:
             return {}
         manager = getattr(manager, "_adapter_manager", manager)
-        registered = getattr(manager, "_registered_adapters", None)
-        if registered is None:
-            return {}
-        lora_model = registered.get(adapter_id)
+        lora_model = manager._registered_adapters.get(adapter_id)
         if lora_model is None:
             return {}
         target = set(names) if names else None
@@ -298,8 +277,8 @@ class BucketedIPCReceiveMixin:
             if target is not None and layer_name not in target:
                 continue
             per_field: dict = {}
-            for field in ("lora_a", "lora_b", "bias", "embeddings_tensor"):
-                t = getattr(layer, field, None)
+            for field in ("lora_a", "lora_b"):
+                t = getattr(layer, field)
                 if isinstance(t, torch.Tensor):
                     per_field[field] = fingerprint_tensor(t)
                 elif isinstance(t, (list, tuple)):

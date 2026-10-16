@@ -1,4 +1,4 @@
-"""Qwen-Image family: input/output sub-adapters + the ``qwen_image_t2i`` modality class."""
+"""Qwen-Image family: output sub-adapter + the ``qwen_image_t2i`` modality class."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from unirl.rollout.engine.vllm_omni.adapters.dit import (
     _grouped_texts_from_sample,
     _negative_prompt_from_params,
 )
-from unirl.rollout.engine.vllm_omni.backends import GenerateCall, OmniRawResult, StageSampling
+from unirl.rollout.engine.vllm_omni.backends import GenerateCall, OmniRawResult
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import read_captures
 from unirl.rollout.engine.vllm_omni.utils import collect_dit_outputs
 from unirl.types.conditions.text import TextEmbedCondition
@@ -34,57 +34,6 @@ def _ragged_pad_cat(pairs: Sequence[Tuple[torch.Tensor, torch.Tensor]]) -> TextE
         embeds.append(e)
         masks.append(m)
     return TextEmbedCondition(embeds=torch.cat(embeds, dim=0), pooled=None, attn_mask=torch.cat(masks, dim=0))
-
-
-class QwenImageInputAdapter(DitInputAdapter):
-    """SD3-style request side with the Qwen CFG mapping."""
-
-    def __init__(self, modality: str, *, model_config: Any = None) -> None:
-        super().__init__(modality)
-        self.model_config = model_config
-
-    def build_prompts(self, sample: Sample) -> List[Any]:
-        """``{"prompt"}`` dicts; ``negative_prompt`` ONLY when CFG is armed."""
-        # text-only consumer: text_conditioning() fails loud if an image turn is present.
-        texts = sample.text_conditioning()[0].content
-        diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
-        if float(diff_params.guidance_scale) > 1.0:
-            negative_prompt = _negative_prompt_from_params(diff_params, default=" ")
-            return [{"prompt": text, "negative_prompt": negative_prompt} for text in texts.texts]
-        return [{"prompt": text} for text in texts.texts]
-
-    def build_sampling(self, sample: Sample) -> List[StageSampling]:
-        sampling = super().build_sampling(sample)
-        diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
-        kwargs = sampling[0].kwargs
-        kwargs["true_cfg_scale"] = float(diff_params.guidance_scale)
-        if "max_sequence_length" not in kwargs and self.model_config is not None:
-            kwargs["max_sequence_length"] = int(self.model_config.max_sequence_length)
-        return sampling
-
-
-class QwenImageGroupedInputAdapter(QwenImageInputAdapter):
-    """Qwen-Image request builder using vLLM-Omni's native multi-output prompt shape."""
-
-    def build_prompts(self, sample: Sample) -> List[Any]:
-        grouped_texts, _ = _grouped_texts_from_sample(
-            sample,
-            caller=f"{self.modality}.build_prompts",
-        )
-        diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
-        if float(diff_params.guidance_scale) > 1.0:
-            negative_prompt = _negative_prompt_from_params(diff_params, default=" ")
-            return [{"prompt": text, "negative_prompt": negative_prompt} for text in grouped_texts]
-        return [{"prompt": text} for text in grouped_texts]
-
-    def build_sampling(self, sample: Sample) -> List[StageSampling]:
-        _, spp = _grouped_texts_from_sample(
-            sample,
-            caller=f"{self.modality}.build_sampling",
-        )
-        sampling = super().build_sampling(sample)
-        sampling[0].kwargs["num_outputs_per_prompt"] = spp
-        return sampling
 
 
 class QwenImageOutputAdapter(DitOutputAdapter):
@@ -143,7 +92,6 @@ class QwenImageT2iAdapter(ModelAdapter):
 
     def __init__(self, config: Any, model_config: Any, *, strategy: Any = None, tokenize_fn: Any = None) -> None:
         super().__init__(config, model_config, strategy=strategy, tokenize_fn=tokenize_fn)
-        self.input_adapter = QwenImageGroupedInputAdapter(self.modality, model_config=model_config)
         self.output_adapter = QwenImageOutputAdapter(self.modality)
 
     def validate_request(self, sample: Sample) -> None:
@@ -153,10 +101,23 @@ class QwenImageT2iAdapter(ModelAdapter):
             )
 
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
-        return self.input_adapter.build(sample)
+        grouped_texts, spp = _grouped_texts_from_sample(sample, caller=f"{self.modality}.build_inputs")
+        diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
+        if diff_params.guidance_scale > 1.0:
+            negative_prompt = _negative_prompt_from_params(diff_params, default=" ")
+            prompts = [{"prompt": text, "negative_prompt": negative_prompt} for text in grouped_texts]
+        else:
+            prompts = [{"prompt": text} for text in grouped_texts]
+        sampling = DitInputAdapter(self.modality).build_sampling(sample)
+        kwargs = sampling[0].kwargs
+        kwargs["true_cfg_scale"] = diff_params.guidance_scale
+        if "max_sequence_length" not in kwargs:
+            kwargs["max_sequence_length"] = self.model_config.max_sequence_length
+        kwargs["num_outputs_per_prompt"] = spp
+        return [GenerateCall(prompts=prompts, sampling=sampling)]
 
     def build_response(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Sample:
         return self.output_adapter.build(sample, per_request)
 
 
-__all__ = ["QwenImageGroupedInputAdapter", "QwenImageInputAdapter", "QwenImageOutputAdapter", "QwenImageT2iAdapter"]
+__all__ = ["QwenImageOutputAdapter", "QwenImageT2iAdapter"]

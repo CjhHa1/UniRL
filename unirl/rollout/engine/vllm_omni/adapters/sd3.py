@@ -1,4 +1,4 @@
-"""SD3.5 family: output sub-adapter + the ``sd35_t2i`` modality class."""
+"""SD3.5 family: output sub-adapter + the ``sd3_t2i`` modality class."""
 
 from __future__ import annotations
 
@@ -13,34 +13,12 @@ from unirl.rollout.engine.vllm_omni.adapters.dit import (
     _grouped_texts_from_sample,
     _negative_prompt_from_params,
 )
-from unirl.rollout.engine.vllm_omni.backends import GenerateCall, OmniRawResult, StageSampling
+from unirl.rollout.engine.vllm_omni.backends import GenerateCall, OmniRawResult
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import read_captures
 from unirl.rollout.engine.vllm_omni.utils import collect_dit_outputs
 from unirl.types.conditions.text import TextEmbedCondition
 from unirl.types.sample import Sample
 from unirl.types.sampling import DiffusionSamplingParams
-
-
-class Sd3InputAdapter(DitInputAdapter):
-    """SD3 request builder using vLLM-Omni's native multi-output prompt shape."""
-
-    def build_prompts(self, sample: Sample) -> List[Any]:
-        grouped_texts, _ = _grouped_texts_from_sample(
-            sample,
-            caller=f"{self.modality}.build_prompts",
-        )
-        diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
-        negative_prompt = _negative_prompt_from_params(diff_params, default="")
-        return [{"prompt": text, "negative_prompt": negative_prompt} for text in grouped_texts]
-
-    def build_sampling(self, sample: Sample) -> List[StageSampling]:
-        _, spp = _grouped_texts_from_sample(
-            sample,
-            caller=f"{self.modality}.build_sampling",
-        )
-        sampling = super().build_sampling(sample)
-        sampling[0].kwargs["num_outputs_per_prompt"] = spp
-        return sampling
 
 
 class Sd3OutputAdapter(DitOutputAdapter):
@@ -100,7 +78,6 @@ class Sd3T2iAdapter(ModelAdapter):
 
     def __init__(self, config: Any, model_config: Any, *, strategy: Any = None, tokenize_fn: Any = None) -> None:
         super().__init__(config, model_config, strategy=strategy, tokenize_fn=tokenize_fn)
-        self.input_adapter = Sd3InputAdapter(self.modality)
         self.output_adapter = Sd3OutputAdapter(self.modality)
 
     def validate_request(self, sample: Sample) -> None:
@@ -110,10 +87,16 @@ class Sd3T2iAdapter(ModelAdapter):
             )
 
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
-        return self.input_adapter.build(sample)
+        grouped_texts, spp = _grouped_texts_from_sample(sample, caller=f"{self.modality}.build_inputs")
+        diff_params = sample.frontier_gen_part(DiffusionSamplingParams).sampling_params
+        negative_prompt = _negative_prompt_from_params(diff_params, default="")
+        prompts = [{"prompt": text, "negative_prompt": negative_prompt} for text in grouped_texts]
+        sampling = DitInputAdapter(self.modality).build_sampling(sample)
+        sampling[0].kwargs["num_outputs_per_prompt"] = spp
+        return [GenerateCall(prompts=prompts, sampling=sampling)]
 
     def build_response(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Sample:
         return self.output_adapter.build(sample, per_request)
 
 
-__all__ = ["Sd3InputAdapter", "Sd3OutputAdapter", "Sd3T2iAdapter"]
+__all__ = ["Sd3OutputAdapter", "Sd3T2iAdapter"]

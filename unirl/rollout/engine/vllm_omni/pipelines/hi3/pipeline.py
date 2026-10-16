@@ -8,7 +8,6 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.hunyuan_image3.pipeline_hunyuan_image3 import (
     HunyuanImage3Pipeline,
 )
-from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from unirl.rollout.engine.vllm_omni.pipelines._shared.flow_match_sde_scheduler import (
@@ -126,34 +125,6 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         inner.prepare_latents = injecting
         self._initial_noise_injector_installed = True
 
-    def _arm_sde(self, req: OmniDiffusionRequest) -> None:
-        """This request's SDE strength + sparse step gate."""
-        eta = float(req.sampling_params.eta)
-        extra = req.sampling_params.extra_args
-        self.scheduler.arm(eta=eta, sde_indices=extra.get("sde_indices"))
-
-    def _arm_initial_noise(self, req: OmniDiffusionRequest) -> None:
-        """This request's x_T RECIPE (seed + per-sample gids, no shape — AR-dynamic; the injector fills it later)."""
-        extra = req.sampling_params.extra_args
-        gids = extra.get("init_noise_group_ids")
-        self._pending_initial_noise_recipe = (
-            NoiseRecipe(noise_group_ids=[str(g) for g in gids], base_seed=int(extra.get("init_noise_seed", 0)))
-            if gids
-            else None
-        )
-
-    def _arm_conditioning_tap(self) -> None:
-        """Fresh capture buffer so the tap records THIS request's first call."""
-        self._captured_conditioning = None
-
-    def _harvest_trajectory(self, out: DiffusionOutput) -> None:
-        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            drain_trajectory_into(out, self.scheduler)
-
-    def _harvest_conditioning(self, out: DiffusionOutput) -> None:
-        if self._captured_conditioning is not None:
-            stamp_capture(out, "fused_mm_capture", self._captured_conditioning)
-
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
         """Single-request batch in, single output out — see ``single_request``."""
         one = single_request(req, caller="RLHunyuanImage3Pipeline.forward")
@@ -162,14 +133,20 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         self._install_conditioning_tap()
         self._install_initial_noise_injector()
 
-        self._arm_sde(one)
-        self._arm_initial_noise(one)
-        self._arm_conditioning_tap()
+        extra = one.sampling_params.extra_args
+        self.scheduler.arm(eta=one.sampling_params.eta, sde_indices=extra.get("sde_indices"))
+        gids = extra.get("init_noise_group_ids")
+        self._pending_initial_noise_recipe = (
+            NoiseRecipe(noise_group_ids=list(gids), base_seed=int(extra.get("init_noise_seed", 0))) if gids else None
+        )
+        self._captured_conditioning = None
 
         out = super().forward(req, **kwargs)
 
-        self._harvest_trajectory(out)
-        self._harvest_conditioning(out)
+        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
+            drain_trajectory_into(out, self.scheduler)
+        if self._captured_conditioning is not None:
+            stamp_capture(out, "fused_mm_capture", self._captured_conditioning)
         finalize_output(out)
         return out
 

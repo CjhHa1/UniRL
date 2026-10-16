@@ -49,32 +49,6 @@ def _trailing_gen_parts(sample: Sample, *params_types: type, caller: str) -> Tup
     return trailing
 
 
-def _build_prompt_entries(
-    texts: Texts,
-    *,
-    task: str,
-    sys_type: str,
-    modalities_field: Tuple[str, ...],
-    tokenize_fn: Optional[Callable[..., List[int]]],
-    decorate: Callable[[Dict[str, Any], int], None],
-) -> List[Dict[str, Any]]:
-    """Build the HI3 per-prompt dicts shared by the AR-bearing modalities."""
-    if tokenize_fn is None:
-        raise RuntimeError("build_prompt_entries: tokenize_fn not provided (AR modalities need the driver tokenizer)")
-    prompts: List[Dict[str, Any]] = []
-    for i, text in enumerate(texts.texts):
-        token_ids = tokenize_fn(text, task=task, sys_type=sys_type)
-        entry: Dict[str, Any] = {
-            "prompt_token_ids": token_ids,
-            "prompt": text,
-            "use_system_prompt": sys_type,
-            "modalities": list(modalities_field),
-        }
-        decorate(entry, i)
-        prompts.append(entry)
-    return prompts
-
-
 def hi3_fused_conditions(diff_outputs: List[OmniRawResult], *, modality: str) -> Dict[str, Any]:
     """The HI3 DiT replay conditions — concat the ``fused_mm_capture`` dicts."""
     captures = [read_captures(d).get("fused_mm_capture") for d in diff_outputs]
@@ -150,7 +124,7 @@ def hi3_ar_fused_conditions(per_request: List[List[OmniRawResult]]) -> Dict[str,
             if out.stage_id == 0:
                 ids = out.prompt_token_ids
                 break
-        rows.append([int(t) for t in ids] if ids else [])
+        rows.append(list(ids) if ids else [])
 
     if not any(rows):
         return {}
@@ -194,17 +168,6 @@ class Hi3InputAdapter:
         self.vanilla_task = vanilla_task
         self.sys_type = sys_type
 
-    def _resolve_task(self, control: Dict[str, Any]) -> Tuple[str, str]:
-        """Resolve ``(task_key, sys_type)`` with the root ``Part.control`` overrides."""
-        sys_type = control.get("sys_type") or self.sys_type
-        bot_task = control.get("bot_task")
-        if self.bot_task_base and bot_task:
-            if bot_task == "vanilla" and self.vanilla_task is not None:
-                return self.vanilla_task
-            if bot_task in ("think", "recaption"):
-                return f"{self.bot_task_base}_{bot_task}", sys_type
-        return self.task_key, sys_type
-
     def _stage_parts(self, sample: Sample) -> Tuple[Part, Optional[Part]]:
         """Return this call's AR Part and optional diffusion Part from its suffix."""
         caller = f"{type(self).__name__}({self.modality})"
@@ -228,7 +191,15 @@ class Hi3InputAdapter:
 
     def build_prompts(self, sample: Sample) -> List[Dict[str, Any]]:
         """The HI3 chat-templated per-prompt entries (+ the image gates)."""
-        task, sys_type = self._resolve_task(sample.parts[0].control)
+        control = sample.parts[0].control
+        sys_type = control.get("sys_type") or self.sys_type
+        bot_task = control.get("bot_task")
+        task = self.task_key
+        if self.bot_task_base and bot_task:
+            if bot_task == "vanilla" and self.vanilla_task is not None:
+                task, sys_type = self.vanilla_task
+            elif bot_task in ("think", "recaption"):
+                task = f"{self.bot_task_base}_{bot_task}"
 
         if self.image_input:
             turns, images = sample.vision_conditioning()
@@ -240,14 +211,33 @@ class Hi3InputAdapter:
 
         _, diff_part = self._stage_parts(sample)
         diff_params = diff_part.sampling_params if diff_part is not None else None
-        return _build_prompt_entries(
-            texts,
-            task=task,
-            sys_type=sys_type,
-            modalities_field=self.output_modalities,
-            tokenize_fn=self.tokenize_fn,
-            decorate=lambda entry, i: self._decorate(entry, i, pil_images=pil_images, diff_params=diff_params),
-        )
+        if self.tokenize_fn is None:
+            raise RuntimeError(
+                "Hi3InputAdapter.build_prompts: tokenize_fn not provided (AR modalities need the driver tokenizer)"
+            )
+        prompts: List[Dict[str, Any]] = []
+        for i, text in enumerate(texts.texts):
+            token_ids = self.tokenize_fn(text, task=task, sys_type=sys_type)
+            entry: Dict[str, Any] = {
+                "prompt_token_ids": token_ids,
+                "prompt": text,
+                "use_system_prompt": sys_type,
+                "modalities": list(self.output_modalities),
+            }
+            if self.image_input:
+                pil = pil_images[i]
+                entry["multi_modal_data"] = {"image": pil}
+                if diff_params is None:
+                    entry["height"] = pil.height
+                    entry["width"] = pil.width
+                else:
+                    entry["height"] = diff_params.height
+                    entry["width"] = diff_params.width
+            elif self.carries_target_size:
+                entry["height"] = diff_params.height
+                entry["width"] = diff_params.width
+            prompts.append(entry)
+        return prompts
 
     def build_sampling(self, sample: Sample) -> List[StageSampling]:
         """AR always; a DiT stage rides along iff ``"dit" in self.stages``."""
@@ -294,30 +284,15 @@ class Hi3InputAdapter:
             )
         return calls
 
-    def _decorate(self, entry: Dict[str, Any], i: int, *, pil_images: List[Any], diff_params: Any) -> None:
-        """The per-entry extras, derived from the constructor flags."""
-        if self.image_input:
-            pil = pil_images[i]
-            entry["multi_modal_data"] = {"image": pil}
-            if diff_params is None:
-                entry["height"] = pil.height
-                entry["width"] = pil.width
-            else:
-                entry["height"] = int(diff_params.height)
-                entry["width"] = int(diff_params.width)
-        elif self.carries_target_size:
-            entry["height"] = int(diff_params.height)
-            entry["width"] = int(diff_params.width)
-
     def _ar_sampling(self, ar_params: Any) -> StageSampling:
         """AR sampling intent (Stage 0). ``logprobs=1`` makes vLLM emit"""
         return StageSampling(
             kind=STAGE_KIND_AR,
             kwargs=dict(
-                temperature=float(ar_params.temperature),
-                top_p=float(ar_params.top_p),
-                top_k=int(ar_params.top_k),
-                max_tokens=int(ar_params.max_new_tokens),
+                temperature=ar_params.temperature,
+                top_p=ar_params.top_p,
+                top_k=ar_params.top_k,
+                max_tokens=ar_params.max_new_tokens,
                 logprobs=1,
             ),
         )
@@ -326,7 +301,7 @@ class Hi3InputAdapter:
         diff_kwargs = core_diff_kwargs(diff_params)
         seed = diff_params.seed
         if seed is not None:
-            diff_kwargs["seed"] = int(seed)
+            diff_kwargs["seed"] = seed
 
         extra_args = sde_extra_args(diff_params)
 
@@ -343,68 +318,13 @@ class Hi3InputAdapter:
         explicit_keys = list(gen_part.init_noise_group_ids)
         keys = explicit_keys or (gen_part.group_ids if diff_params.init_same_noise else list(gen_part.sample_ids))
         if keys and not diff_params.disable_driver_xt:
-            extra_args["init_noise_group_ids"] = [str(g) for g in keys]
-            extra_args["init_noise_seed"] = int(seed) if seed is not None else 0
+            extra_args["init_noise_group_ids"] = keys
+            extra_args["init_noise_seed"] = seed if seed is not None else 0
 
         if extra_args:
             diff_kwargs["extra_args"] = extra_args
 
         return StageSampling(kind=STAGE_KIND_DIFFUSION, kwargs=diff_kwargs)
-
-
-class Hi3DitRecaptionInputAdapter:
-    """Standalone HI3 DiT request side — eats an externally-injected recaption."""
-
-    def __init__(self, modality: str, *, sys_type: str = "en_unified") -> None:
-        self.modality = modality
-        self.sys_type = sys_type
-
-    def build(self, sample: Sample) -> List[GenerateCall]:
-        if sample.has_image_input():
-            raise ValueError(f"modality={self.modality!r} does not accept an image input Part")
-
-        turns = sample.text_conditioning()
-        texts = turns[0].content
-        cot = turns[1].content
-        gen_part = sample.frontier_gen_part(DiffusionSamplingParams)
-        diff_params = gen_part.sampling_params
-        sys_type = sample.parts[0].control.get("sys_type") or self.sys_type
-
-        base_kwargs = core_diff_kwargs(diff_params)
-        height = int(base_kwargs["height"])
-        width = int(base_kwargs["width"])
-
-        base_extra = sde_extra_args(diff_params)
-        recipe_gids = gen_part.group_ids if diff_params.init_same_noise else list(gen_part.sample_ids)
-        if recipe_gids and not diff_params.disable_driver_xt:
-            base_extra["init_noise_group_ids"] = [str(g) for g in recipe_gids]
-            base_extra["init_noise_seed"] = int(diff_params.seed) if diff_params.seed is not None else 0
-
-        calls: List[GenerateCall] = []
-        for idx, (sample_id, text, recap) in enumerate(zip(gen_part.sample_ids, texts.texts, cot.texts)):
-            prompt = {
-                "prompt": text,
-                "height": height,
-                "width": width,
-                "use_system_prompt": sys_type,
-                "extra": {"ar_generated_text": recap},
-            }
-            kwargs = dict(base_kwargs)
-            kwargs["seed"] = seed_from_sample_id(sample_id)
-            extra_args = dict(base_extra)
-            gid = recipe_gids[idx] if idx < len(recipe_gids) else None
-            if gid is not None and extra_args.get("init_noise_group_ids"):
-                extra_args["init_noise_group_ids"] = [str(gid)]
-            if extra_args:
-                kwargs["extra_args"] = extra_args
-            calls.append(
-                GenerateCall(
-                    prompts=[prompt],
-                    sampling=[StageSampling(kind=STAGE_KIND_DIFFUSION, kwargs=kwargs)],
-                    group_by_request_id=False,
-                )
-            )
-        return calls
 
 
 class Hi3TextOutputAdapter:
@@ -413,43 +333,21 @@ class Hi3TextOutputAdapter:
     def __init__(self, modality: str) -> None:
         self.modality = modality
 
-    def build_segment(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Any:
-        del sample
-        return build_ar_segment(per_request)
-
-    def build_decoded(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Texts:
-        del sample
-        return decoded_text_from_ar(per_request)
-
-    def build_conditions(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Dict[str, Any]:
-        """AR Part conditions. Default: none (no replay capture in scope)."""
-        del sample, per_request
-        return {}
-
     def build(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Sample:
         if not per_request or not any(per_request):
             raise ValueError("build_response: empty per-request outputs (Omni.generate returned nothing surfaceable).")
-        segment = self.build_segment(sample, per_request)
-        decoded = self.build_decoded(sample, per_request)
-        conditions = self.build_conditions(sample, per_request)
+        segment = build_ar_segment(per_request)
         if segment is None:
             return sample
+        decoded = decoded_text_from_ar(per_request)
         frontier = sample.frontier_gen_part(ARSamplingParams)
         return sample.replace_frontier(
             frontier.fill(
                 segment=segment,
                 primitives={"text": decoded},
-                conditions=dict(conditions),
+                conditions={},
             )
         )
-
-
-class Hi3ArRecaptionOutputAdapter(Hi3TextOutputAdapter):
-    """AR Part response + the ARGRPO fused prompt-capture conditions."""
-
-    def build_conditions(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Dict[str, Any]:
-        del sample
-        return hi3_ar_fused_conditions(per_request)
 
 
 class Hi3ImageOutputAdapter(DitOutputAdapter):
@@ -661,13 +559,26 @@ class Hi3ArRecaptionAdapter(ModelAdapter):
             stages=("ar",),
             carries_target_size=True,
         )
-        self.output_adapter = Hi3ArRecaptionOutputAdapter(self.modality)
 
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
         return self.input_adapter.build(sample)
 
     def build_response(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Sample:
-        return self.output_adapter.build(sample, per_request)
+        if not per_request or not any(per_request):
+            raise ValueError("build_response: empty per-request outputs (Omni.generate returned nothing surfaceable).")
+        segment = build_ar_segment(per_request)
+        if segment is None:
+            return sample
+        decoded = decoded_text_from_ar(per_request)
+        conditions = hi3_ar_fused_conditions(per_request)
+        frontier = sample.frontier_gen_part(ARSamplingParams)
+        return sample.replace_frontier(
+            frontier.fill(
+                segment=segment,
+                primitives={"text": decoded},
+                conditions=dict(conditions),
+            )
+        )
 
 
 @register_adapter("hi3_dit_recaption")
@@ -682,11 +593,54 @@ class Hi3DitRecaptionAdapter(ModelAdapter):
 
     def __init__(self, config: Any, model_config: Any, *, strategy: Any = None, tokenize_fn: Any = None) -> None:
         super().__init__(config, model_config, strategy=strategy, tokenize_fn=tokenize_fn)
-        self.input_adapter = Hi3DitRecaptionInputAdapter(self.modality)
         self.output_adapter = Hi3DitRecaptionOutputAdapter(self.modality)
 
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
-        return self.input_adapter.build(sample)
+        if sample.has_image_input():
+            raise ValueError(f"modality={self.modality!r} does not accept an image input Part")
+
+        turns = sample.text_conditioning()
+        texts = turns[0].content
+        cot = turns[1].content
+        gen_part = sample.frontier_gen_part(DiffusionSamplingParams)
+        diff_params = gen_part.sampling_params
+        sys_type = sample.parts[0].control.get("sys_type") or "en_unified"
+
+        base_kwargs = core_diff_kwargs(diff_params)
+        height = base_kwargs["height"]
+        width = base_kwargs["width"]
+
+        base_extra = sde_extra_args(diff_params)
+        recipe_gids = gen_part.group_ids if diff_params.init_same_noise else list(gen_part.sample_ids)
+        if recipe_gids and not diff_params.disable_driver_xt:
+            base_extra["init_noise_group_ids"] = recipe_gids
+            base_extra["init_noise_seed"] = diff_params.seed if diff_params.seed is not None else 0
+
+        calls: List[GenerateCall] = []
+        for idx, (sample_id, text, recap) in enumerate(zip(gen_part.sample_ids, texts.texts, cot.texts)):
+            prompt = {
+                "prompt": text,
+                "height": height,
+                "width": width,
+                "use_system_prompt": sys_type,
+                "extra": {"ar_generated_text": recap},
+            }
+            kwargs = dict(base_kwargs)
+            kwargs["seed"] = seed_from_sample_id(sample_id)
+            extra_args = dict(base_extra)
+            gid = recipe_gids[idx] if idx < len(recipe_gids) else None
+            if gid is not None and extra_args.get("init_noise_group_ids"):
+                extra_args["init_noise_group_ids"] = [gid]
+            if extra_args:
+                kwargs["extra_args"] = extra_args
+            calls.append(
+                GenerateCall(
+                    prompts=[prompt],
+                    sampling=[StageSampling(kind=STAGE_KIND_DIFFUSION, kwargs=kwargs)],
+                    group_by_request_id=False,
+                )
+            )
+        return calls
 
     def build_response(self, sample: Sample, per_request: List[List[OmniRawResult]]) -> Sample:
         return self.output_adapter.build(sample, per_request)
@@ -694,9 +648,7 @@ class Hi3DitRecaptionAdapter(ModelAdapter):
 
 __all__ = [
     "Hi3ArRecaptionAdapter",
-    "Hi3ArRecaptionOutputAdapter",
     "Hi3DitRecaptionAdapter",
-    "Hi3DitRecaptionInputAdapter",
     "Hi3DitRecaptionOutputAdapter",
     "Hi3I2tAdapter",
     "Hi3ImageOutputAdapter",

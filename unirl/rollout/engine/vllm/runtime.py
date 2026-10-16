@@ -38,7 +38,7 @@ def _send_response(
     response = {
         "request_id": request["request_id"],
         "command": request["command"],
-        "ok": bool(ok),
+        "ok": ok,
         "result": result,
     }
     if error is not None:
@@ -56,16 +56,6 @@ def _shutdown_llm(llm: Any) -> None:
     if llm is None:
         return
     llm.llm_engine.engine_core.shutdown(timeout=30.0)
-
-
-def _sampling_params(payload: Dict[str, Any], *, return_logprob: bool):
-    from vllm import SamplingParams
-
-    values = dict(payload)
-    if "max_new_tokens" in values:
-        values["max_tokens"] = values.pop("max_new_tokens")
-    values["logprobs"] = 0 if return_logprob else None
-    return SamplingParams(**values)
 
 
 def _plain_outputs(outputs) -> List[Dict[str, Any]]:
@@ -89,10 +79,10 @@ def _plain_outputs(outputs) -> List[Dict[str, Any]]:
                     logprobs.append(float(selected.logprob))
             flattened.append(
                 {
-                    "text": str(completion.text),
+                    "text": completion.text,
                     "token_ids": token_ids,
                     "logprobs": logprobs,
-                    "finish_reason": "" if completion.finish_reason is None else str(completion.finish_reason),
+                    "finish_reason": "" if completion.finish_reason is None else completion.finish_reason,
                 }
             )
     return flattened
@@ -120,33 +110,33 @@ def engine_process_main(
         # client: pickle+base64 inside this trusted local runtime boundary.
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-        from vllm import LLM
+        from vllm import LLM, SamplingParams
         from vllm import __version__ as vllm_version
         from vllm.config import WeightTransferConfig
 
-        if str(vllm_version) != _SUPPORTED_VLLM_VERSION:
+        if vllm_version != _SUPPORTED_VLLM_VERSION:
             raise RuntimeError(f"vLLM rollout requires vllm=={_SUPPORTED_VLLM_VERSION}; got {vllm_version}")
         engine_kwargs = dict(config["engine_kwargs"])
-        engine_kwargs["dtype"] = str(config["dtype"])
-        engine_kwargs["trust_remote_code"] = bool(config["trust_remote_code"])
+        engine_kwargs["dtype"] = config["dtype"]
+        engine_kwargs["trust_remote_code"] = config["trust_remote_code"]
         if config["model_revision"]:
-            engine_kwargs["revision"] = str(config["model_revision"])
+            engine_kwargs["revision"] = config["model_revision"]
         if config["tokenizer_revision"]:
-            engine_kwargs["tokenizer_revision"] = str(config["tokenizer_revision"])
+            engine_kwargs["tokenizer_revision"] = config["tokenizer_revision"]
         engine_kwargs["distributed_executor_backend"] = "mp"
         engine_kwargs["enable_sleep_mode"] = True
-        engine_kwargs["enforce_eager"] = bool(config["enforce_eager"])
-        engine_kwargs["enable_prefix_caching"] = bool(config["enable_prefix_caching"])
-        engine_kwargs["enable_chunked_prefill"] = bool(config["enable_chunked_prefill"])
-        engine_kwargs["moe_backend"] = str(config["moe_backend"])
-        engine_kwargs["logprobs_mode"] = str(config["logprobs_mode"])
+        engine_kwargs["enforce_eager"] = config["enforce_eager"]
+        engine_kwargs["enable_prefix_caching"] = config["enable_prefix_caching"]
+        engine_kwargs["enable_chunked_prefill"] = config["enable_chunked_prefill"]
+        engine_kwargs["moe_backend"] = config["moe_backend"]
+        engine_kwargs["logprobs_mode"] = config["logprobs_mode"]
         engine_kwargs["worker_extension_cls"] = "unirl.rollout.engine.vllm.worker_extension.UniRLWeightSyncExtension"
         engine_kwargs["weight_transfer_config"] = WeightTransferConfig(backend="ipc")
         if config["quantization"] is not None:
-            engine_kwargs["quantization"] = str(config["quantization"])
+            engine_kwargs["quantization"] = config["quantization"]
         llm = LLM(
-            model=str(config["pretrained_model_ckpt_path"]),
-            tensor_parallel_size=int(config["tp_size"]),
+            model=config["pretrained_model_ckpt_path"],
+            tensor_parallel_size=config["tp_size"],
             **engine_kwargs,
         )
         worker_capabilities = llm.collective_rpc("unirl_weight_sync_capabilities")
@@ -157,7 +147,7 @@ def engine_process_main(
             ok=True,
             result={
                 "event": "ready",
-                "vllm_version": str(vllm_version),
+                "vllm_version": vllm_version,
                 "process_group_id": os.getpgrp(),
                 "model_type": model_type,
                 "worker_capabilities": worker_capabilities,
@@ -176,7 +166,7 @@ def engine_process_main(
         connection.close()
         return
 
-    last_request_id = int(startup_request["request_id"])
+    last_request_id = startup_request["request_id"]
     native_pending_header: Dict[str, Any] | None = None
     try:
         while True:
@@ -186,20 +176,20 @@ def engine_process_main(
                 break
             except _ProtocolError:
                 break
-            last_request_id = int(message["request_id"])
+            last_request_id = message["request_id"]
             command = message.get("command")
             worker_receipts: Any = []
             try:
                 if command == "generate":
                     payloads = list(message["payloads"])
-                    sampling_blocks = [dict(payload["sampling_params"]) for payload in payloads]
-                    prompts = [
-                        {"prompt_token_ids": [int(token) for token in payload["input_ids"]]} for payload in payloads
-                    ]
-                    params = [
-                        _sampling_params(block, return_logprob=bool(payload.get("return_logprob", True)))
-                        for payload, block in zip(payloads, sampling_blocks, strict=True)
-                    ]
+                    prompts = [{"prompt_token_ids": list(payload["input_ids"])} for payload in payloads]
+                    params = []
+                    for payload in payloads:
+                        values = dict(payload["sampling_params"])
+                        if "max_new_tokens" in values:
+                            values["max_tokens"] = values.pop("max_new_tokens")
+                        values["logprobs"] = 0 if payload.get("return_logprob", True) else None
+                        params.append(SamplingParams(**values))
                     outputs = llm.generate(prompts, params, use_tqdm=False)
                     result = _plain_outputs(outputs)
                 elif command == "sleep":

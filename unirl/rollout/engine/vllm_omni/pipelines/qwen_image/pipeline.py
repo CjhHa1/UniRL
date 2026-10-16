@@ -10,7 +10,6 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
 )
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image import QwenImagePipeline
-from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.size_utils import normalize_min_aligned_size
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
@@ -73,73 +72,31 @@ class RLQwenImagePipeline(QwenImagePipeline):
         self.encode_prompt = tapped  # type: ignore[assignment]
         self._conditioning_tap_installed = True
 
-    def _arm_sde(self, req: OmniDiffusionRequest) -> None:
-        """This request's SDE strength + sparse step gate."""
-        eta = float(req.sampling_params.eta)
-        extra = req.sampling_params.extra_args
-        self.scheduler.arm(eta=eta, sde_indices=extra.get("sde_indices"))
-
-    def _arm_initial_noise(self, req: OmniDiffusionRequest) -> None:
-        """This request's driver-authored x_T, still spatial ``[1, C, H, W]``; packing happens at injection."""
-        self._pending_initial_noise = resolve_request_noise(req, caller="RLQwenImagePipeline._arm_initial_noise")
-
-    def _arm_conditioning_tap(self) -> None:
-        """Fresh capture buffer so the tap records THIS request's encodes."""
-        self._captured_conditioning = {}
-
-    # run-phase interception — upstream-called name, cannot be renamed
-
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
         """Initial-noise injection: the driver's ``[B, C, H, W]`` x_T is packed to ``[B, S, C*4]``. Consume-once."""
         upstream = super().prepare_latents
         noise = self._pending_initial_noise
         if noise is not None:
             self._pending_initial_noise = None
-            args, kwargs = inject_latents(upstream, args, kwargs, self._pack_pending_noise(noise, args))
+            if len(args) < 4:
+                raise RuntimeError(
+                    "RLQwenImagePipeline.prepare_latents: expected upstream's "
+                    f"fully positional prepare_latents call; got {len(args)} positional args."
+                )
+            batch, channels = int(args[0]), int(args[1])
+            grid_h = 2 * (int(args[2]) // (self.vae_scale_factor * 2))
+            grid_w = 2 * (int(args[3]) // (self.vae_scale_factor * 2))
+            if tuple(noise.shape) != (batch, channels, grid_h, grid_w):
+                raise RuntimeError(
+                    "RLQwenImagePipeline: driver x_T shape "
+                    f"{tuple(noise.shape)} does not match the worker latent grid "
+                    f"[{batch}, {channels}, {grid_h}, {grid_w}] for "
+                    f"{int(args[2])}x{int(args[3])} px — check the recipe's "
+                    "init_noise_latent_shape / initial_noise_batch."
+                )
+            packed = self._pack_latents(noise, batch, channels, grid_h, grid_w)
+            args, kwargs = inject_latents(upstream, args, kwargs, packed)
         return upstream(*args, **kwargs)
-
-    def _pack_pending_noise(self, noise: torch.Tensor, args: tuple) -> torch.Tensor:
-        """Spatial ``[B, C, h, w]`` x_T → packed ``[B, S, C*4]``, validated against the call site's grid geometry."""
-        if len(args) < 4:
-            raise RuntimeError(
-                "RLQwenImagePipeline._pack_pending_noise: expected upstream's "
-                f"fully positional prepare_latents call; got {len(args)} positional args."
-            )
-        batch, channels = int(args[0]), int(args[1])
-        grid_h = 2 * (int(args[2]) // (self.vae_scale_factor * 2))
-        grid_w = 2 * (int(args[3]) // (self.vae_scale_factor * 2))
-        if tuple(noise.shape) != (batch, channels, grid_h, grid_w):
-            raise RuntimeError(
-                "RLQwenImagePipeline: driver x_T shape "
-                f"{tuple(noise.shape)} does not match the worker latent grid "
-                f"[{batch}, {channels}, {grid_h}, {grid_w}] for "
-                f"{int(args[2])}x{int(args[3])} px — check the recipe's "
-                "init_noise_latent_shape / initial_noise_batch."
-            )
-        return self._pack_latents(noise, batch, channels, grid_h, grid_w)
-
-    def _harvest_trajectory(self, out: DiffusionOutput) -> None:
-        if not isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            return
-        drain_trajectory_into(out, self.scheduler)
-        if out.trajectory_latents is not None:
-            out.trajectory_latents = self._unpack_trajectory(out.trajectory_latents)
-
-    def _unpack_trajectory(self, packed: torch.Tensor) -> torch.Tensor:
-        """Packed ``[B, T+1, S, C*4]`` trajectory to spatial ``[B, T+1, C, H, W]``, the ``LatentSegment`` shape."""
-        if self._harvest_hw is None:
-            raise RuntimeError(
-                "RLQwenImagePipeline._unpack_trajectory: no stashed H/W — forward() did not run before harvest."
-            )
-        height, width = self._harvest_hw
-        b, t1 = packed.shape[0], packed.shape[1]
-        flat = self._unpack_latents(packed.reshape(b * t1, *packed.shape[2:]), height, width, self.vae_scale_factor)
-        flat = flat.squeeze(2)
-        return flat.reshape(b, t1, *flat.shape[1:])
-
-    def _harvest_conditioning(self, out: DiffusionOutput) -> None:
-        if self._captured_conditioning:
-            stamp_capture(out, "text_capture", self._captured_conditioning)
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> list[DiffusionOutput]:
         """Single-request batch in, one-element list out — see ``single_request``."""
@@ -147,9 +104,10 @@ class RLQwenImagePipeline(QwenImagePipeline):
         self._install_sde_scheduler()
         self._install_conditioning_tap()
 
-        self._arm_sde(one)
-        self._arm_initial_noise(one)
-        self._arm_conditioning_tap()
+        extra = one.sampling_params.extra_args
+        self.scheduler.arm(eta=one.sampling_params.eta, sde_indices=extra.get("sde_indices"))
+        self._pending_initial_noise = resolve_request_noise(one, caller="RLQwenImagePipeline.forward")
+        self._captured_conditioning = {}
         height = one.sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = one.sampling_params.width or self.default_sample_size * self.vae_scale_factor
         height, width = normalize_min_aligned_size(height, width, self.vae_scale_factor * 2)
@@ -158,8 +116,21 @@ class RLQwenImagePipeline(QwenImagePipeline):
         outs = super().forward(req, **kwargs)
 
         out = outs[0]
-        self._harvest_trajectory(out)
-        self._harvest_conditioning(out)
+        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
+            drain_trajectory_into(out, self.scheduler)
+            if out.trajectory_latents is not None:
+                packed = out.trajectory_latents
+                b, t1 = packed.shape[0], packed.shape[1]
+                flat = self._unpack_latents(
+                    packed.reshape(b * t1, *packed.shape[2:]),
+                    self._harvest_hw[0],
+                    self._harvest_hw[1],
+                    self.vae_scale_factor,
+                )
+                flat = flat.squeeze(2)
+                out.trajectory_latents = flat.reshape(b, t1, *flat.shape[1:])
+        if self._captured_conditioning:
+            stamp_capture(out, "text_capture", self._captured_conditioning)
         finalize_output(out)
         return outs
 

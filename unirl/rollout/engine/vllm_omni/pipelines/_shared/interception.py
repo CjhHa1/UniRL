@@ -132,7 +132,7 @@ def finalize_output(out: Any) -> None:
 
 def _request_sample_span(req: Any, *, total: int, caller: str) -> Tuple[int, int]:
     """Locate this Omni request's rows inside a driver-authored sample batch."""
-    rid = str(req.request_id)
+    rid = req.request_id
     try:
         idx = int(rid.split("_", 1)[0])
     except ValueError:
@@ -140,7 +140,7 @@ def _request_sample_span(req: Any, *, total: int, caller: str) -> Tuple[int, int
             f"{caller}: cannot parse batch index from request_id={rid!r}. Expected Omni's ``f'{{i}}_{{uuid}}'`` shape."
         ) from None
 
-    spp = int(req.sampling_params.num_outputs_per_prompt)
+    spp = req.sampling_params.num_outputs_per_prompt
     start, end = idx * spp, (idx + 1) * spp
     if spp < 1 or not 0 <= start < end <= total:
         raise IndexError(f"{caller}: grouped slice [{start}:{end}) out of bounds for length {total} (spp={spp}).")
@@ -160,8 +160,8 @@ def resolve_request_noise(req: Any, *, caller: str) -> Optional[torch.Tensor]:
     if noise_batch is not None:
         return noise_batch[start:end].clone()
     return NoiseRecipe(
-        noise_group_ids=[str(g) for g in recipe_gids[start:end]],
-        base_seed=int(extra.get("init_noise_seed", 0)),
+        noise_group_ids=list(recipe_gids[start:end]),
+        base_seed=extra.get("init_noise_seed", 0),
         latent_shape=tuple(extra["init_noise_latent_shape"]),
     ).resolve()
 
@@ -174,7 +174,7 @@ def slice_request_denoise_seed_keys(req: Any, *, caller: str) -> Optional[list[s
         return None
 
     start, end = _request_sample_span(req, total=len(denoise_seed_keys), caller=caller)
-    return [str(seed_key) for seed_key in denoise_seed_keys[start:end]]
+    return list(denoise_seed_keys[start:end])
 
 
 def inject_latents(

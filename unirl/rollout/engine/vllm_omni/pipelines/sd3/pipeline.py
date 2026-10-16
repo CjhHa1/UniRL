@@ -10,7 +10,6 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
 )
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.sd3.pipeline_sd3 import StableDiffusion3Pipeline
-from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from unirl.rollout.engine.vllm_omni.pipelines._shared.flow_match_sde_scheduler import (
@@ -121,22 +120,6 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
         self._get_t5_prompt_embeds = patched_get_t5_prompt_embeds  # type: ignore[assignment]
         self._t5_workaround_installed = True
 
-    def _arm_sde(self, req: OmniDiffusionRequest) -> None:
-        """This request's SDE strength + sparse step gate."""
-        eta = float(req.sampling_params.eta)
-        extra = req.sampling_params.extra_args
-        self.scheduler.arm(eta=eta, sde_indices=extra.get("sde_indices"))
-
-    def _arm_initial_noise(self, req: OmniDiffusionRequest) -> None:
-        """This request's driver-authored x_T (batch slice or recipe row)."""
-        self._pending_initial_noise = resolve_request_noise(req, caller="RLStableDiffusion3Pipeline._arm_initial_noise")
-
-    def _arm_conditioning_tap(self) -> None:
-        """Fresh capture buffer so the tap records THIS request's first encode."""
-        self._captured_conditioning = None
-
-    # run-phase interception — upstream-called name, cannot be renamed
-
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
         """Initial-noise injection point: bypass upstream RNG when the driver supplied an x_T."""
         upstream = super().prepare_latents
@@ -146,14 +129,6 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
             self._pending_initial_noise = None
         return upstream(*args, **kwargs)
 
-    def _harvest_trajectory(self, out: DiffusionOutput) -> None:
-        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            drain_trajectory_into(out, self.scheduler)
-
-    def _harvest_conditioning(self, out: DiffusionOutput) -> None:
-        if self._captured_conditioning is not None:
-            stamp_capture(out, "text_capture", self._captured_conditioning)
-
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> list[DiffusionOutput]:
         """Single-request batch in, one-element list out."""
         one = single_request(req, caller="RLStableDiffusion3Pipeline.forward")
@@ -161,15 +136,18 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
         self._install_conditioning_tap()
         self._install_t5_truncation_workaround()
 
-        self._arm_sde(one)
-        self._arm_initial_noise(one)
-        self._arm_conditioning_tap()
+        extra = one.sampling_params.extra_args
+        self.scheduler.arm(eta=one.sampling_params.eta, sde_indices=extra.get("sde_indices"))
+        self._pending_initial_noise = resolve_request_noise(one, caller="RLStableDiffusion3Pipeline.forward")
+        self._captured_conditioning = None
 
         outs = super().forward(req, **kwargs)
 
         out = outs[0]
-        self._harvest_trajectory(out)
-        self._harvest_conditioning(out)
+        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
+            drain_trajectory_into(out, self.scheduler)
+        if self._captured_conditioning is not None:
+            stamp_capture(out, "text_capture", self._captured_conditioning)
         finalize_output(out)
         return outs
 

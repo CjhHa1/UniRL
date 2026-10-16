@@ -59,7 +59,12 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         )
 
         self.adapter = get_adapter(config.modality)(
-            config, model_config, strategy=strategy, tokenize_fn=self._tokenize_prompt
+            config,
+            model_config,
+            strategy=strategy,
+            tokenize_fn=lambda text, *, task, sys_type: self._backend.tokenize_prompt(
+                text, task=task, sys_type=sys_type
+            ),
         )
         self.packs_groups = self.adapter.packs_groups
 
@@ -69,7 +74,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             ports = VLLMOmniPorts.reserve()
 
         intent = config.server_intent(
-            model_config=model_config,
             ports=ports,
             extra=self.adapter.boot_kwargs(),
         )
@@ -77,58 +81,41 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
         self._weight_sync = WeightSync(
             self._backend,
-            uses_lora=bool(getattr(model_config, "use_lora", False)),
             lora_copy_transport=self.adapter.lora_copy_transport,
         )
-
-    def _tokenize_prompt(self, text: str, *, task: str, sys_type: str) -> List[int]:
-        """Late-bound bridge handed to the adapter as ``tokenize_fn``."""
-        return self._backend.tokenize_prompt(text, task=task, sys_type=sys_type)
 
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, sample: Sample) -> Sample:
         """Generate one whole DP shard synchronously."""
-        return self._generate_locked(sample)
-
-    def _generate_locked(self, sample: Sample) -> Sample:
         with self._generate_lock:
             if self._shutdown_requested:
                 raise RuntimeError("VLLMOmniRolloutEngine.generate called after shutdown")
-            return self._stamp_output_version(self._generate_core(sample))
-
-    def _generate_core(self, sample: Sample) -> Sample:
-        """Synchronous whole-Sample generation: validate, σ-pin, run, decode."""
-        # Defense-in-depth for logical and partially completed lifecycle
-        # transitions: callers that swallow a wake/sleep exception must never
-        # generate with base weights or with only a subset of stages resident.
-        require(
-            not self._is_offloaded and not self._transition_failed,
-            "VLLMOmniRolloutEngine.generate: engine is offloaded or its last lifecycle transition failed "
-            "(wake_up first).",
-        )
-        if not self.adapter.supports_row_canvas:
-            sample.reject_row_canvases(engine=f"VLLMOmniRolloutEngine[{self.cfg.modality}]")
-        self.adapter.validate_request(sample)
-        if self.adapter.needs_sigmas:
-            require(self.schedule_policy is not None, f"{type(self.adapter).__name__} has no sigma schedule policy")
-            self._ensure_sample_sigmas(sample)
-        calls = self.adapter.build_inputs(sample)
-        per_request = self._backend.generate(
-            calls,
-            attach_lora=self._weight_sync.lora_loaded,
-            ar_lora_passthrough=self.adapter.ar_lora_passthrough,
-        )
-        return self.adapter.build_response(sample, per_request)
-
-    def _ensure_sample_sigmas(self, sample: Sample) -> None:
-        """Pin the σ schedule onto the diffusion gen Part's ``DiffusionSamplingParams.sigmas``."""
-        ensure_sample_sigmas(sample, self.schedule_policy)
+            # Defense-in-depth for logical and partially completed lifecycle
+            # transitions: callers that swallow a wake/sleep exception must never
+            # generate with base weights or with only a subset of stages resident.
+            require(
+                not self._is_offloaded and not self._transition_failed,
+                "VLLMOmniRolloutEngine.generate: engine is offloaded or its last lifecycle transition failed "
+                "(wake_up first).",
+            )
+            if not self.adapter.supports_row_canvas:
+                sample.reject_row_canvases(engine=f"VLLMOmniRolloutEngine[{self.cfg.modality}]")
+            self.adapter.validate_request(sample)
+            if self.adapter.needs_sigmas:
+                require(self.schedule_policy is not None, f"{type(self.adapter).__name__} has no sigma schedule policy")
+                ensure_sample_sigmas(sample, self.schedule_policy)
+            calls = self.adapter.build_inputs(sample)
+            per_request = self._backend.generate(
+                calls,
+                attach_lora=self._weight_sync.lora_loaded,
+                ar_lora_passthrough=self.adapter.ar_lora_passthrough,
+            )
+            return self._stamp_output_version(self.adapter.build_response(sample, per_request))
 
     def _mark_consistently_offloaded(self) -> None:
-        """Record a successful all-stage sleep and invalidate worker LoRA state."""
+        """Record a successful all-stage sleep."""
         self._is_offloaded = True
         self._transition_failed = False
-        self._weight_sync.mark_weights_released()
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(self) -> None:
@@ -335,11 +322,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
     def loaded_lora_checksums(self, *, adapter_id: int, names: Optional[List[str]] = None) -> dict:
         return self._weight_sync.loaded_lora_checksums(adapter_id=adapter_id, names=names)
-
-    @property
-    def lora_dirty(self) -> bool:
-        """True when LoRA is in use but the adapter must be (re)pushed."""
-        return self._weight_sync.lora_dirty
 
 
 __all__ = ["VLLMOmniRolloutEngine"]

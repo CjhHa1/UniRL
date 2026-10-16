@@ -245,7 +245,9 @@ def patch_dit_hi3_lora_weights() -> None:
             fail("lora_b is not a 2-D tensor")
 
         lora_layer = self._lora_modules.get(full_module_name)
-        base_layer = getattr(lora_layer, "base_layer", None)
+        if lora_layer is None:
+            fail("module is not registered in _lora_modules")
+        base_layer = lora_layer.base_layer
         output_sizes = [int(size) for size in (getattr(base_layer, "output_sizes", ()) or ())]
         if not output_sizes or int(lora_b.shape[0]) != sum(output_sizes):
             fail("base layer exposes no output_sizes matching lora_b's rows")
@@ -254,7 +256,7 @@ def patch_dit_hi3_lora_weights() -> None:
         if slices is None:
             fail("GQA layout is unrecognised (check head_size/total_num_kv_heads)")
 
-        scaling = float(weights.scaling)
+        scaling = weights.scaling
         if scaling != 1.0:
             slices = [part * scaling for part in slices]
 

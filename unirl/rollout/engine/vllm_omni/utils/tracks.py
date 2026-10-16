@@ -67,22 +67,6 @@ def pick_stage_output(
 _VIDEO_PROCESSOR = None
 
 
-def _video_frames_from_captures(diff_out: Any) -> List[Any]:
-    """Recover a video sample's PIL frames from the captured ``rl_decoded_video`` tensor."""
-    vid = read_captures(diff_out).get("rl_decoded_video")
-    if vid is None or not torch.is_tensor(vid):
-        return []
-    global _VIDEO_PROCESSOR
-    if _VIDEO_PROCESSOR is None:
-        from diffusers.video_processor import VideoProcessor
-
-        _VIDEO_PROCESSOR = VideoProcessor(vae_scale_factor=16)
-    frames = _VIDEO_PROCESSOR.postprocess_video(vid, output_type="pil")
-    if frames and isinstance(frames[0], list):
-        return frames[0]
-    return list(frames)
-
-
 def collect_dit_outputs(
     per_request: Sequence[Sequence[Any]],
     *,
@@ -91,6 +75,7 @@ def collect_dit_outputs(
     modality: str,
 ) -> Tuple[List[Any], List[List[Any]], List[Any]]:
     """Pick each request's DiT output + its PIL payload(s)."""
+    global _VIDEO_PROCESSOR
     diff_outputs: List[Any] = []
     pil_frames_per_prompt: List[List[Any]] = []
     pil_images: List[Any] = []
@@ -104,7 +89,14 @@ def collect_dit_outputs(
         diff_outputs.append(diff_out)
         imgs = diff_out.images
         if not imgs and final_output_type == "video":
-            imgs = _video_frames_from_captures(diff_out)
+            vid = read_captures(diff_out).get("rl_decoded_video")
+            if torch.is_tensor(vid):
+                if _VIDEO_PROCESSOR is None:
+                    from diffusers.video_processor import VideoProcessor
+
+                    _VIDEO_PROCESSOR = VideoProcessor(vae_scale_factor=16)
+                frames = _VIDEO_PROCESSOR.postprocess_video(vid, output_type="pil")
+                imgs = frames[0] if frames and isinstance(frames[0], list) else list(frames)
         pil_frames_per_prompt.append(list(imgs))
         pil_images.extend(imgs)
     if not pil_images:
@@ -192,7 +184,7 @@ def decoded_text_from_ar(per_request: Sequence[Sequence[Any]]) -> Texts:
         ar = pick_stage_output(outputs, final_output_type="text", stage_id=0)
         text_str = ""
         if ar is not None and ar.outputs:
-            text_str = str(ar.outputs[0].text)
+            text_str = ar.outputs[0].text
         texts.append(Text(text=text_str))
     return Texts.from_list(texts)
 
@@ -205,17 +197,11 @@ def _flatten_logprobs(logprobs: Any, fallback_len: int) -> Optional[torch.Tensor
         return None
     values: List[float] = []
     for step in logprobs:
-        if step is None:
-            values.append(0.0)
-            continue
-        if hasattr(step, "logprob"):
-            values.append(float(step.logprob))
-            continue
         if isinstance(step, dict) and step:
             entry = next(iter(step.values()))
-            values.append(float(getattr(entry, "logprob", entry)))
-            continue
-        values.append(0.0)
+            values.append(float(entry.logprob))
+        else:
+            values.append(0.0)
     if not values:
         return None
     if len(values) != fallback_len and fallback_len > 0:
@@ -224,17 +210,6 @@ def _flatten_logprobs(logprobs: Any, fallback_len: int) -> Optional[torch.Tensor
         else:
             values.extend([0.0] * (fallback_len - len(values)))
     return torch.tensor(values, dtype=torch.float32)
-
-
-def _extract_completion(out: Any) -> Tuple[List[int], Optional[torch.Tensor]]:
-    """Pull ``(token_ids, per_token_logp)`` out of a Stage-0 result."""
-    completions = out.outputs
-    if not completions:
-        return [], None
-    completion = completions[0]
-    tokens = list(completion.token_ids)
-    logp = _flatten_logprobs(completion.logprobs, fallback_len=len(tokens))
-    return tokens, logp
 
 
 def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
@@ -251,11 +226,13 @@ def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
             if out.stage_id == 0:
                 stage0 = out
                 break
-        if stage0 is None:
+        if stage0 is None or not stage0.outputs:
             rows_tokens.append([])
             rows_logps.append(None)
             continue
-        toks, logp = _extract_completion(stage0)
+        completion = stage0.outputs[0]
+        toks = list(completion.token_ids)
+        logp = _flatten_logprobs(completion.logprobs, fallback_len=len(toks))
         if toks:
             found_any_stage0 = True
         rows_tokens.append(toks)

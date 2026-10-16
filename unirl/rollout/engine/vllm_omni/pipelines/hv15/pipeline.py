@@ -80,29 +80,6 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         self.encode_prompt = tapped  # type: ignore[assignment]
         self._conditioning_tap_installed = True
 
-    def _arm_sde(self, req: OmniDiffusionRequest) -> None:
-        """This request's SDE strength + sparse step gate."""
-        eta = float(req.sampling_params.eta)
-        extra = req.sampling_params.extra_args
-        denoise_seed_keys = slice_request_denoise_seed_keys(
-            req,
-            caller="RLHunyuanVideo15Pipeline._arm_sde",
-        )
-        self.scheduler.arm(
-            eta=eta,
-            sde_indices=extra.get("sde_indices"),
-            denoise_seed_keys=denoise_seed_keys,
-            denoise_base_seed=int(extra.get("denoise_base_seed", 0)),
-        )
-
-    def _arm_initial_noise(self, req: OmniDiffusionRequest) -> None:
-        """This request's driver-authored x_T (batch slice or recipe row)."""
-        self._pending_initial_noise = resolve_request_noise(req, caller="RLHunyuanVideo15Pipeline._arm_initial_noise")
-
-    def _arm_conditioning_tap(self) -> None:
-        """Fresh capture buffer so the tap records THIS request's first encode."""
-        self._captured_conditioning = None
-
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
         """Initial-noise injection point: bypass upstream RNG when the driver supplied an x_T."""
         upstream = super().prepare_latents
@@ -133,23 +110,21 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         finally:
             del sched.set_timesteps
 
-    def _harvest_trajectory(self, out: DiffusionOutput) -> None:
-        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            drain_trajectory_into(out, self.scheduler)
-
-    def _harvest_conditioning(self, out: DiffusionOutput) -> None:
-        if self._captured_conditioning is not None:
-            stamp_capture(out, "text_capture", self._captured_conditioning)
-
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
         """Single-request batch in, single output out — see ``single_request``."""
         one = single_request(req, caller="RLHunyuanVideo15Pipeline.forward")
         self._install_sde_scheduler()
         self._install_conditioning_tap()
 
-        self._arm_sde(one)
-        self._arm_initial_noise(one)
-        self._arm_conditioning_tap()
+        extra = one.sampling_params.extra_args
+        self.scheduler.arm(
+            eta=one.sampling_params.eta,
+            sde_indices=extra.get("sde_indices"),
+            denoise_seed_keys=slice_request_denoise_seed_keys(one, caller="RLHunyuanVideo15Pipeline.forward"),
+            denoise_base_seed=extra.get("denoise_base_seed", 0),
+        )
+        self._pending_initial_noise = resolve_request_noise(one, caller="RLHunyuanVideo15Pipeline.forward")
+        self._captured_conditioning = None
 
         with self._sigma_override(one):
             out = super().forward(req, **kwargs)
@@ -158,8 +133,10 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         if decoded is not None:
             stamp_capture(out, "rl_decoded_video", detach_cpu(decoded))
 
-        self._harvest_trajectory(out)
-        self._harvest_conditioning(out)
+        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
+            drain_trajectory_into(out, self.scheduler)
+        if self._captured_conditioning is not None:
+            stamp_capture(out, "text_capture", self._captured_conditioning)
         return out
 
 
