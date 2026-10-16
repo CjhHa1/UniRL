@@ -95,8 +95,7 @@ class NcclBroadcastReceiveMixin:
                 f"{type(self).__name__}.update_weights_from_distributed: no "
                 f"process group {group_name!r}; call init_weights_update_group first."
             )
-        device = self.device
-        if device is None:
+        if self.device is None:
             raise RuntimeError(
                 f"{type(self).__name__}.update_weights_from_distributed: worker has no `device` attribute."
             )
@@ -106,7 +105,7 @@ class NcclBroadcastReceiveMixin:
         bucket: list[tuple[str, torch.Tensor]] = []
         for name, dtype_name, shape in zip(names, dtypes, shapes):
             dt = _resolve_dtype(dtype_name)
-            tensor = torch.empty(tuple(shape), dtype=dt, device=device)
+            tensor = torch.empty(tuple(shape), dtype=dt, device=self.device)
             dist.broadcast(tensor, src=0, group=group)
             bucket.append((name, tensor))
 

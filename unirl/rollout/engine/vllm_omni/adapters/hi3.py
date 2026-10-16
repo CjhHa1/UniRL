@@ -242,17 +242,15 @@ class Hi3InputAdapter:
     def build_sampling(self, sample: Sample) -> List[StageSampling]:
         """AR always; a DiT stage rides along iff ``"dit" in self.stages``."""
         ar_part, diff_part = self._stage_parts(sample)
-        ar_params = ar_part.sampling_params
-        sampling = [self._ar_sampling(ar_params)]
+        sampling = [self._ar_sampling(ar_part.sampling_params)]
         if "dit" in self.stages:
-            assert diff_part is not None
             sampling.append(self._dit_sampling(diff_part, diff_part.sampling_params))
         return sampling
 
     def build(self, sample: Sample) -> List[GenerateCall]:
         prompts = self.build_prompts(sample)
         ar_part, diff_part = self._stage_parts(sample)
-        if "dit" not in self.stages or diff_part is None:
+        if "dit" not in self.stages:
             return [GenerateCall(prompts=prompts, sampling=self.build_sampling(sample))]
 
         diff_params = diff_part.sampling_params
@@ -628,9 +626,8 @@ class Hi3DitRecaptionAdapter(ModelAdapter):
             kwargs = dict(base_kwargs)
             kwargs["seed"] = seed_from_sample_id(sample_id)
             extra_args = dict(base_extra)
-            gid = recipe_gids[idx] if idx < len(recipe_gids) else None
-            if gid is not None and extra_args.get("init_noise_group_ids"):
-                extra_args["init_noise_group_ids"] = [gid]
+            if "init_noise_group_ids" in extra_args:
+                extra_args["init_noise_group_ids"] = [recipe_gids[idx]]
             if extra_args:
                 kwargs["extra_args"] = extra_args
             calls.append(

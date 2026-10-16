@@ -232,18 +232,12 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
     def build_inputs(self, sample: Sample) -> List[GenerateCall]:
         frontier = sample.frontier_gen_part(ARSamplingParams)
         ar = frontier.sampling_params
-        assert isinstance(ar, ARSamplingParams)
-
         chat_overrides = dict(sample.parts[0].control.get("chat") or {})
         system_instruction = chat_overrides.get("system_instruction", self.system_instruction)
         template_overrides = dict(chat_overrides.get("template_kwargs") or {})
         conversations = build_omni_messages(
             sample.turns(),
             system_instruction,
-        )
-        require(
-            bool(conversations),
-            "Qwen3OmniThinkerAdapter: Sample carries no text or prompt-media conditioning turns.",
         )
         require(
             len(conversations) == len(frontier.sample_ids),
@@ -382,11 +376,6 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
         decoded = decoded_text_from_ar(per_request)
 
         encs = self._last_encodings
-        if not encs:
-            raise RuntimeError(
-                "Qwen3OmniThinkerAdapter.build_response: encoding cache is empty — "
-                "``build_inputs`` must run before ``build_response``."
-            )
         require(
             len(encs) == len(frontier.sample_ids),
             f"Qwen3OmniThinkerAdapter: encoding count {len(encs)} != frontier id count {len(frontier.sample_ids)}",

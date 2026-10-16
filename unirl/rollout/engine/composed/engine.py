@@ -113,10 +113,6 @@ class ComposedRolloutEngine(BaseRolloutEngine):
                 raise RuntimeError("ComposedRolloutEngine.generate called after shutdown")
             sample.reject_row_canvases(engine="ComposedRolloutEngine")
             require(
-                bool(sample.parts) and sample.parts[0].is_root,
-                "ComposedRolloutEngine.generate: requires a root input Part at parts[0]",
-            )
-            require(
                 len(sample.parts) == 3,
                 "ComposedRolloutEngine.generate: requires exactly "
                 f"[input, ar_shell, diffusion_shell]; got {len(sample.parts)} Parts.",
@@ -139,16 +135,15 @@ class ComposedRolloutEngine(BaseRolloutEngine):
                 "ComposedRolloutEngine.generate: input Part.primitives['text'] must be Texts",
             )
             require(
-                len(ar_shell.sample_ids) % P == 0,
-                f"ComposedRolloutEngine: ar shell {len(ar_shell.sample_ids)} not a multiple of P={P}",
+                len(ar_shell.sample_ids) > 0 and len(ar_shell.sample_ids) % P == 0,
+                f"ComposedRolloutEngine: ar shell {len(ar_shell.sample_ids)} must be a positive multiple of P={P}",
             )
             N = len(ar_shell.sample_ids) // P
             require(
-                N >= 1 and len(diffusion_shell.sample_ids) % len(ar_shell.sample_ids) == 0,
-                f"ComposedRolloutEngine: diffusion shell {len(diffusion_shell.sample_ids)} not a multiple of P*N={P * N}",
+                len(diffusion_shell.sample_ids) > 0 and len(diffusion_shell.sample_ids) % len(ar_shell.sample_ids) == 0,
+                f"ComposedRolloutEngine: diffusion shell {len(diffusion_shell.sample_ids)} must be a positive multiple of P*N={P * N}",
             )
             M = len(diffusion_shell.sample_ids) // len(ar_shell.sample_ids)
-            require(M >= 1, f"ComposedRolloutEngine.generate: diffusion branch M={M} must be >= 1")
 
             self._ar.wake_up()
             self._diffusion.sleep()

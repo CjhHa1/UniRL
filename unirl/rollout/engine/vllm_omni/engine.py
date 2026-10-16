@@ -96,7 +96,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
                 sample.reject_row_canvases(engine=f"VLLMOmniRolloutEngine[{self.cfg.modality}]")
             self.adapter.validate_request(sample)
             if self.adapter.needs_sigmas:
-                require(self.schedule_policy is not None, f"{type(self.adapter).__name__} has no sigma schedule policy")
                 ensure_sample_sigmas(sample, self.schedule_policy)
             calls = self.adapter.build_inputs(sample)
             per_request = self._backend.generate(
