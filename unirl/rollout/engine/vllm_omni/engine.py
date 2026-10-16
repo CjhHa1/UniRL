@@ -218,7 +218,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
                 return
             with self._generate_lock:
                 self._shutdown_requested = True
-            with self._generate_lock:
                 self._backend.shutdown()
             self._shutdown_complete = True
 

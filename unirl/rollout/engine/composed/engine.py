@@ -109,7 +109,6 @@ class ComposedRolloutEngine(BaseRolloutEngine):
                 return
             with self._generate_lock:
                 self._shutdown_requested = True
-            with self._generate_lock:
                 for name, child in self._child_by_name.items():
                     try:
                         child.shutdown()

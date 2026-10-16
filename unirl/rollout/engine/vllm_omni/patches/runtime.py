@@ -329,9 +329,7 @@ def patch_ar_merged_lora_fused_tensor() -> None:
         _cpl.MergedColumnParallelLinearWithLoRA,
         _cpl.MergedQKVParallelLinearWithLoRA,
     ):
-        if "set_lora" not in cls.__dict__:
-            continue
-        orig = cls.__dict__["set_lora"]
+        orig = cls.set_lora
         if getattr(orig, "_unirl_fused_merged_tolerant", False):
             continue
         cls.set_lora = _make(orig)

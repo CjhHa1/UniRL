@@ -14,6 +14,7 @@ def install() -> None:
     from vllm.model_executor import utils as vllm_mu
 
     original = vllm_mu.get_moe_expert_mapping
+    _ = vllm_lora_utils.get_moe_expert_mapping
     if getattr(original, "_unirl_hi3_unwrap", False):
         _INSTALLED = True
         return
