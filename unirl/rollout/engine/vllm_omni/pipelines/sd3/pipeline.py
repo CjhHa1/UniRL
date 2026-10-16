@@ -32,15 +32,15 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
         self.scheduler = FlowMatchSDEDiscreteScheduler.from_config(self.scheduler.config, eta=0.0)
-        self._captured_conditioning: Optional[Dict[str, Any]] = None
-        self._pending_initial_noise: Optional[torch.Tensor] = None
+        self.captured_conditioning: Optional[Dict[str, Any]] = None
+        self.pending_initial_noise: Optional[torch.Tensor] = None
 
     def encode_prompt(self, *args: Any, **kw: Any) -> Any:  # type: ignore[override]
         """Capture joint ``[B, L, D]`` and pooled ``[B, D_pooled]`` text conditioning."""
         result = super().encode_prompt(*args, **kw)
-        if self._captured_conditioning is None:
+        if self.captured_conditioning is None:
             prompt_embeds, pooled_prompt_embeds = result
-            self._captured_conditioning = {
+            self.captured_conditioning = {
                 "prompt_embeds": detach_cpu(prompt_embeds),
                 "pooled_prompt_embeds": detach_cpu(pooled_prompt_embeds),
             }
@@ -92,10 +92,10 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
         """Initial-noise injection point: bypass upstream RNG when the driver supplied an x_T."""
         upstream = super().prepare_latents
-        noise = self._pending_initial_noise
+        noise = self.pending_initial_noise
         if noise is not None:
             args, kwargs = inject_latents(upstream, args, kwargs, noise)
-            self._pending_initial_noise = None
+            self.pending_initial_noise = None
         return upstream(*args, **kwargs)
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> list[DiffusionOutput]:
@@ -103,15 +103,15 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
         one = single_request(req, caller="RLStableDiffusion3Pipeline.forward")
         extra = one.sampling_params.extra_args
         self.scheduler.arm(eta=one.sampling_params.eta, sde_indices=extra.get("sde_indices"))
-        self._pending_initial_noise = resolve_request_noise(one, caller="RLStableDiffusion3Pipeline.forward")
-        self._captured_conditioning = None
+        self.pending_initial_noise = resolve_request_noise(one, caller="RLStableDiffusion3Pipeline.forward")
+        self.captured_conditioning = None
 
         outs = super().forward(req, **kwargs)
 
         out = outs[0]
         drain_trajectory_into(out, self.scheduler)
-        if self._captured_conditioning is not None:
-            stamp_capture(out, "text_capture", self._captured_conditioning)
+        if self.captured_conditioning is not None:
+            stamp_capture(out, "text_capture", self.captured_conditioning)
         finalize_output(out)
         return outs
 

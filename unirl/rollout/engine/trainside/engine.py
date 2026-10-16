@@ -29,7 +29,7 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
     ) -> None:
         self.pipeline = pipeline
         stages = [getattr(pipeline, a) for a in stage_attrs]
-        self._models = [s.trainable_module() for s in stages]
+        self.models = [s.trainable_module() for s in stages]
         if forward_batch_size is not None and forward_batch_size < 1:
             raise ValueError(
                 f"TrainsideRolloutEngine.forward_batch_size must be >= 1 when set; got {forward_batch_size!r}"
@@ -46,14 +46,14 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
         else:
             self.schedule_policy = None
 
-        self._lock = threading.Lock()
-        self._closed = False
+        self.lock = threading.Lock()
+        self.closed = False
 
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, sample: Sample) -> Sample:
         """Generate one whole DP shard synchronously."""
-        with self._lock:
-            if self._closed:
+        with self.lock:
+            if self.closed:
                 raise RuntimeError("TrainsideRolloutEngine.generate called after shutdown")
             sample.reject_row_canvases(engine="TrainsideRolloutEngine")
             if self.forward_batch_size is not None:
@@ -70,8 +70,8 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                     )
             if self.schedule_policy is not None:
                 ensure_sample_sigmas(sample, self.schedule_policy)
-            prev_modes = [m.training for m in self._models]
-            for m in self._models:
+            prev_modes = [m.training for m in self.models]
+            for m in self.models:
                 m.eval()
             try:
                 with torch.no_grad():
@@ -89,16 +89,16 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                             gen_chunks.append(chunk.parts[-1])
                         out = Sample(parts=[*input_parts, Part.concat(gen_chunks)])
             finally:
-                for m, mode in zip(self._models, prev_modes):
+                for m, mode in zip(self.models, prev_modes):
                     m.train(mode)
             return self._stamp_output_version(out)
 
     def shutdown(self) -> None:
-        with self._lock:
-            self._closed = True
+        with self.lock:
+            self.closed = True
 
     def health_check(self) -> bool:
-        return self.pipeline is not None and all(m is not None for m in self._models)
+        return self.pipeline is not None and all(m is not None for m in self.models)
 
 
 __all__ = ["TrainsideRolloutEngine"]

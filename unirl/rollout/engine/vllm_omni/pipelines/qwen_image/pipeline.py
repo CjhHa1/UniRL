@@ -33,13 +33,13 @@ class RLQwenImagePipeline(QwenImagePipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
         self.scheduler = FlowMatchSDEDiscreteScheduler.from_config(self.scheduler.config, eta=0.0)
-        self._captured_conditioning: Optional[Dict[str, Any]] = None
-        self._pending_initial_noise: Optional[torch.Tensor] = None
+        self.captured_conditioning: Optional[Dict[str, Any]] = None
+        self.pending_initial_noise: Optional[torch.Tensor] = None
 
     def encode_prompt(self, *args: Any, **kw: Any) -> Any:  # type: ignore[override]
         """Capture positive and optional negative text conditioning."""
         result = super().encode_prompt(*args, **kw)
-        cap = self._captured_conditioning
+        cap = self.captured_conditioning
         if cap is not None:
             prompt_embeds, prompt_embeds_mask = result
             if "prompt_embeds" not in cap:
@@ -53,9 +53,9 @@ class RLQwenImagePipeline(QwenImagePipeline):
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
         """Initial-noise injection: the driver's ``[B, C, H, W]`` x_T is packed to ``[B, S, C*4]``. Consume-once."""
         upstream = super().prepare_latents
-        noise = self._pending_initial_noise
+        noise = self.pending_initial_noise
         if noise is not None:
-            self._pending_initial_noise = None
+            self.pending_initial_noise = None
             if len(args) < 4:
                 raise RuntimeError(
                     "RLQwenImagePipeline.prepare_latents: expected upstream's "
@@ -81,8 +81,8 @@ class RLQwenImagePipeline(QwenImagePipeline):
         one = single_request(req, caller="RLQwenImagePipeline.forward")
         extra = one.sampling_params.extra_args
         self.scheduler.arm(eta=one.sampling_params.eta, sde_indices=extra.get("sde_indices"))
-        self._pending_initial_noise = resolve_request_noise(one, caller="RLQwenImagePipeline.forward")
-        self._captured_conditioning = {}
+        self.pending_initial_noise = resolve_request_noise(one, caller="RLQwenImagePipeline.forward")
+        self.captured_conditioning = {}
         height = one.sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = one.sampling_params.width or self.default_sample_size * self.vae_scale_factor
         height, width = normalize_min_aligned_size(height, width, self.vae_scale_factor * 2)
@@ -102,8 +102,8 @@ class RLQwenImagePipeline(QwenImagePipeline):
             )
             flat = flat.squeeze(2)
             out.trajectory_latents = flat.reshape(b, t1, *flat.shape[1:])
-        if self._captured_conditioning:
-            stamp_capture(out, "text_capture", self._captured_conditioning)
+        if self.captured_conditioning:
+            stamp_capture(out, "text_capture", self.captured_conditioning)
         finalize_output(out)
         return outs
 

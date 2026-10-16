@@ -84,9 +84,9 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
 
         from transformers import AutoProcessor, AutoTokenizer
 
-        self._processor = AutoProcessor.from_pretrained(self.model_path, trust_remote_code=True)
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
-        if self._tokenizer.chat_template is None:
+        self.processor = AutoProcessor.from_pretrained(self.model_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+        if self.tokenizer.chat_template is None:
             import json
             import os
 
@@ -95,17 +95,17 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                 with open(path) as f:
                     data = json.load(f)
                     if data.get("chat_template"):
-                        self._tokenizer.chat_template = data["chat_template"]
-        processor_tokenizer = self._processor.tokenizer
-        if processor_tokenizer.chat_template is None and self._tokenizer.chat_template is not None:
-            processor_tokenizer.chat_template = self._tokenizer.chat_template
+                        self.tokenizer.chat_template = data["chat_template"]
+        processor_tokenizer = self.processor.tokenizer
+        if processor_tokenizer.chat_template is None and self.tokenizer.chat_template is not None:
+            processor_tokenizer.chat_template = self.tokenizer.chat_template
 
-        self._last_encodings: List[Dict[str, Any]] = []
+        self.last_encodings: List[Dict[str, Any]] = []
 
-    def _token_id(self, token: str) -> int:
-        token_id = self._tokenizer.convert_tokens_to_ids(token)
+    def token_id(self, token: str) -> int:
+        token_id = self.tokenizer.convert_tokens_to_ids(token)
         if token_id is None or int(token_id) < 0:
-            encoded = self._tokenizer.encode(token, add_special_tokens=False)
+            encoded = self.tokenizer.encode(token, add_special_tokens=False)
             if len(encoded) != 1:
                 raise ValueError(f"Qwen3OmniThinkerAdapter: cannot resolve token id for {token!r}")
             token_id = encoded[0]
@@ -137,11 +137,11 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
         )
 
         prompts: List[Dict[str, Any]] = []
-        self._last_encodings = []
+        self.last_encodings = []
         for messages in conversations:
             media_bundle = prepare_omni_media(
                 messages,
-                sample_rate=self._processor.feature_extractor.sampling_rate,
+                sample_rate=self.processor.feature_extractor.sampling_rate,
                 video_fps=self.video_fps,
                 video_max_frames=self.video_max_frames,
                 use_audio_in_video=self.use_audio_in_video,
@@ -159,11 +159,11 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
 
             if has_mm:
                 template_kwargs.update(add_generation_prompt=True, tokenize=False)
-                prompt_text = self._processor.apply_chat_template(prepared, **template_kwargs)
+                prompt_text = self.processor.apply_chat_template(prepared, **template_kwargs)
                 processor_kwargs: Dict[str, Any] = {"text": [prompt_text], "truncation": True, "return_tensors": "pt"}
                 processor_kwargs.update(
                     omni_processor_media_kwargs(
-                        self._processor,
+                        self.processor,
                         has_image=image is not None,
                         has_video=video_frames is not None,
                         image_max_pixels=self.image_max_pixels,
@@ -179,7 +179,7 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                     processor_kwargs["audio"] = [audio_wave]
                 if audio_in_video:
                     processor_kwargs["use_audio_in_video"] = True
-                enc = self._processor(**processor_kwargs)
+                enc = self.processor(**processor_kwargs)
             else:
                 template_kwargs.update(
                     add_generation_prompt=True,
@@ -187,7 +187,7 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                     return_dict=True,
                     return_tensors="pt",
                 )
-                enc = self._processor.apply_chat_template(prepared, **template_kwargs)
+                enc = self.processor.apply_chat_template(prepared, **template_kwargs)
 
             enc["_unirl_audio_in_video"] = audio_in_video
             expanded_ids = enc["input_ids"].squeeze(0).tolist()
@@ -203,13 +203,13 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                 enc["attention_mask"] = enc["attention_mask"][..., -self.max_prompt_length :]
                 expanded_ids = enc["input_ids"].squeeze(0).tolist()
             if has_mm:
-                audio_token_id = self._token_id("<|audio_pad|>")
-                image_token_id = self._token_id("<|image_pad|>")
-                video_token_id = self._token_id("<|video_pad|>")
-                vision_bos_token_id = self._token_id("<|vision_start|>")
-                vision_eos_token_id = self._token_id("<|vision_end|>")
-                audio_bos_token_id = self._token_id("<|audio_start|>")
-                audio_eos_token_id = self._token_id("<|audio_end|>")
+                audio_token_id = self.token_id("<|audio_pad|>")
+                image_token_id = self.token_id("<|image_pad|>")
+                video_token_id = self.token_id("<|video_pad|>")
+                vision_bos_token_id = self.token_id("<|vision_start|>")
+                vision_eos_token_id = self.token_id("<|vision_end|>")
+                audio_bos_token_id = self.token_id("<|audio_start|>")
+                audio_eos_token_id = self.token_id("<|audio_end|>")
                 rollout_ids = list(expanded_ids)
                 if audio_in_video:
                     while True:
@@ -264,7 +264,7 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                 mm_processor_kwargs: Dict[str, Any] = {"truncation": True}
                 mm_processor_kwargs.update(
                     omni_processor_media_kwargs(
-                        self._processor,
+                        self.processor,
                         has_image=image is not None,
                         has_video=video_frames is not None,
                         image_max_pixels=self.image_max_pixels,
@@ -274,7 +274,7 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                 )
                 if audio_in_video:
                     mm_processor_kwargs["use_audio_in_video"] = True
-                    temporal_patch_size = self._processor.video_processor.temporal_patch_size
+                    temporal_patch_size = self.processor.video_processor.temporal_patch_size
                     mm_processor_kwargs["second_per_grid_ts"] = [temporal_patch_size / effective_fps]
                 entry["mm_processor_kwargs"] = mm_processor_kwargs
                 logger.debug(
@@ -286,7 +286,7 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
                     mm_processor_kwargs,
                 )
             prompts.append(entry)
-            self._last_encodings.append(enc)
+            self.last_encodings.append(enc)
 
         top_k = ar.top_k if ar.top_k > 0 else -1  # vLLM: -1 disables top_k
 
@@ -338,15 +338,15 @@ class Qwen3OmniThinkerAdapter(ModelAdapter):
             segment = TextSegment.pack(tokens=empty, log_probs=empty_logp)
         decoded = decoded_text_from_ar(per_request)
 
-        encs = self._last_encodings
+        encs = self.last_encodings
         require(
             len(encs) == len(frontier.sample_ids),
             f"Qwen3OmniThinkerAdapter: encoding count {len(encs)} != frontier id count {len(frontier.sample_ids)}",
         )
 
-        pad_id = self._tokenizer.pad_token_id
+        pad_id = self.tokenizer.pad_token_id
         if pad_id is None:
-            eos_id = self._tokenizer.eos_token_id
+            eos_id = self.tokenizer.eos_token_id
             pad_id = 0 if eos_id is None else eos_id
 
         raw_ids = [e["input_ids"].squeeze(0) for e in encs]

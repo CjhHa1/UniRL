@@ -32,9 +32,9 @@ class VLLMOmniBackend:
         *,
         tokenizer: Optional[Any],
     ) -> None:
-        self._omni: Optional[Any] = omni
-        self._rt = runtime
-        self._tokenizer = tokenizer
+        self.omni: Optional[Any] = omni
+        self.rt = runtime
+        self.tokenizer = tokenizer
 
     @classmethod
     def boot(cls, intent: Dict[str, Any]) -> "VLLMOmniBackend":
@@ -177,10 +177,10 @@ class VLLMOmniBackend:
             terminate_descendants(os.getpid(), name_prefix=_ENGINE_PROC_PREFIX)
             raise
 
-    def _require_omni(self) -> Any:
-        if self._omni is None:
+    def require_omni(self) -> Any:
+        if self.omni is None:
             raise RuntimeError("VLLMOmniBackend: engine not initialized (shut down?)")
-        return self._omni
+        return self.omni
 
     def generate(
         self,
@@ -190,7 +190,7 @@ class VLLMOmniBackend:
         ar_lora_passthrough: bool = False,
     ) -> List[List[OmniRawResult]]:
         """Run each call through ``Omni.generate`` and group per request."""
-        omni = self._require_omni()
+        omni = self.require_omni()
         lora_req = None
         if attach_lora:
             from unirl.distributed.weight_sync.transfer.ipc_dispatch import (
@@ -199,7 +199,7 @@ class VLLMOmniBackend:
                 UNIRL_LORA_PATH,
             )
 
-            lora_req = self._rt["OmniLoRARequest"](
+            lora_req = self.rt["OmniLoRARequest"](
                 lora_name=UNIRL_LORA_NAME,
                 lora_int_id=UNIRL_LORA_INT_ID,
                 lora_path=UNIRL_LORA_PATH,
@@ -210,9 +210,9 @@ class VLLMOmniBackend:
             sp_list = []
             for sampling in call.sampling:
                 if sampling.kind == STAGE_KIND_AR:
-                    sp_list.append(self._rt["VLLMSamplingParams"](**sampling.kwargs))
+                    sp_list.append(self.rt["VLLMSamplingParams"](**sampling.kwargs))
                 else:
-                    sp = self._rt["OmniDiffusionSamplingParams"](**sampling.kwargs)
+                    sp = self.rt["OmniDiffusionSamplingParams"](**sampling.kwargs)
                     if lora_req is not None:
                         sp.lora_request = lora_req
                         sp.lora_scale = 1.0
@@ -243,7 +243,7 @@ class VLLMOmniBackend:
 
     def tokenize_prompt(self, text: str, *, task: str, sys_type: str) -> List[int]:
         """HI3 prompt tokens via vllm-omni's ``build_prompt_tokens``."""
-        if self._tokenizer is None:
+        if self.tokenizer is None:
             raise RuntimeError(
                 "VLLMOmniBackend.tokenize_prompt: no driver tokenizer loaded "
                 "(boot intent did not set needs_driver_tokenizer)."
@@ -253,14 +253,14 @@ class VLLMOmniBackend:
         )
 
         # vLLM-Omni returns a PromptTokensResult here, not a bare id list.
-        return list(build_prompt_tokens(text, self._tokenizer, task=task, sys_type=sys_type).token_ids)
+        return list(build_prompt_tokens(text, self.tokenizer, task=task, sys_type=sys_type).token_ids)
 
     def num_stages(self) -> int:
-        return int(self._require_omni().engine.num_stages)
+        return int(self.require_omni().engine.num_stages)
 
     def tp_per_stage(self) -> Dict[int, int]:
         tp_map: Dict[int, int] = {}
-        for entry in self._require_omni().engine.stage_configs:
+        for entry in self.require_omni().engine.stage_configs:
             engine_args = entry.engine_args
             tp = engine_args.get("tensor_parallel_size")
             if tp is None:
@@ -270,7 +270,7 @@ class VLLMOmniBackend:
             tp_map[int(entry.stage_id)] = int(tp) if tp is not None else 1
         return tp_map
 
-    def _collective_rpc(
+    def collective_rpc(
         self,
         stage_id: int,
         method: str,
@@ -279,7 +279,7 @@ class VLLMOmniBackend:
         kwargs: Optional[dict] = None,
         allow_false: bool = False,
     ) -> List[Any]:
-        results = self._require_omni().engine.collective_rpc(
+        results = self.require_omni().engine.collective_rpc(
             method=method,
             args=args,
             kwargs=kwargs,
@@ -310,7 +310,7 @@ class VLLMOmniBackend:
         return results
 
     @staticmethod
-    def _require_ack_success(action: str, stage_id: int, task_id: str, acks: object) -> None:
+    def require_ack_success(action: str, stage_id: int, task_id: str, acks: object) -> None:
         # Worker handlers catch their own exceptions and answer
         # ``OmniACK(status="ERROR")`` instead of raising, so a discarded return
         # value turns a failed sleep/wake into a silent partial transition — the
@@ -376,18 +376,18 @@ class VLLMOmniBackend:
         """Sleep AR stages through EngineCore and diffusion stages through worker RPC."""
         import uuid
 
-        omni = self._require_omni()
+        omni = self.require_omni()
         for sid in range(self.num_stages()):
             if omni.engine.get_stage_metadata(sid).stage_type != "diffusion":
-                self._collective_rpc(sid, "sleep", args=(1, "abort"))
+                self.collective_rpc(sid, "sleep", args=(1, "abort"))
                 continue
             task_id = str(uuid.uuid4())
             acks = omni.engine.collective_rpc(
                 method="handle_sleep_task",
-                args=(self._rt["OmniSleepTask"](level=1, task_id=task_id),),
+                args=(self.rt["OmniSleepTask"](level=1, task_id=task_id),),
                 stage_ids=[sid],
             )
-            self._require_ack_success("sleep", sid, task_id, acks)
+            self.require_ack_success("sleep", sid, task_id, acks)
 
     def wake_task(self) -> None:
         """Wake AR stages through EngineCore and diffusion stages through worker RPC."""
@@ -395,24 +395,24 @@ class VLLMOmniBackend:
 
         import torch
 
-        omni = self._require_omni()
+        omni = self.require_omni()
         for sid in range(self.num_stages()):
             if omni.engine.get_stage_metadata(sid).stage_type != "diffusion":
                 # ``None`` wakes every tag, including UniRL's MoE workspace tag.
-                self._collective_rpc(sid, "wake_up", kwargs={"tags": None})
+                self.collective_rpc(sid, "wake_up", kwargs={"tags": None})
                 continue
             task_id = str(uuid.uuid4())
             acks = omni.engine.collective_rpc(
                 method="handle_wake_task",
-                args=(self._rt["OmniWakeTask"](tags=None, task_id=task_id),),
+                args=(self.rt["OmniWakeTask"](tags=None, task_id=task_id),),
                 stage_ids=[sid],
             )
-            self._require_ack_success("wake", sid, task_id, acks)
+            self.require_ack_success("wake", sid, task_id, acks)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
     def ping(self) -> bool:
-        omni = self._omni
+        omni = self.omni
         if omni is None:
             return False
         try:
@@ -422,11 +422,11 @@ class VLLMOmniBackend:
             return False
 
     def shutdown(self) -> None:
-        if self._omni is not None:
+        if self.omni is not None:
             try:
-                self._omni.close()
+                self.omni.close()
             finally:
-                self._omni = None
+                self.omni = None
 
         reaped = terminate_descendants(os.getpid(), name_prefix=_ENGINE_PROC_PREFIX)
         if reaped:
@@ -448,7 +448,7 @@ class VLLMOmniBackend:
             "replica_rank": replica_rank,
         }
         for sid in range(self.num_stages()):
-            self._collective_rpc(
+            self.collective_rpc(
                 sid,
                 "update_weights_from_ipc",
                 kwargs={**kwargs, "stage_id": sid},
@@ -473,7 +473,7 @@ class VLLMOmniBackend:
             "backend": backend,
         }
         for sid in range(self.num_stages()):
-            self._collective_rpc(
+            self.collective_rpc(
                 sid,
                 "init_weights_update_group",
                 kwargs=kwargs,
@@ -498,17 +498,17 @@ class VLLMOmniBackend:
             "flush_cache": flush_cache,
         }
         for sid in range(self.num_stages()):
-            self._collective_rpc(
+            self.collective_rpc(
                 sid,
                 "update_weights_from_distributed",
                 kwargs=kwargs,
             )
 
     def destroy_weights_group(self, *, group_name: str) -> None:
-        if self._omni is None:
+        if self.omni is None:
             return
         for sid in range(self.num_stages()):
-            self._collective_rpc(
+            self.collective_rpc(
                 sid,
                 "destroy_weights_update_group",
                 kwargs={"group_name": group_name},
@@ -530,7 +530,7 @@ class VLLMOmniBackend:
             "flush_cache": flush_cache,
         }
         for sid in range(self.num_stages()):
-            self._collective_rpc(
+            self.collective_rpc(
                 sid,
                 "update_weights_from_tensor",
                 kwargs=kwargs,
@@ -557,10 +557,10 @@ class VLLMOmniBackend:
         peft_dict = {} if peft_config is None else dict(peft_config)
 
         for sid in range(self.num_stages()):
-            self._collective_rpc(sid, "remove_lora", args=(UNIRL_LORA_INT_ID,), allow_false=True)
+            self.collective_rpc(sid, "remove_lora", args=(UNIRL_LORA_INT_ID,), allow_false=True)
             cloned = {name: t.detach().clone() for name, t in lora_tensors.items()}
             serialized = MultiprocessingSerializer.serialize(cloned, output_str=True)
-            self._collective_rpc(
+            self.collective_rpc(
                 sid,
                 "set_lora_from_tensor_dict",
                 args=(
@@ -600,8 +600,8 @@ class VLLMOmniBackend:
         serialized = base64.b64encode(buf.getvalue()).decode("ascii")
 
         for sid in range(self.num_stages()):
-            self._collective_rpc(sid, "remove_lora", args=(UNIRL_LORA_INT_ID,), allow_false=True)
-            self._collective_rpc(
+            self.collective_rpc(sid, "remove_lora", args=(UNIRL_LORA_INT_ID,), allow_false=True)
+            self.collective_rpc(
                 sid,
                 "set_lora_from_tensor_dict_copy",
                 args=(
@@ -617,7 +617,7 @@ class VLLMOmniBackend:
         """Fan ``_unirl_loaded_param_checksums`` across stages and ranks."""
         out: dict = {}
         for sid in range(self.num_stages()):
-            results = self._collective_rpc(
+            results = self.collective_rpc(
                 sid,
                 "_unirl_loaded_param_checksums",
                 args=(list(names),),
@@ -629,7 +629,7 @@ class VLLMOmniBackend:
         """Fan ``_unirl_loaded_lora_checksums`` across stages and ranks."""
         out: dict = {}
         for sid in range(self.num_stages()):
-            results = self._collective_rpc(
+            results = self.collective_rpc(
                 sid,
                 "_unirl_loaded_lora_checksums",
                 args=(adapter_id, list(names) if names else None),

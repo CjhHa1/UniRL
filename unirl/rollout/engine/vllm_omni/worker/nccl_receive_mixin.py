@@ -25,7 +25,7 @@ _DTYPE_FROM_STR: Dict[str, torch.dtype] = {
 
 
 class NcclBroadcastReceiveMixin:
-    """Adds NCCL weight receive to a worker; requires ``BucketedIPCReceiveMixin`` for ``_unirl_target_module``."""
+    """Adds NCCL weight receive to a worker; requires ``BucketedIPCReceiveMixin`` for ``unirl_target_module``."""
 
     _unirl_weight_groups: Dict[str, "dist.ProcessGroup"] = {}
 
@@ -99,7 +99,7 @@ class NcclBroadcastReceiveMixin:
             dist.broadcast(tensor, src=0, group=group)
             bucket.append((name, tensor))
 
-        self._unirl_target_module().load_weights(bucket)
+        self.unirl_target_module().load_weights(bucket)
         logger.debug(
             "%s.update_weights_from_distributed: received %d tensors via group %r",
             type(self).__name__,

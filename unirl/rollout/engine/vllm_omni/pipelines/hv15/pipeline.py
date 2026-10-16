@@ -31,13 +31,13 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
         self.scheduler = FlowMatchSDEDiscreteScheduler.from_config(self.scheduler.config, eta=0.0)
-        self._captured_conditioning: Optional[Dict[str, Any]] = None
-        self._pending_initial_noise: Optional[torch.Tensor] = None
+        self.captured_conditioning: Optional[Dict[str, Any]] = None
+        self.pending_initial_noise: Optional[torch.Tensor] = None
 
     def encode_prompt(self, *args: Any, **kw: Any) -> Any:  # type: ignore[override]
         """Capture the dual text-encoder embeddings on the first call per forward."""
         result = super().encode_prompt(*args, **kw)
-        if self._captured_conditioning is None:
+        if self.captured_conditioning is None:
             (
                 prompt_embeds,
                 prompt_embeds_mask,
@@ -48,7 +48,7 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
                 neg_embeds_2,
                 neg_mask_2,
             ) = result
-            self._captured_conditioning = {
+            self.captured_conditioning = {
                 "prompt_embeds": detach_cpu(prompt_embeds),
                 "prompt_embeds_mask": detach_cpu(prompt_embeds_mask),
                 "prompt_embeds_2": detach_cpu(prompt_embeds_2),
@@ -63,10 +63,10 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
     def prepare_latents(self, *args, **kwargs):  # type: ignore[override]
         """Initial-noise injection point: bypass upstream RNG when the driver supplied an x_T."""
         upstream = super().prepare_latents
-        noise = self._pending_initial_noise
+        noise = self.pending_initial_noise
         if noise is not None:
             args, kwargs = inject_latents(upstream, args, kwargs, noise)
-            self._pending_initial_noise = None
+            self.pending_initial_noise = None
         return upstream(*args, **kwargs)
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
@@ -79,8 +79,8 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
             denoise_seed_keys=slice_request_denoise_seed_keys(one, caller="RLHunyuanVideo15Pipeline.forward"),
             denoise_base_seed=extra["denoise_base_seed"],
         )
-        self._pending_initial_noise = resolve_request_noise(one, caller="RLHunyuanVideo15Pipeline.forward")
-        self._captured_conditioning = None
+        self.pending_initial_noise = resolve_request_noise(one, caller="RLHunyuanVideo15Pipeline.forward")
+        self.captured_conditioning = None
 
         engine_sigmas = one.sampling_params.sigmas
         if engine_sigmas is not None:
@@ -99,8 +99,8 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
             stamp_capture(out, "rl_decoded_video", detach_cpu(decoded))
 
         drain_trajectory_into(out, self.scheduler)
-        if self._captured_conditioning is not None:
-            stamp_capture(out, "text_capture", self._captured_conditioning)
+        if self.captured_conditioning is not None:
+            stamp_capture(out, "text_capture", self.captured_conditioning)
         return out
 
 

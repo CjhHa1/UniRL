@@ -28,8 +28,8 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
 
     def __init__(self, od_config: OmniDiffusionConfig) -> None:
         super().__init__(od_config)
-        self._captured_conditioning: Optional[Dict[str, Any]] = None
-        self._pending_initial_noise_recipe: Optional[NoiseRecipe] = None
+        self.captured_conditioning: Optional[Dict[str, Any]] = None
+        self.pending_initial_noise_recipe: Optional[NoiseRecipe] = None
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
         """Single-request batch in, single output out — see ``single_request``."""
@@ -54,10 +54,10 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
             pipeline_self = self
 
             def tapped(*args: Any, **kw: Any) -> Any:
-                if pipeline_self._captured_conditioning is None:
+                if pipeline_self.captured_conditioning is None:
                     input_ids = args[0] if args else kw.get("input_ids")
                     # Do not capture engine-specific RoPE tables; replay rebuilds them.
-                    pipeline_self._captured_conditioning = {
+                    pipeline_self.captured_conditioning = {
                         "input_ids": detach_cpu(input_ids),
                         "attention_mask": detach_cpu(kw.get("attention_mask")),
                         "position_ids": detach_cpu(kw.get("position_ids")),
@@ -71,7 +71,7 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
             orig_prepare_latents = inner.prepare_latents
 
             def injecting(batch_size, latent_channel, image_size, dtype, device, generator, latents=None):
-                recipe = pipeline_self._pending_initial_noise_recipe
+                recipe = pipeline_self.pending_initial_noise_recipe
                 if latents is None and recipe is not None:
                     lsf = inner.latent_scale_factor
                     if lsf is None:
@@ -105,16 +105,16 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         extra = one.sampling_params.extra_args
         self.scheduler.arm(eta=one.sampling_params.eta, sde_indices=extra.get("sde_indices"))
         gids = extra.get("init_noise_group_ids")
-        self._pending_initial_noise_recipe = (
+        self.pending_initial_noise_recipe = (
             NoiseRecipe(noise_group_ids=list(gids), base_seed=extra["init_noise_seed"]) if gids else None
         )
-        self._captured_conditioning = None
+        self.captured_conditioning = None
 
         out = super().forward(req, **kwargs)
 
         drain_trajectory_into(out, self.scheduler)
-        if self._captured_conditioning is not None:
-            stamp_capture(out, "fused_mm_capture", self._captured_conditioning)
+        if self.captured_conditioning is not None:
+            stamp_capture(out, "fused_mm_capture", self.captured_conditioning)
         finalize_output(out)
         return out
 

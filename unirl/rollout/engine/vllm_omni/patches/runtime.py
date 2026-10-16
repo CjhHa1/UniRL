@@ -60,21 +60,21 @@ def install_fate_sharing(anchor_pid: int, *, arm_pdeathsig: bool) -> None:
     threading.Thread(target=_watch, daemon=True, name="unirl-fate-watchdog").start()
 
 
-class _UnirlPatchedTarget:
+class UnirlPatchedTarget:
     """Pickleable top-level wrapper that installs patches in the child first."""
 
     def __init__(self, target):
-        self._target = target
-        self._anchor_pid = os.getpid()
-        self._arm_pdeathsig = False
+        self.target = target
+        self.anchor_pid = os.getpid()
+        self.arm_pdeathsig = False
 
     def __call__(self, *args, **kwargs):
         install_fate_sharing(
-            self._anchor_pid,
-            arm_pdeathsig=self._arm_pdeathsig,
+            self.anchor_pid,
+            arm_pdeathsig=self.arm_pdeathsig,
         )
         VLLMOmniHijack.hijack()
-        return self._target(*args, **kwargs)
+        return self.target(*args, **kwargs)
 
 
 _WRAP_SENTINEL = "_unirl_target_wrapped"
@@ -98,8 +98,8 @@ def wrap_mp_process_for_children() -> None:
         *,
         daemon=None,
     ):
-        if target is not None and not isinstance(target, _UnirlPatchedTarget):
-            target = _UnirlPatchedTarget(target)
+        if target is not None and not isinstance(target, UnirlPatchedTarget):
+            target = UnirlPatchedTarget(target)
         orig_init(
             self,
             group=group,
@@ -112,8 +112,8 @@ def wrap_mp_process_for_children() -> None:
 
     def start(self):
         target = self._target
-        if isinstance(target, _UnirlPatchedTarget):
-            target._arm_pdeathsig = threading.current_thread() is threading.main_thread()
+        if isinstance(target, UnirlPatchedTarget):
+            target.arm_pdeathsig = threading.current_thread() is threading.main_thread()
         return orig_start(self)
 
     _MpBaseProcess.__init__ = __init__
@@ -174,7 +174,7 @@ def patch_dit_lora_loader() -> None:
     setattr(DiffusionLoRAManager, "_load_adapter", hijack__load_adapter)
 
 
-def _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer):
+def deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer):
     """Split HI3's GQA-interleaved fused QKV LoRA-B into ``[q, k, v]`` slices."""
     if len(output_sizes) != 3:
         return None
@@ -244,7 +244,7 @@ def patch_dit_hi3_lora_weights() -> None:
         if not output_sizes or int(lora_b.shape[0]) != sum(output_sizes):
             fail("base layer exposes no output_sizes matching lora_b's rows")
 
-        slices = _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer)
+        slices = deinterleave_fused_qkv_lora_b(lora_b, output_sizes, base_layer)
         if slices is None:
             fail("GQA layout is unrecognised (check head_size/total_num_kv_heads)")
 
@@ -317,7 +317,7 @@ def patch_ar_merged_lora_fused_tensor() -> None:
             if isinstance(lora_b, torch.Tensor):
                 output_sizes = list(self.base_layer.output_sizes)
                 if output_sizes and int(lora_b.shape[0]) == sum(output_sizes):
-                    slices = _deinterleave_fused_qkv_lora_b(lora_b, output_sizes, self.base_layer)
+                    slices = deinterleave_fused_qkv_lora_b(lora_b, output_sizes, self.base_layer)
                     lora_b = slices if slices is not None else list(torch.split(lora_b, output_sizes, dim=0))
                     if isinstance(lora_a, torch.Tensor):
                         lora_a = [lora_a] * self.n_slices
@@ -388,7 +388,7 @@ def patch_hv15_packed_lora_mapping() -> None:
     setattr(HunyuanVideo15Transformer3DModel, sentinel, True)
 
 
-class _HV15TorchLinearWithLoRA(torch.nn.Module):
+class HV15TorchLinearWithLoRA(torch.nn.Module):
     """Apply one in-memory LoRA adapter to an ordinary HV1.5 ``nn.Linear``."""
 
     n_slices = 1
@@ -396,8 +396,8 @@ class _HV15TorchLinearWithLoRA(torch.nn.Module):
     def __init__(self, base_layer: torch.nn.Linear) -> None:
         super().__init__()
         self.base_layer = base_layer
-        self.register_buffer("_lora_a", None, persistent=False)
-        self.register_buffer("_lora_b", None, persistent=False)
+        self.register_buffer("lora_a", None, persistent=False)
+        self.register_buffer("lora_b", None, persistent=False)
 
     def create_lora_weights(self, *_args, **_kwargs) -> None:
         """Match the manager's layer protocol when its rank buffer grows."""
@@ -406,8 +406,8 @@ class _HV15TorchLinearWithLoRA(torch.nn.Module):
     def reset_lora(self, index: int) -> None:
         if index != 0:
             raise IndexError(f"HV1.5 torch-linear LoRA only supports adapter slot 0, got {index}")
-        self._lora_a = None
-        self._lora_b = None
+        self.lora_a = None
+        self.lora_b = None
 
     def set_lora(
         self,
@@ -428,16 +428,16 @@ class _HV15TorchLinearWithLoRA(torch.nn.Module):
                 f"A=[rank, {self.base_layer.in_features}], "
                 f"B=[{self.base_layer.out_features}, rank]"
             )
-        self._lora_a = lora_a.detach().to(self.base_layer.weight)
-        self._lora_b = lora_b.detach().to(self.base_layer.weight)
+        self.lora_a = lora_a.detach().to(self.base_layer.weight)
+        self.lora_b = lora_b.detach().to(self.base_layer.weight)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         result = self.base_layer(hidden_states)
-        if self._lora_a is None or self._lora_b is None:
+        if self.lora_a is None or self.lora_b is None:
             return result
-        lora_input = hidden_states.to(self._lora_a.dtype)
-        lora_hidden = torch.nn.functional.linear(lora_input, self._lora_a)
-        return result + torch.nn.functional.linear(lora_hidden, self._lora_b)
+        lora_input = hidden_states.to(self.lora_a.dtype)
+        lora_hidden = torch.nn.functional.linear(lora_input, self.lora_a)
+        return result + torch.nn.functional.linear(lora_hidden, self.lora_b)
 
 
 def patch_hv15_refiner_torch_linear_lora() -> None:
@@ -483,7 +483,7 @@ def patch_hv15_refiner_torch_linear_lora() -> None:
                     and matches_target
                     and isinstance(
                         module,
-                        (torch.nn.Linear, _HV15TorchLinearWithLoRA, BaseLayerWithLoRA),
+                        (torch.nn.Linear, HV15TorchLinearWithLoRA, BaseLayerWithLoRA),
                     )
                 ):
                     matched.append((module_name, full_module_name, module))
@@ -491,7 +491,7 @@ def patch_hv15_refiner_torch_linear_lora() -> None:
         newly_wrapped = 0
         for module_name, full_module_name, module in matched:
             if isinstance(module, torch.nn.Linear):
-                module = _HV15TorchLinearWithLoRA(module)
+                module = HV15TorchLinearWithLoRA(module)
                 replace_submodule(transformer, module_name, module)
                 newly_wrapped += 1
             self._lora_modules[full_module_name] = module

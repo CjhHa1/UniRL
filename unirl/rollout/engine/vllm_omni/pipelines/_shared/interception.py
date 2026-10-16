@@ -35,7 +35,7 @@ def single_request(req: Any, *, caller: str) -> Any:
     return requests[0]
 
 
-def _captures(out: Any) -> Dict[str, Any]:
+def captures(out: Any) -> Dict[str, Any]:
     bag = getattr(out, CAPTURE_ATTR, None)
     if not isinstance(bag, dict):
         bag = {}
@@ -45,7 +45,7 @@ def _captures(out: Any) -> Dict[str, Any]:
 
 def stamp_capture(out: Any, key: str, value: Any) -> None:
     """Record an RL capture on the output object; postprocess never sees this bag."""
-    _captures(out)[key] = value
+    captures(out)[key] = value
 
 
 def set_payload(out: Any, value: Any) -> None:
@@ -85,7 +85,7 @@ def finalize_output(out: Any) -> None:
     payload = envelope["payload"]
     extra = envelope.get("metadata")
     if isinstance(extra, dict) and extra:
-        bag = _captures(out)
+        bag = captures(out)
         for key, value in extra.items():
             if key not in bag:
                 bag[key] = value
@@ -113,7 +113,7 @@ def finalize_output(out: Any) -> None:
         out.output = payload["video"]
 
 
-def _request_sample_span(req: Any, *, total: int, caller: str) -> Tuple[int, int]:
+def request_sample_span(req: Any, *, total: int, caller: str) -> Tuple[int, int]:
     """Locate this Omni request's rows inside a driver-authored sample batch."""
     rid = req.request_id
     try:
@@ -139,7 +139,7 @@ def resolve_request_noise(req: Any, *, caller: str) -> Optional[torch.Tensor]:
         return None
 
     total = int(noise_batch.shape[0]) if noise_batch is not None else len(recipe_gids)
-    start, end = _request_sample_span(req, total=total, caller=caller)
+    start, end = request_sample_span(req, total=total, caller=caller)
     if noise_batch is not None:
         return noise_batch[start:end].clone()
     return NoiseRecipe(
@@ -156,7 +156,7 @@ def slice_request_denoise_seed_keys(req: Any, *, caller: str) -> Optional[list[s
     if denoise_seed_keys is None:
         return None
 
-    start, end = _request_sample_span(req, total=len(denoise_seed_keys), caller=caller)
+    start, end = request_sample_span(req, total=len(denoise_seed_keys), caller=caller)
     return list(denoise_seed_keys[start:end])
 
 

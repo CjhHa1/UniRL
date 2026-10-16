@@ -7,27 +7,27 @@ import traceback
 from multiprocessing.connection import Connection
 from typing import Any, Dict, List
 
-_SUPPORTED_VLLM_VERSION = "0.28.0"
+SUPPORTED_VLLM_VERSION = "0.28.0"
 
 
-class _ProtocolError(RuntimeError):
+class ProtocolError(RuntimeError):
     pass
 
 
-def _recv_request(connection: Connection, *, last_request_id: int) -> Dict[str, Any]:
+def recv_request(connection: Connection, *, last_request_id: int) -> Dict[str, Any]:
     message = connection.recv()
     if not isinstance(message, dict):
-        raise _ProtocolError(f"request must be a mapping, got {type(message).__name__}")
+        raise ProtocolError(f"request must be a mapping, got {type(message).__name__}")
     request_id = message.get("request_id")
     if type(request_id) is not int or request_id != last_request_id + 1:
-        raise _ProtocolError(f"request_id={request_id!r}, expected the next monotonic id {last_request_id + 1}")
+        raise ProtocolError(f"request_id={request_id!r}, expected the next monotonic id {last_request_id + 1}")
     command = message.get("command")
     if not isinstance(command, str) or not command:
-        raise _ProtocolError(f"request has invalid command={command!r}")
+        raise ProtocolError(f"request has invalid command={command!r}")
     return message
 
 
-def _send_response(
+def send_response(
     connection: Connection,
     request: Dict[str, Any],
     *,
@@ -51,43 +51,6 @@ def _send_response(
     connection.send(response)
 
 
-def _shutdown_llm(llm: Any) -> None:
-    """Best-effort shutdown of the vLLM engine and all executor workers."""
-    if llm is None:
-        return
-    llm.llm_engine.engine_core.shutdown(timeout=30.0)
-
-
-def _plain_outputs(outputs) -> List[Dict[str, Any]]:
-    flattened: List[Dict[str, Any]] = []
-    for request in outputs:
-        for completion in sorted(request.outputs, key=lambda item: item.index):
-            token_ids = [int(token) for token in completion.token_ids]
-            if completion.logprobs is None:
-                logprobs: List[float] = []
-            else:
-                if len(completion.logprobs) != len(token_ids):
-                    raise RuntimeError(
-                        "vLLM returned mismatched token/logprob lengths: "
-                        f"{len(token_ids)} vs {len(completion.logprobs)}"
-                    )
-                logprobs = []
-                for token_id, choices in zip(token_ids, completion.logprobs, strict=True):
-                    selected = choices.get(token_id)
-                    if selected is None:
-                        raise RuntimeError(f"vLLM omitted sampled token {token_id} from processed logprobs")
-                    logprobs.append(float(selected.logprob))
-            flattened.append(
-                {
-                    "text": completion.text,
-                    "token_ids": token_ids,
-                    "logprobs": logprobs,
-                    "finish_reason": "" if completion.finish_reason is None else completion.finish_reason,
-                }
-            )
-    return flattened
-
-
 def engine_process_main(
     connection: Connection,
     *,
@@ -99,9 +62,9 @@ def engine_process_main(
     startup_request: Dict[str, Any] | None = None
     llm = None
     try:
-        startup_request = _recv_request(connection, last_request_id=0)
+        startup_request = recv_request(connection, last_request_id=0)
         if startup_request["command"] != "startup":
-            raise _ProtocolError(f"first vLLM command must be 'startup', got {startup_request['command']!r}")
+            raise ProtocolError(f"first vLLM command must be 'startup', got {startup_request['command']!r}")
 
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(visible_devices)
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -114,8 +77,8 @@ def engine_process_main(
         from vllm import __version__ as vllm_version
         from vllm.config import WeightTransferConfig
 
-        if vllm_version != _SUPPORTED_VLLM_VERSION:
-            raise RuntimeError(f"vLLM rollout requires vllm=={_SUPPORTED_VLLM_VERSION}; got {vllm_version}")
+        if vllm_version != SUPPORTED_VLLM_VERSION:
+            raise RuntimeError(f"vLLM rollout requires vllm=={SUPPORTED_VLLM_VERSION}; got {vllm_version}")
         engine_kwargs = dict(config["engine_kwargs"])
         engine_kwargs["dtype"] = config["dtype"]
         engine_kwargs["trust_remote_code"] = config["trust_remote_code"]
@@ -141,7 +104,7 @@ def engine_process_main(
         )
         worker_capabilities = llm.collective_rpc("unirl_weight_sync_capabilities")
         model_type = llm.model_config.hf_config.model_type
-        _send_response(
+        send_response(
             connection,
             startup_request,
             ok=True,
@@ -156,11 +119,12 @@ def engine_process_main(
     except BaseException as error:
         if startup_request is not None:
             try:
-                _send_response(connection, startup_request, ok=False, result=None, error=error)
+                send_response(connection, startup_request, ok=False, result=None, error=error)
             except (EOFError, BrokenPipeError, OSError):
                 pass
         try:
-            _shutdown_llm(llm)
+            if llm is not None:
+                llm.llm_engine.engine_core.shutdown(timeout=30.0)
         except BaseException:
             pass
         connection.close()
@@ -171,10 +135,10 @@ def engine_process_main(
     try:
         while True:
             try:
-                message = _recv_request(connection, last_request_id=last_request_id)
+                message = recv_request(connection, last_request_id=last_request_id)
             except EOFError:
                 break
-            except _ProtocolError:
+            except ProtocolError:
                 break
             last_request_id = message["request_id"]
             command = message.get("command")
@@ -191,7 +155,36 @@ def engine_process_main(
                         values["logprobs"] = 0 if payload["return_logprob"] else None
                         params.append(SamplingParams(**values))
                     outputs = llm.generate(prompts, params, use_tqdm=False)
-                    result = _plain_outputs(outputs)
+                    result = []
+                    for req_out in outputs:
+                        for completion in sorted(req_out.outputs, key=lambda item: item.index):
+                            token_ids = [int(token) for token in completion.token_ids]
+                            if completion.logprobs is None:
+                                logprobs: List[float] = []
+                            else:
+                                if len(completion.logprobs) != len(token_ids):
+                                    raise RuntimeError(
+                                        "vLLM returned mismatched token/logprob lengths: "
+                                        f"{len(token_ids)} vs {len(completion.logprobs)}"
+                                    )
+                                logprobs = []
+                                for token_id, choices in zip(token_ids, completion.logprobs, strict=True):
+                                    selected = choices.get(token_id)
+                                    if selected is None:
+                                        raise RuntimeError(
+                                            f"vLLM omitted sampled token {token_id} from processed logprobs"
+                                        )
+                                    logprobs.append(float(selected.logprob))
+                            result.append(
+                                {
+                                    "text": completion.text,
+                                    "token_ids": token_ids,
+                                    "logprobs": logprobs,
+                                    "finish_reason": ""
+                                    if completion.finish_reason is None
+                                    else completion.finish_reason,
+                                }
+                            )
                 elif command == "sleep":
                     llm.sleep(level=message["level"])
                     result = None
@@ -288,7 +281,7 @@ def engine_process_main(
                     }
                     else None
                 )
-                _send_response(connection, message, ok=False, result=result, error=error)
+                send_response(connection, message, ok=False, result=result, error=error)
                 if command in {
                     "init_native_weight_transfer",
                     "start_native_weight_update",
@@ -298,12 +291,13 @@ def engine_process_main(
                 }:
                     break
             else:
-                _send_response(connection, message, ok=True, result=result)
+                send_response(connection, message, ok=True, result=result)
                 if command == "shutdown":
                     break
     finally:
         try:
-            _shutdown_llm(llm)
+            if llm is not None:
+                llm.llm_engine.engine_core.shutdown(timeout=30.0)
             del llm
         finally:
             connection.close()

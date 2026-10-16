@@ -24,7 +24,7 @@ class Hv15VideoOutputAdapter(DitOutputAdapter):
 
     final_output_type = "video"
 
-    _MISSING_CAPTURE_MSG = (
+    MISSING_CAPTURE_MSG = (
         "build_response: HV1.5 t2v rollout returned no 'text_capture' "
         "on the output envelope's unirl metadata (or it lacked the dual-stream "
         "text_mllm/text_glyph embeds). Check that "
@@ -49,7 +49,7 @@ class Hv15VideoOutputAdapter(DitOutputAdapter):
 
         captures = [read_captures(d).get("text_capture") for d in diff_outputs]
         if any(c is None for c in captures):
-            raise RuntimeError(self._MISSING_CAPTURE_MSG)
+            raise RuntimeError(self.MISSING_CAPTURE_MSG)
 
         cond_dict: Dict[str, Any] = {}
         for cond_key, embeds_key, mask_key in (
@@ -68,7 +68,7 @@ class Hv15VideoOutputAdapter(DitOutputAdapter):
                 )
 
         if "text_mllm" not in cond_dict or "text_glyph" not in cond_dict:
-            raise RuntimeError(self._MISSING_CAPTURE_MSG)
+            raise RuntimeError(self.MISSING_CAPTURE_MSG)
         return cond_dict
 
 

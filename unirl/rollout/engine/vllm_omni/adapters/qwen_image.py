@@ -19,7 +19,7 @@ from unirl.types.sampling import DiffusionSamplingParams
 class QwenImageOutputAdapter(DitOutputAdapter):
     """Single diffusion-Part response with Qwen text-capture conditions."""
 
-    _MISSING_CAPTURE_MSG = (
+    MISSING_CAPTURE_MSG = (
         "build_response: Qwen-Image rollout returned no 'text_capture' on "
         "the output envelope's unirl metadata. Check that RLQwenImagePipeline's "
         "encode_prompt tap ran in every DiT worker — the subclass swap may "
@@ -35,7 +35,7 @@ class QwenImageOutputAdapter(DitOutputAdapter):
 
         captures = [read_captures(d).get("text_capture") for d in diff_outputs]
         if any(c is None for c in captures):
-            raise RuntimeError(self._MISSING_CAPTURE_MSG)
+            raise RuntimeError(self.MISSING_CAPTURE_MSG)
 
         neg_present = [c.get("negative_prompt_embeds") is not None for c in captures]
         if any(neg_present) and not all(neg_present):

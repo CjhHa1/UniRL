@@ -92,11 +92,11 @@ class BucketedIPCReceiveMixin:
                 )
             else:
                 logger.debug("%s: bucket loaded (%d tensors)", type(self).__name__, len(weights))
-                self._unirl_target_module().load_weights(weights)
+                self.unirl_target_module().load_weights(weights)
 
         receiver.receive_weights(on_bucket_received=_load_bucket)
 
-    def _unirl_target_module(self) -> torch.nn.Module:
+    def unirl_target_module(self) -> torch.nn.Module:
         """Return the loaded model/pipeline module owned by ``self.model_runner``."""
         runner = self.model_runner
         module = runner.model if hasattr(runner, "model") else runner.pipeline
@@ -132,7 +132,7 @@ class BucketedIPCReceiveMixin:
             metadata=payload["metadata"],
         )
         named_tensors = bucket.reconstruct_tensors()
-        self._unirl_target_module().load_weights(named_tensors)
+        self.unirl_target_module().load_weights(named_tensors)
         logger.info(
             "%s: tensor-payload loaded (%d tensors, load_format=%r)",
             type(self).__name__,
@@ -207,7 +207,7 @@ class BucketedIPCReceiveMixin:
             fingerprint_tensor,
         )
 
-        parameter_module = self._unirl_target_module()
+        parameter_module = self.unirl_target_module()
         target = set(names) if names else None
         out: dict = {}
         for name, p in parameter_module.named_parameters():

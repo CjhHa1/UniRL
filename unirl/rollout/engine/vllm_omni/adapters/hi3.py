@@ -30,7 +30,7 @@ from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
 from unirl.types.segments.latent import LatentSegment
 
 
-def _trailing_gen_parts(sample: Sample, *params_types: type, caller: str) -> Tuple[Part, ...]:
+def trailing_gen_parts(sample: Sample, *params_types: type, caller: str) -> Tuple[Part, ...]:
     """Validate and return the current generation-stage suffix."""
     count = len(params_types)
     if len(sample.parts) < count:
@@ -162,14 +162,14 @@ class Hi3InputAdapter:
     def build(self, sample: Sample) -> List[GenerateCall]:
         caller = f"{type(self).__name__}({self.modality})"
         if "dit" in self.stages:
-            ar_part, diff_part = _trailing_gen_parts(
+            ar_part, diff_part = trailing_gen_parts(
                 sample,
                 ARSamplingParams,
                 DiffusionSamplingParams,
                 caller=caller,
             )
         elif self.carries_target_size:
-            diff_part, ar_part = _trailing_gen_parts(
+            diff_part, ar_part = trailing_gen_parts(
                 sample,
                 DiffusionSamplingParams,
                 ARSamplingParams,
@@ -337,7 +337,7 @@ class Hi3ImageOutputAdapter(DitOutputAdapter):
 
         ar_decoded = decoded_text_from_ar(per_request)
         ar_conditions = hi3_ar_fused_conditions(per_request)
-        ar_part, _ = _trailing_gen_parts(
+        ar_part, _ = trailing_gen_parts(
             filled,
             ARSamplingParams,
             DiffusionSamplingParams,
