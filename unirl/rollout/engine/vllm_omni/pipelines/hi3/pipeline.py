@@ -34,8 +34,8 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
         """Single-request batch in, single output out — see ``single_request``."""
         one = single_request(req, caller="RLHunyuanImage3Pipeline.forward")
-        if self._pipeline is None:
-            inner = self.pipeline
+        inner = self.pipeline
+        if not isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
             sde = FlowMatchSDEDiscreteScheduler(
                 num_train_timesteps=1000,
                 shift=self.generation_config.flow_shift,

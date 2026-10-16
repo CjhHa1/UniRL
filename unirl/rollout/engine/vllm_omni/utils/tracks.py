@@ -87,7 +87,7 @@ def collect_dit_outputs(
                 f"(modality={modality}); did the DiT stage fail?"
             )
         diff_outputs.append(diff_out)
-        imgs = diff_out.images
+        imgs = diff_out.images or []
         if not imgs and final_output_type == "video":
             vid = read_captures(diff_out).get("rl_decoded_video")
             if torch.is_tensor(vid):
