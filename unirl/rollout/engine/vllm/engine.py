@@ -62,7 +62,7 @@ class VLLMRolloutEngine(BaseRolloutEngine):
         ep_rank: int = 0,
         ep_size: int = 1,
     ) -> None:
-        del strategy, model_config
+        del device, strategy, model_config
         require(
             isinstance(config, VLLMEngineConfig),
             f"VLLMRolloutEngine requires VLLMEngineConfig; got {type(config).__name__}",
@@ -75,15 +75,12 @@ class VLLMRolloutEngine(BaseRolloutEngine):
         require(ep_size == 1 and ep_rank == 0, "vLLM rollout currently supports EP=1")
 
         self.cfg = config
-        self.device = device
-        self._tp_rank = tp_rank
         self._tp_size = tp_size
-        self._is_tp_zero = self._tp_rank == 0
+        self._is_tp_zero = tp_rank == 0
         self._is_offloaded = False
         self._partially_awake = False
         self._weight_sync_sleep_level = 1
         self._preserve_next_weight_sleep = False
-        self._version = 0
         self._lock = threading.Lock()
         self._process = None
         self._process_group_id = None

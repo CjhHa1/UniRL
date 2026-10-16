@@ -46,17 +46,14 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
         else:
             self.schedule_policy = None
 
-        self._version = 0
-        self._generate_lock = threading.Lock()
-        self._shutdown_lock = threading.Lock()
-        self._shutdown_requested = False
-        self._shutdown_complete = False
+        self._lock = threading.Lock()
+        self._closed = False
 
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, sample: Sample) -> Sample:
         """Generate one whole DP shard synchronously."""
-        with self._generate_lock:
-            if self._shutdown_requested:
+        with self._lock:
+            if self._closed:
                 raise RuntimeError("TrainsideRolloutEngine.generate called after shutdown")
             sample.reject_row_canvases(engine="TrainsideRolloutEngine")
             if self.forward_batch_size is not None:
@@ -97,12 +94,8 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
             return self._stamp_output_version(out)
 
     def shutdown(self) -> None:
-        with self._shutdown_lock:
-            if self._shutdown_complete:
-                return
-            with self._generate_lock:
-                self._shutdown_requested = True
-            self._shutdown_complete = True
+        with self._lock:
+            self._closed = True
 
     def health_check(self) -> bool:
         return self.pipeline is not None and all(m is not None for m in self._models)

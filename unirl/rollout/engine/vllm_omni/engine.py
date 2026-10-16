@@ -36,16 +36,10 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         model_config: Any = None,
         ports: Optional[VLLMOmniPorts] = None,
     ) -> None:
+        del device, rank
         self.cfg = config
-        self._version = 0
-        self._generate_lock = threading.Lock()
-        self._shutdown_lock = threading.Lock()
-        self._shutdown_requested = False
-        self._shutdown_complete = False
-        self.device = device
-        self.strategy = strategy
-        self.rank = rank
-        self.model_config = model_config
+        self._lock = threading.Lock()
+        self._closed = False
         self._is_offloaded = False
         # A transition failure means sequential stage RPCs may have left the
         # engine partially awake/asleep. Normalize through sleep before another
@@ -87,8 +81,8 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, sample: Sample) -> Sample:
         """Generate one whole DP shard synchronously."""
-        with self._generate_lock:
-            if self._shutdown_requested:
+        with self._lock:
+            if self._closed:
                 raise RuntimeError("VLLMOmniRolloutEngine.generate called after shutdown")
             # Defense-in-depth for logical and partially completed lifecycle
             # transitions: callers that swallow a wake/sleep exception must never
@@ -200,13 +194,11 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def shutdown(self) -> None:
-        with self._shutdown_lock:
-            if self._shutdown_complete:
+        with self._lock:
+            if self._closed:
                 return
-            with self._generate_lock:
-                self._shutdown_requested = True
-                self._backend.shutdown()
-            self._shutdown_complete = True
+            self._closed = True
+            self._backend.shutdown()
 
     def tp_per_stage(self) -> Dict[int, int]:
         """``{stage_id: tensor_parallel_size}`` per stage (parsed from the"""

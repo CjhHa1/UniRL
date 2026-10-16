@@ -40,11 +40,8 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         )
         self.cfg = config
         self._child_by_name: Dict[str, BaseRolloutEngine] = {}
-        self._version = 0
-        self._generate_lock = threading.Lock()
-        self._shutdown_lock = threading.Lock()
-        self._shutdown_requested = False
-        self._shutdown_complete = False
+        self._lock = threading.Lock()
+        self._closed = False
 
         deps = dict(device=device, rank=rank, model_config=model_config)
         try:
@@ -60,17 +57,15 @@ class ComposedRolloutEngine(BaseRolloutEngine):
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def shutdown(self) -> None:
-        with self._shutdown_lock:
-            if self._shutdown_complete:
+        with self._lock:
+            if self._closed:
                 return
-            with self._generate_lock:
-                self._shutdown_requested = True
-                for name, child in self._child_by_name.items():
-                    try:
-                        child.shutdown()
-                    except Exception as exc:
-                        logger.warning("Child %r shutdown raised: %s", name, exc)
-            self._shutdown_complete = True
+            self._closed = True
+            for name, child in self._child_by_name.items():
+                try:
+                    child.shutdown()
+                except Exception as exc:
+                    logger.warning("Child %r shutdown raised: %s", name, exc)
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(self) -> None:
@@ -84,19 +79,16 @@ class ComposedRolloutEngine(BaseRolloutEngine):
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def onload_weights(self, *, track_prefix: str = "") -> None:
-        children = (
-            [self._child_for_track_prefix("onload_weights", track_prefix)]
-            if track_prefix
-            else self._child_by_name.values()
-        )
-        for child in children:
+        if track_prefix:
+            self._child_by_name[track_prefix].onload_weights()
+            return
+        for child in self._child_by_name.values():
             child.onload_weights()
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def set_version(self, train_version: int) -> None:
         for child in self._child_by_name.values():
             child.set_version(train_version)
-        self._version = train_version
 
     @property
     def is_offloaded(self) -> bool:
@@ -116,8 +108,8 @@ class ComposedRolloutEngine(BaseRolloutEngine):
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, sample: Sample) -> Sample:
         """Run the whole PE serial flow for one DP shard synchronously."""
-        with self._generate_lock:
-            if self._shutdown_requested:
+        with self._lock:
+            if self._closed:
                 raise RuntimeError("ComposedRolloutEngine.generate called after shutdown")
             sample.reject_row_canvases(engine="ComposedRolloutEngine")
             require(
@@ -245,21 +237,6 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         for child in self._child_by_name.values():
             child.resume()
 
-    def _child_for_track_prefix(self, caller: str, track_prefix: str) -> BaseRolloutEngine:
-        """Resolve a required single-child ``track_prefix``."""
-        if not track_prefix:
-            raise ValueError(
-                f"ComposedRolloutEngine.{caller} requires track_prefix "
-                f"so the call can be routed to one child; expected one of {sorted(self._child_by_name)}."
-            )
-        child = self._child_by_name.get(track_prefix)
-        if child is None:
-            raise ValueError(
-                f"ComposedRolloutEngine: unknown track_prefix {track_prefix!r}; "
-                f"expected one of {sorted(self._child_by_name)}."
-            )
-        return child
-
     def update_weights_from_ipc(
         self,
         *,
@@ -270,7 +247,7 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         track_prefix: str = "",
     ) -> None:
         """Route a bucketed-IPC weight push to one child via ``track_prefix``."""
-        self._child_for_track_prefix("update_weights_from_ipc", track_prefix).update_weights_from_ipc(
+        self._child_by_name[track_prefix].update_weights_from_ipc(
             peft_config=peft_config,
             base_sync_done=base_sync_done,
             use_shm=use_shm,
@@ -289,7 +266,7 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         track_prefix: str = "",
     ) -> None:
         """Route NCCL group setup to one child via ``track_prefix``."""
-        self._child_for_track_prefix("init_weights_update_group", track_prefix).init_weights_update_group(
+        self._child_by_name[track_prefix].init_weights_update_group(
             master_address=master_address,
             master_port=master_port,
             rank_offset=rank_offset,
@@ -310,7 +287,7 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         track_prefix: str = "",
     ) -> None:
         """Route a NCCL-broadcast weight push to one child via ``track_prefix``."""
-        self._child_for_track_prefix("update_weights_from_distributed", track_prefix).update_weights_from_distributed(
+        self._child_by_name[track_prefix].update_weights_from_distributed(
             names=names,
             dtypes=dtypes,
             shapes=shapes,
@@ -326,9 +303,7 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         track_prefix: str = "",
     ) -> None:
         """Route NCCL group teardown to one child via ``track_prefix``."""
-        self._child_for_track_prefix("destroy_weights_update_group", track_prefix).destroy_weights_update_group(
-            group_name=group_name
-        )
+        self._child_by_name[track_prefix].destroy_weights_update_group(group_name=group_name)
 
     def set_lora_from_tensors(
         self,
@@ -365,7 +340,7 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         flush_cache: bool = True,
         track_prefix: str = "",
     ) -> None:
-        self._child_for_track_prefix("update_weights_from_tensor", track_prefix).update_weights_from_tensor(
+        self._child_by_name[track_prefix].update_weights_from_tensor(
             serialized_named_tensors=serialized_named_tensors,
             target_modules=target_modules,
             load_format=load_format,
