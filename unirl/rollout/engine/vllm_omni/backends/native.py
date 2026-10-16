@@ -349,23 +349,43 @@ class VLLMOmniBackend:
                     validate_result(item)
                 return
 
-            status = result.status
-            if status is None:
-                raise RuntimeError(f"vllm-omni {action} returned no ACK status for stage {stage_id}: result={result!r}")
+            if isinstance(result, Mapping):
+                # Subprocess diffusion stages serialize OmniACK via
+                # OmniMsgpackEncoder (asdict) without reconstructing the
+                # dataclass on decode, and StagePool error replies arrive as
+                # ``{"supported": False, "error": ...}``.
+                status = result.get("status")
+                if status is None:
+                    raise RuntimeError(
+                        f"vllm-omni {action} returned no ACK status for stage {stage_id}: result={result!r}"
+                    )
+                rank = result["rank"]
+                error_msg = result["error_msg"]
+                ack_stage_id = result["stage_id"]
+                ack_task_id = result["task_id"]
+            else:
+                status = result.status
+                if status is None:
+                    raise RuntimeError(
+                        f"vllm-omni {action} returned no ACK status for stage {stage_id}: result={result!r}"
+                    )
+                rank = result.rank
+                error_msg = result.error_msg
+                ack_stage_id = result.stage_id
+                ack_task_id = result.task_id
+
             if status != "SUCCESS":
                 raise RuntimeError(
                     f"vllm-omni {action} failed on stage {stage_id}: worker rank "
-                    f"{result.rank} answered status={status!r} "
-                    f"error={result.error_msg!r}"
+                    f"{rank} answered status={status!r} "
+                    f"error={error_msg!r}"
                 )
-            if result.stage_id != stage_id:
-                raise RuntimeError(
-                    f"vllm-omni {action} ACK stage mismatch: expected {stage_id}, got {result.stage_id!r}"
-                )
-            if result.task_id != task_id:
+            if ack_stage_id != stage_id:
+                raise RuntimeError(f"vllm-omni {action} ACK stage mismatch: expected {stage_id}, got {ack_stage_id!r}")
+            if ack_task_id != task_id:
                 raise RuntimeError(
                     f"vllm-omni {action} ACK task mismatch on stage {stage_id}: "
-                    f"expected {task_id!r}, got {result.task_id!r}"
+                    f"expected {task_id!r}, got {ack_task_id!r}"
                 )
             success_count += 1
 
