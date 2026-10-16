@@ -235,7 +235,7 @@ class VLLMRolloutEngine(BaseRolloutEngine):
             block = payload["sampling_params"]
             sampling_seed = block.pop("sampling_seed", None)
             if sampling_seed is not None:
-                block["seed"] = int(sampling_seed)
+                block["seed"] = sampling_seed
             if self.cfg.ignore_eos:
                 block["ignore_eos"] = True
         response = self._request(
@@ -260,10 +260,10 @@ class VLLMRolloutEngine(BaseRolloutEngine):
 
     def set_weight_sync_sleep_level(self, level: int, *, preserve_next_sleep: bool = False) -> None:
         """Select whether future colocated sleeps offload or discard weights."""
-        if int(level) not in (1, 2):
+        if level not in (1, 2):
             raise ValueError(f"vLLM sleep level must be 1 or 2, got {level}")
-        self._weight_sync_sleep_level = int(level)
-        self._preserve_next_weight_sleep = bool(preserve_next_sleep)
+        self._weight_sync_sleep_level = level
+        self._preserve_next_weight_sleep = preserve_next_sleep
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def preserve_weights_for_next_sleep(self) -> None:
@@ -342,7 +342,7 @@ class VLLMRolloutEngine(BaseRolloutEngine):
         result = self._request(
             "finish_native_weight_update",
             header=dict(header),
-            flush_cache=bool(flush_cache),
+            flush_cache=flush_cache,
             weight_version=weight_version,
         )
         try:
@@ -352,7 +352,7 @@ class VLLMRolloutEngine(BaseRolloutEngine):
                 header,
                 result,
                 fanout=self._tp_size,
-                flush_cache=bool(flush_cache),
+                flush_cache=flush_cache,
             )
         except BaseException:
             with self._lock:

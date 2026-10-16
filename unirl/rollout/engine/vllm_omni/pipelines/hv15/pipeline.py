@@ -121,7 +121,7 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
             eta=one.sampling_params.eta,
             sde_indices=extra.get("sde_indices"),
             denoise_seed_keys=slice_request_denoise_seed_keys(one, caller="RLHunyuanVideo15Pipeline.forward"),
-            denoise_base_seed=extra.get("denoise_base_seed", 0),
+            denoise_base_seed=extra["denoise_base_seed"],
         )
         self._pending_initial_noise = resolve_request_noise(one, caller="RLHunyuanVideo15Pipeline.forward")
         self._captured_conditioning = None
@@ -133,8 +133,7 @@ class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         if decoded is not None:
             stamp_capture(out, "rl_decoded_video", detach_cpu(decoded))
 
-        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            drain_trajectory_into(out, self.scheduler)
+        drain_trajectory_into(out, self.scheduler)
         if self._captured_conditioning is not None:
             stamp_capture(out, "text_capture", self._captured_conditioning)
         return out

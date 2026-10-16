@@ -270,11 +270,11 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         track_prefix: str = "",
     ) -> None:
         """Route a bucketed-IPC weight push to one child via ``track_prefix``."""
-        del replica_rank
         self._child_for_track_prefix("update_weights_from_ipc", track_prefix).update_weights_from_ipc(
             peft_config=peft_config,
             base_sync_done=base_sync_done,
             use_shm=use_shm,
+            replica_rank=replica_rank,
         )
 
     def init_weights_update_group(

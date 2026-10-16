@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 import threading
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence
 
 import torch
 
 from unirl.distributed.group.dispatch import Dispatch, distributed
-from unirl.models.types.ar import ARStage
 from unirl.models.types.diffusion import DiffusionStage
 from unirl.models.types.pipeline import Pipeline
 from unirl.rollout.engine.base import BaseRolloutEngine
 from unirl.sde.runtime import FlowMatchSchedulePolicy, ensure_sample_sigmas
 from unirl.types.sample import Part, Sample
-
-Stage = Union[DiffusionStage, ARStage]
 
 
 class TrainsideRolloutEngine(BaseRolloutEngine):
@@ -27,15 +24,11 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
         self,
         *,
         pipeline: Pipeline,
-        stage: Optional[Stage] = None,
         stage_attrs: Sequence[str] = ("diffusion",),
         forward_batch_size: Optional[int] = None,
     ) -> None:
         self.pipeline = pipeline
-        if stage is not None:
-            stages = [stage]
-        else:
-            stages = [getattr(pipeline, a) for a in stage_attrs]
+        stages = [getattr(pipeline, a) for a in stage_attrs]
         self._models = [s.trainable_module() for s in stages]
         if forward_batch_size is not None and forward_batch_size < 1:
             raise ValueError(
@@ -48,7 +41,7 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
             else:
                 self.schedule_policy = FlowMatchSchedulePolicy.from_pretrained(
                     pipeline.bundle.pretrained_path,
-                    shift=float(pipeline.shift),
+                    shift=pipeline.shift,
                 )
         else:
             self.schedule_policy = None
@@ -87,7 +80,7 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                 with torch.no_grad():
                     fbs = self.forward_batch_size
                     gen = sample.parts[-1]
-                    bs = int(gen.batch_size)
+                    bs = gen.batch_size
                     if fbs is None or bs <= fbs:
                         out = self.pipeline.generate(sample)
                     else:

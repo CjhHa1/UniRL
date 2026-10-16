@@ -83,15 +83,15 @@ class RLQwenImagePipeline(QwenImagePipeline):
                     "RLQwenImagePipeline.prepare_latents: expected upstream's "
                     f"fully positional prepare_latents call; got {len(args)} positional args."
                 )
-            batch, channels = int(args[0]), int(args[1])
-            grid_h = 2 * (int(args[2]) // (self.vae_scale_factor * 2))
-            grid_w = 2 * (int(args[3]) // (self.vae_scale_factor * 2))
+            batch, channels = args[0], args[1]
+            grid_h = 2 * (args[2] // (self.vae_scale_factor * 2))
+            grid_w = 2 * (args[3] // (self.vae_scale_factor * 2))
             if tuple(noise.shape) != (batch, channels, grid_h, grid_w):
                 raise RuntimeError(
                     "RLQwenImagePipeline: driver x_T shape "
                     f"{tuple(noise.shape)} does not match the worker latent grid "
                     f"[{batch}, {channels}, {grid_h}, {grid_w}] for "
-                    f"{int(args[2])}x{int(args[3])} px — check the recipe's "
+                    f"{args[2]}x{args[3]} px — check the recipe's "
                     "init_noise_latent_shape / initial_noise_batch."
                 )
             packed = self._pack_latents(noise, batch, channels, grid_h, grid_w)
@@ -111,24 +111,23 @@ class RLQwenImagePipeline(QwenImagePipeline):
         height = one.sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = one.sampling_params.width or self.default_sample_size * self.vae_scale_factor
         height, width = normalize_min_aligned_size(height, width, self.vae_scale_factor * 2)
-        self._harvest_hw = (int(height), int(width))
+        self._harvest_hw = (height, width)
 
         outs = super().forward(req, **kwargs)
 
         out = outs[0]
-        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            drain_trajectory_into(out, self.scheduler)
-            if out.trajectory_latents is not None:
-                packed = out.trajectory_latents
-                b, t1 = packed.shape[0], packed.shape[1]
-                flat = self._unpack_latents(
-                    packed.reshape(b * t1, *packed.shape[2:]),
-                    self._harvest_hw[0],
-                    self._harvest_hw[1],
-                    self.vae_scale_factor,
-                )
-                flat = flat.squeeze(2)
-                out.trajectory_latents = flat.reshape(b, t1, *flat.shape[1:])
+        drain_trajectory_into(out, self.scheduler)
+        if out.trajectory_latents is not None:
+            packed = out.trajectory_latents
+            b, t1 = packed.shape[0], packed.shape[1]
+            flat = self._unpack_latents(
+                packed.reshape(b * t1, *packed.shape[2:]),
+                self._harvest_hw[0],
+                self._harvest_hw[1],
+                self.vae_scale_factor,
+            )
+            flat = flat.squeeze(2)
+            out.trajectory_latents = flat.reshape(b, t1, *flat.shape[1:])
         if self._captured_conditioning:
             stamp_capture(out, "text_capture", self._captured_conditioning)
         finalize_output(out)

@@ -25,7 +25,7 @@ from unirl.types.sampling import DiffusionSamplingParams
 def _negative_prompt_from_params(diff_params: Any, *, default: str) -> str:
     """Read an engine negative prompt from the typed params' extension bag."""
     value = diff_params.sampler_kwargs.get("negative_prompt")
-    return default if value is None else str(value)
+    return default if value is None else value
 
 
 def _grouped_texts_from_sample(sample: Sample, *, caller: str) -> tuple[List[str], int]:

@@ -36,9 +36,7 @@ CAPTURE_ATTR = "_unirl_captures"
 
 def single_request(req: Any, *, caller: str) -> Any:
     """Unwrap the one request; the GPU batch is ``num_outputs_per_prompt`` inside it, not request batching."""
-    requests = getattr(req, "requests", None)
-    if requests is None:
-        return req
+    requests = req.requests
     if len(requests) != 1:
         raise RuntimeError(
             f"{caller}: expected a single-request batch (supports_request_batch=False), got {len(requests)}. "
@@ -161,7 +159,7 @@ def resolve_request_noise(req: Any, *, caller: str) -> Optional[torch.Tensor]:
         return noise_batch[start:end].clone()
     return NoiseRecipe(
         noise_group_ids=list(recipe_gids[start:end]),
-        base_seed=extra.get("init_noise_seed", 0),
+        base_seed=extra["init_noise_seed"],
         latent_shape=tuple(extra["init_noise_latent_shape"]),
     ).resolve()
 
@@ -208,7 +206,7 @@ def flush_captures_into_postprocess(diffusion_output: Any, postprocess_output: A
 
 def make_sde_scheduler(upstream_config: Any, *, eta: float = 0.0) -> FlowMatchSDEDiscreteScheduler:
     """Build the trajectory-capturing scheduler from the upstream scheduler's config — the sd3/hv15 install path."""
-    return FlowMatchSDEDiscreteScheduler.from_config(upstream_config, eta=float(eta))
+    return FlowMatchSDEDiscreteScheduler.from_config(upstream_config, eta=eta)
 
 
 __all__ = [

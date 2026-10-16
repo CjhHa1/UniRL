@@ -46,7 +46,7 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
 
         sde = FlowMatchSDEDiscreteScheduler(
             num_train_timesteps=1000,
-            shift=float(self.generation_config.flow_shift),
+            shift=self.generation_config.flow_shift,
             use_dynamic_shifting=False,
             base_shift=0.5,
             max_shift=1.15,
@@ -105,8 +105,8 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
                 else:
                     factors = tuple(lsf)
                 per_sample_shape = (
-                    int(latent_channel),
-                    *[int(s) // int(f) for s, f in zip(image_size, factors)],
+                    latent_channel,
+                    *[s // f for s, f in zip(image_size, factors)],
                 )
                 # Reject mismatched noise-group IDs instead of broadcasting the first ID.
                 gids = recipe.noise_group_ids
@@ -137,14 +137,13 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         self.scheduler.arm(eta=one.sampling_params.eta, sde_indices=extra.get("sde_indices"))
         gids = extra.get("init_noise_group_ids")
         self._pending_initial_noise_recipe = (
-            NoiseRecipe(noise_group_ids=list(gids), base_seed=int(extra.get("init_noise_seed", 0))) if gids else None
+            NoiseRecipe(noise_group_ids=list(gids), base_seed=extra["init_noise_seed"]) if gids else None
         )
         self._captured_conditioning = None
 
         out = super().forward(req, **kwargs)
 
-        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            drain_trajectory_into(out, self.scheduler)
+        drain_trajectory_into(out, self.scheduler)
         if self._captured_conditioning is not None:
             stamp_capture(out, "fused_mm_capture", self._captured_conditioning)
         finalize_output(out)

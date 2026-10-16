@@ -104,17 +104,17 @@ class BucketedIPCReceiveMixin:
             logger.debug("%s: bucket loaded (%d tensors)", type(self).__name__, len(weights))
             self._unirl_load_weights(weights)
 
-    def _unirl_load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
-        """Forward weights to whichever loader the underlying worker exposes."""
+    def _unirl_target_module(self) -> torch.nn.Module:
+        """Return the loaded model/pipeline module owned by ``self.model_runner``."""
         runner = self.model_runner
-        if runner is None:
-            raise RuntimeError(f"{type(self).__name__}: model_runner is None.")
-        for attr in ("model", "pipeline"):
-            obj = getattr(runner, attr, None)
-            if obj is not None:
-                obj.load_weights(weights)
-                return
-        raise RuntimeError(f"{type(self).__name__}: model_runner has neither `model` nor `pipeline`.")
+        module = runner.model if hasattr(runner, "model") else runner.pipeline
+        if module is None:
+            raise RuntimeError(f"{type(self).__name__}: model_runner has no loaded model/pipeline.")
+        return module
+
+    def _unirl_load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        """Forward weights to the underlying worker's loaded module."""
+        self._unirl_target_module().load_weights(weights)
 
     def update_weights_from_tensor(
         self,
@@ -219,33 +219,7 @@ class BucketedIPCReceiveMixin:
             fingerprint_tensor,
         )
 
-        parameter_module = None
-        queue = [self]
-        seen: set[int] = set()
-        while queue:
-            obj = queue.pop(0)
-            if obj is None or id(obj) in seen:
-                continue
-            seen.add(id(obj))
-            named_parameters = getattr(obj, "named_parameters", None)
-            if callable(named_parameters) and next(iter(named_parameters()), None) is not None:
-                parameter_module = obj
-                break
-            queue.extend(
-                getattr(obj, attr, None)
-                for attr in (
-                    "worker",
-                    "model_runner",
-                    "runner",
-                    "pipeline",
-                    "transformer",
-                    "model",
-                    "bagel",
-                )
-            )
-        if parameter_module is None:
-            return {}
-
+        parameter_module = self._unirl_target_module()
         target = set(names) if names else None
         out: dict = {}
         for name, p in parameter_module.named_parameters():
@@ -264,10 +238,11 @@ class BucketedIPCReceiveMixin:
             fingerprint_tensor,
         )
 
-        manager = getattr(self, "lora_manager", None) or getattr(self.model_runner, "lora_manager", None)
+        manager = self.lora_manager if hasattr(self, "lora_manager") else self.model_runner.lora_manager
         if manager is None:
             return {}
-        manager = getattr(manager, "_adapter_manager", manager)
+        if hasattr(manager, "_adapter_manager"):
+            manager = manager._adapter_manager
         lora_model = manager._registered_adapters.get(adapter_id)
         if lora_model is None:
             return {}
@@ -277,8 +252,7 @@ class BucketedIPCReceiveMixin:
             if target is not None and layer_name not in target:
                 continue
             per_field: dict = {}
-            for field in ("lora_a", "lora_b"):
-                t = getattr(layer, field)
+            for field, t in (("lora_a", layer.lora_a), ("lora_b", layer.lora_b)):
                 if isinstance(t, torch.Tensor):
                     per_field[field] = fingerprint_tensor(t)
                 elif isinstance(t, (list, tuple)):

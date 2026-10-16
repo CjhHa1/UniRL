@@ -73,7 +73,7 @@ def _master_port_env(port: Optional[int]):
         yield
         return
     saved = os.environ.get("MASTER_PORT")
-    os.environ["MASTER_PORT"] = str(int(port))
+    os.environ["MASTER_PORT"] = str(port)
     logger.info("VLLM-Omni boot: MASTER_PORT=%s (was %s) for engine construction", port, saved)
     try:
         yield
@@ -338,10 +338,7 @@ class VLLMOmniBackend:
         # exact state the engine's transition latch exists to refuse.
         success_count = 0
 
-        def ack_field(ack: object, name: str, default: object = None) -> object:
-            return ack.get(name, default) if isinstance(ack, Mapping) else getattr(ack, name, default)
-
-        def validate_result(result: object) -> None:
+        def validate_result(result: Any) -> None:
             nonlocal success_count
             if result is None:
                 # Non-reporting worker ranks legitimately return None; at least
@@ -352,24 +349,23 @@ class VLLMOmniBackend:
                     validate_result(item)
                 return
 
-            status = ack_field(result, "status")
+            status = result.status
             if status is None:
                 raise RuntimeError(f"vllm-omni {action} returned no ACK status for stage {stage_id}: result={result!r}")
             if status != "SUCCESS":
-                error = ack_field(result, "error_msg", ack_field(result, "error"))
                 raise RuntimeError(
                     f"vllm-omni {action} failed on stage {stage_id}: worker rank "
-                    f"{ack_field(result, 'rank', '?')} answered status={status!r} "
-                    f"error={error!r}"
+                    f"{result.rank} answered status={status!r} "
+                    f"error={result.error_msg!r}"
                 )
-            ack_stage_id = ack_field(result, "stage_id")
-            ack_task_id = ack_field(result, "task_id")
-            if ack_stage_id is None or int(ack_stage_id) != stage_id:
-                raise RuntimeError(f"vllm-omni {action} ACK stage mismatch: expected {stage_id}, got {ack_stage_id!r}")
-            if ack_task_id is None or str(ack_task_id) != task_id:
+            if result.stage_id != stage_id:
+                raise RuntimeError(
+                    f"vllm-omni {action} ACK stage mismatch: expected {stage_id}, got {result.stage_id!r}"
+                )
+            if result.task_id != task_id:
                 raise RuntimeError(
                     f"vllm-omni {action} ACK task mismatch on stage {stage_id}: "
-                    f"expected {task_id!r}, got {ack_task_id!r}"
+                    f"expected {task_id!r}, got {result.task_id!r}"
                 )
             success_count += 1
 
@@ -657,16 +653,14 @@ def _group_by_request(flat_outputs: Sequence[Any], n: int) -> List[List[Any]]:
     """Group ``Omni.generate``'s flat output list into per-request lists."""
     grouped: List[List[Any]] = [[] for _ in range(n)]
     for out in flat_outputs:
+        rid = out.request_id
         try:
-            rid = out.request_id
             idx_part, suffix = rid.split("_", 1)
             if not suffix:
                 raise ValueError("empty request-id suffix")
             idx = int(idx_part)
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"vllm-omni returned an invalid request_id: {getattr(out, 'request_id', None)!r}"
-            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"vllm-omni returned an invalid request_id: {rid!r}") from exc
         if not 0 <= idx < n:
             raise RuntimeError(f"vllm-omni request_id index {idx} is outside the prompt batch of size {n}")
         grouped[idx].append(out)

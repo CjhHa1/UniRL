@@ -41,19 +41,16 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         deps = dict(device=device, rank=rank, model_config=model_config)
         self._env = config.env
         require(self._env is not None, "AgenticRolloutEngine requires an env (config.env)")
-        get_schemas = getattr(self._env, "tool_schemas", None)
-        if callable(get_schemas) and hasattr(config.inner, "chat_template_kwargs"):
-            raw_kwargs = config.inner.chat_template_kwargs
-            chat_template_kwargs = {} if raw_kwargs is None else dict(raw_kwargs)
-            chat_template_kwargs.setdefault("tools", get_schemas())
-            config.inner.chat_template_kwargs = chat_template_kwargs
+        raw_kwargs = config.inner.chat_template_kwargs
+        chat_template_kwargs = {} if raw_kwargs is None else dict(raw_kwargs)
+        chat_template_kwargs.setdefault("tools", self._env.tool_schemas())
+        config.inner.chat_template_kwargs = chat_template_kwargs
         self._inner: BaseRolloutEngine = config.inner.make_engine(strategy=strategy, **deps)
 
-        self._max_turns = int(config.max_turns)
-        env_max_turns = getattr(self._env, "max_turns", None)
+        self._max_turns = config.max_turns
         require(
-            env_max_turns is None or int(env_max_turns) == self._max_turns,
-            f"env.max_turns ({env_max_turns}) must equal config.max_turns ({self._max_turns})",
+            self._env.max_turns == self._max_turns,
+            f"env.max_turns ({self._env.max_turns}) must equal config.max_turns ({self._max_turns})",
         )
         self._stopping = False
         self._harness: RolloutHarness = ToolAgentHarness(
@@ -87,7 +84,7 @@ class AgenticRolloutEngine(BaseRolloutEngine):
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def set_stopping(self, stopping: bool = True) -> None:
-        self._stopping = bool(stopping)
+        self._stopping = stopping
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def shutdown(self) -> None:

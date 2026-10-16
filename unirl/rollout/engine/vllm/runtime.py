@@ -61,7 +61,7 @@ def _shutdown_llm(llm: Any) -> None:
 def _plain_outputs(outputs) -> List[Dict[str, Any]]:
     flattened: List[Dict[str, Any]] = []
     for request in outputs:
-        for completion in sorted(request.outputs, key=lambda item: int(item.index)):
+        for completion in sorted(request.outputs, key=lambda item: item.index):
             token_ids = [int(token) for token in completion.token_ids]
             if completion.logprobs is None:
                 logprobs: List[float] = []
@@ -140,7 +140,7 @@ def engine_process_main(
             **engine_kwargs,
         )
         worker_capabilities = llm.collective_rpc("unirl_weight_sync_capabilities")
-        model_type = str(llm.model_config.hf_config.model_type)
+        model_type = llm.model_config.hf_config.model_type
         _send_response(
             connection,
             startup_request,
@@ -188,12 +188,12 @@ def engine_process_main(
                         values = dict(payload["sampling_params"])
                         if "max_new_tokens" in values:
                             values["max_tokens"] = values.pop("max_new_tokens")
-                        values["logprobs"] = 0 if payload.get("return_logprob", True) else None
+                        values["logprobs"] = 0 if payload["return_logprob"] else None
                         params.append(SamplingParams(**values))
                     outputs = llm.generate(prompts, params, use_tqdm=False)
                     result = _plain_outputs(outputs)
                 elif command == "sleep":
-                    llm.sleep(level=int(message.get("level", 1)))
+                    llm.sleep(level=message["level"])
                     result = None
                 elif command == "wake_up":
                     llm.wake_up(tags=message.get("tags"))
@@ -218,7 +218,7 @@ def engine_process_main(
 
                     validate_publication_header(
                         header,
-                        tp_world_size=int(header.get("tp_world_size", 0)),
+                        tp_world_size=header.get("tp_world_size", 0),
                     )
                     llm.start_weight_update()
                     native_pending_header = dict(header)
@@ -249,7 +249,7 @@ def engine_process_main(
                     validate_worker_receipts(
                         header,
                         worker_receipts,
-                        fanout=int(header["tp_world_size"]),
+                        fanout=header["tp_world_size"],
                     )
                     weight_version = str(message.get("weight_version") or header["model_version"])
                     llm.update_weight_version(weight_version)
@@ -260,7 +260,7 @@ def engine_process_main(
                             raise RuntimeError("vLLM native IPC prefix-cache reset failed")
                     result = {
                         "status": "committed",
-                        "model_version": int(header["model_version"]),
+                        "model_version": header["model_version"],
                         "worker_receipts": worker_receipts,
                         "prefix_cache_reset": prefix_cache_reset,
                     }

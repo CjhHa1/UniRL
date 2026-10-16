@@ -23,7 +23,7 @@ class ToolAgentHarness:
     def __init__(self, *, env: "Environment", sampling: Any, max_turns: int) -> None:
         self.env = env
         self.sampling = sampling
-        self.max_turns = int(max_turns)
+        self.max_turns = max_turns
 
     def run(self, request: "Sample", context: HarnessContext) -> HarnessOutcome:
         sample = request

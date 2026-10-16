@@ -144,8 +144,7 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
         outs = super().forward(req, **kwargs)
 
         out = outs[0]
-        if isinstance(self.scheduler, FlowMatchSDEDiscreteScheduler):
-            drain_trajectory_into(out, self.scheduler)
+        drain_trajectory_into(out, self.scheduler)
         if self._captured_conditioning is not None:
             stamp_capture(out, "text_capture", self._captured_conditioning)
         finalize_output(out)

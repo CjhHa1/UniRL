@@ -248,7 +248,7 @@ def patch_dit_hi3_lora_weights() -> None:
         if lora_layer is None:
             fail("module is not registered in _lora_modules")
         base_layer = lora_layer.base_layer
-        output_sizes = [int(size) for size in (getattr(base_layer, "output_sizes", ()) or ())]
+        output_sizes = list(base_layer.output_sizes)
         if not output_sizes or int(lora_b.shape[0]) != sum(output_sizes):
             fail("base layer exposes no output_sizes matching lora_b's rows")
 
@@ -455,8 +455,8 @@ def patch_hv15_refiner_torch_linear_lora() -> None:
     from vllm.lora.layers import BaseLayerWithLoRA
     from vllm.lora.utils import replace_submodule
     from vllm_omni.diffusion.lora.utils import _match_target_modules
-    from vllm_omni.diffusion.models.hunyuan_video.hunyuan_video_15_transformer import (
-        HunyuanVideo15Transformer3DModel,
+    from vllm_omni.diffusion.models.hunyuan_video.pipeline_hunyuan_video_1_5 import (
+        HunyuanVideo15Pipeline,
     )
 
     original_replace = DiffusionLoRAManager._replace_layers_with_lora
@@ -466,9 +466,9 @@ def patch_hv15_refiner_torch_linear_lora() -> None:
     @wraps(original_replace)
     def _patched_replace(self, peft_helper):
         original_replace(self, peft_helper)
-        transformer = getattr(self.pipeline, "transformer", None)
-        if not isinstance(transformer, HunyuanVideo15Transformer3DModel):
+        if not isinstance(self.pipeline, HunyuanVideo15Pipeline):
             return
+        transformer = self.pipeline.transformer
 
         blocks = transformer.context_embedder.token_refiner.refiner_blocks
         prefix = "context_embedder.token_refiner.refiner_blocks"
